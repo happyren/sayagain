@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time GitHub setup for the Say Again repository.
 #
-# Usage:  OWNER=sayagain-dev REPO=sayagain ./scripts/github-setup.sh
+# Usage:  OWNER=happyren REPO=sayagain ./scripts/github-setup.sh
 #
 # Prerequisites:
 #   - gh CLI authenticated with a token that can administer the repository.
@@ -11,7 +11,7 @@
 #   - Run from the repository root after the first commit exists.
 set -euo pipefail
 
-OWNER="${OWNER:-sayagain-dev}"
+OWNER="${OWNER:-happyren}"
 REPO="${REPO:-sayagain}"
 
 echo "==> creating $OWNER/$REPO and pushing main"

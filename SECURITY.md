@@ -7,7 +7,7 @@ properties.
 ## Reporting a vulnerability
 
 Report privately through
-[GitHub Security Advisories](https://github.com/sayagain-dev/sayagain/security/advisories/new).
+[GitHub Security Advisories](https://github.com/happyren/sayagain/security/advisories/new).
 Do not open a public issue.
 
 You will get an acknowledgement within 3 business days and a status update at
