@@ -1,7 +1,7 @@
 {
   "name": "@sayagain/proxy",
-  "version": "0.0.0",
-  "description": "The commitment boundary for MCP tool calls: queue, hold, repair, dead-letter and replay.",
+  "version": "0.1.0",
+  "description": "Say Again: the commitment boundary for MCP tool calls. wrap, ledger, and (coming) hold, repair, dead-letter and replay.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -32,5 +32,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "bin": {
+    "sayagain": "./dist/cli.js"
   }
 }
