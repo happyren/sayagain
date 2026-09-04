@@ -34,7 +34,10 @@ takes pull requests, and the packages publish to npm.
    node scripts/release.mjs tag
    ```
 
-   It refuses if `main` is not at the release commit.
+   It tags `origin/main`'s head with the version in `package.json` there,
+   and refuses if that tag already exists. A feature pull request may carry
+   the version bump itself, as 0.1.0 and 0.2.0 did; tag its merge commit
+   the same way.
 5. The `Release` workflow runs on the tag: full check, build, `pnpm publish`
    for every public package with npm provenance, then a GitHub Release whose
    notes are that version's section of `CHANGELOG.md`.

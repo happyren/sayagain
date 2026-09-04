@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1.1                                      |
+| Status         | Draft v0.1.2                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -144,7 +144,7 @@ One of:
 | `repaired`        | Arguments were changed before forwarding; see 5.4. Result is the server's. |
 | `held`            | Not forwarded. Awaiting operator or policy approval. See 5.3.           |
 | `queued`          | Accepted, not yet forwarded (backpressure or scheduled retry).          |
-| `deduplicated`    | Not forwarded; result reproduced from an earlier call with the same key. |
+| `deduplicated`    | Not forwarded; result reproduced from an earlier call with the same key. The response also carries `sh.sayagain/duplicate-of` with the first call's receipt. |
 | `dead-lettered`   | Retries and repairs exhausted; stored for operator review.              |
 
 ### 5.3 `sh.sayagain/held` (object)
@@ -158,6 +158,11 @@ Present when status is `held`.
   "expiresAt": "2026-09-04T12:00:00Z"
 }
 ```
+
+When an operator rejects a held call, the boundary answers with `isError`
+true, `status` still `held`, and `held.decision` set to `"reject"`. When a
+held call is later approved and executed, its `executed` response carries
+`held` with `decision` `"approve"` so the agent can see it waited.
 
 ### 5.4 `sh.sayagain/repair` (object)
 
@@ -251,3 +256,4 @@ and the schema shim (section 7) are optional features.
 
 - v0.1 (2026-09-04): initial draft.
 - v0.1.1 (2026-09-04): added 5.5, the boundary announcement on `initialize`.
+- v0.1.2 (2026-09-05): `sh.sayagain/duplicate-of` on deduplicated responses; `held.decision` on rejected and later-approved calls.

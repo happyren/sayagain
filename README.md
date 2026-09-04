@@ -39,17 +39,27 @@ feedback.
 side-model repair, intent-drift detection, and hold-before-write with
 approval.
 
-## Getting started (planned surface, see ADR-0006)
+## Getting started
+
+Today, 0.2: one server, wrapped in place. The daemon, HTTP routes and
+`import --rewrite` arrive in 0.4 and 0.5 (see `docs/ROADMAP.md`).
 
 ```bash
-# Thirty seconds, one server, no configuration.
+# Wrap a stdio server. Its name, tools and errors are untouched; every result
+# gains a receipt; destructive tools are held until you approve.
 npx sayagain wrap -- npx -y @notionhq/notion-mcp-server
 
-# Adopt every server your host already has. Keys are kept, so the agent
-# still sees `notion` and `mcp__notion__*`; the host file is backed up.
-sayagain import --from claude-code --rewrite   # cursor | claude-desktop | vscode | <path>
-sayagain status
+# In your host config, keep the key and wrap the command:
+#   "notion": { "command": "npx", "args": ["sayagain", "wrap", "--", "npx", "-y", "@notionhq/notion-mcp-server"] }
+
+sayagain holds                 # what is waiting
+sayagain approve <receipt>     # or: sayagain reject <receipt>
+sayagain ledger --tail 20      # what happened
 ```
+
+Options: `--hold destructive|always|never`, `--hold-wait <ms>`,
+`--class <tool>=<class>`, `--dedupe-window <ms>`, `--no-announce`,
+`--ledger <path>`.
 
 ### What the agent sees
 
