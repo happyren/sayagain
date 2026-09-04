@@ -8,5 +8,6 @@
 | [0004](0004-hold-by-default.md) | Non-idempotent calls are held, never blindly re-executed | Accepted |
 | [0005](0005-argument-free-telemetry.md) | Shared telemetry never carries arguments or content | Accepted |
 | [0006](0006-onboarding-and-transparency.md) | One virtual server per upstream, one-command onboarding, identity preserved end to end | Accepted |
+| [0007](0007-observability-and-learning-loop.md) | Per-call spans, error signatures, mis-call ranking, and measured interventions that improve the next call | Accepted |
 
 Template: [0000-template.md](0000-template.md).
