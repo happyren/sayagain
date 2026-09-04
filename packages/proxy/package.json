@@ -1,0 +1,36 @@
+{
+  "name": "@sayagain/proxy",
+  "version": "0.0.0",
+  "description": "The commitment boundary for MCP tool calls: queue, hold, repair, dead-letter and replay.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@sayagain/sdk": "workspace:*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sayagain-dev/sayagain",
+    "directory": "packages/proxy"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

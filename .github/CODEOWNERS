@@ -1,0 +1,4 @@
+# Default owner for everything; spec and hold/replay paths always need the maintainer.
+*             @happyren
+/spec/        @happyren
+/docs/adr/    @happyren

@@ -1,0 +1,28 @@
+name: Feature request
+description: Propose a change to the proxy, the linter, the SDK or the spec.
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [proxy, lint, sdk, spec, docs]
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What goes wrong today, with a concrete example.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+  - type: dropdown
+    id: property
+    attributes:
+      label: Which of the four properties does this serve?
+      description: Every feature is one of these made concrete. If none, it probably belongs elsewhere.
+      options: [carries intent, acknowledged, held not retried, replayable, none of these]

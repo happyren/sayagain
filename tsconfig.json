@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/sdk" },
+    { "path": "packages/proxy" },
+    { "path": "packages/lint" }
+  ]
+}

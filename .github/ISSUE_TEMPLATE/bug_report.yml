@@ -1,0 +1,35 @@
+name: Bug report
+description: Something behaves differently from the docs or the spec.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "@sayagain/proxy 0.1.0, Node 22.4, MCP 2026-07-28"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Include the receipt id and status from `_meta` if you have them. Redact argument values.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      render: shell
+  - type: checkboxes
+    id: side-effects
+    attributes:
+      label: Side effects
+      options:
+        - label: A call executed that should have been held, or executed more than once. (Also report this privately via SECURITY.md.)

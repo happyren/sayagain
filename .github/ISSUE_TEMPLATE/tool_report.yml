@@ -1,0 +1,53 @@
+name: Tool definition report
+description: An MCP tool whose description or schema led a model to a wrong call. Feeds the linter and the whitepaper.
+labels: [tool-report]
+body:
+  - type: input
+    id: server
+    attributes:
+      label: Server
+      placeholder: "github-mcp-server 0.14 (https://...)"
+    validations:
+      required: true
+  - type: input
+    id: tool
+    attributes:
+      label: Tool name
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: What was missing
+      options:
+        - Tool scope (when to use it, when not to)
+        - Parameter constraints, formats or enums
+        - Cross-tool dependency or ordering
+        - Output description
+        - Cross-parameter dependency
+        - Naming or annotations
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What the model did
+      description: Wrong tool, wrong value, wrong order. Redact argument values.
+    validations:
+      required: true
+  - type: textarea
+    id: excerpt
+    attributes:
+      label: Description or schema excerpt
+      render: json
+  - type: textarea
+    id: fix
+    attributes:
+      label: What wording would have prevented it
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Content
+      options:
+        - label: This report contains no secrets, personal data or full argument payloads.
+          required: true
