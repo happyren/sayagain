@@ -31,12 +31,36 @@ properties:
 4. **Replayable** by an operator, with the original intent attached.
 
 **Layer 0, zero-touch (any MCP client):** queue, bounded backoff retry,
-dead-letter queue on Postgres, deterministic argument coercion, and error
-rewriting into model-actionable feedback.
+dead-letter queue (SQLite by default, Postgres for shared deployments),
+deterministic argument coercion, and error rewriting into model-actionable
+feedback.
 
 **Layer 1, opt-in:** intent capture, intent verification and reroute, bounded
 side-model repair, intent-drift detection, and hold-before-write with
 approval.
+
+## Getting started (planned surface, see ADR-0006)
+
+```bash
+# Thirty seconds, one server, no configuration.
+npx sayagain wrap -- npx -y @notionhq/notion-mcp-server
+
+# Adopt every server your host already has. Keys are kept, so the agent
+# still sees `notion` and `mcp__notion__*`; the host file is backed up.
+sayagain import --from claude-code --rewrite   # cursor | claude-desktop | vscode | <path>
+sayagain status
+```
+
+### What the agent sees
+
+| Surface | With Say Again in the path |
+| ------- | -------------------------- |
+| Server name and key | Unchanged |
+| Tool names, descriptions, schemas | Unchanged (optional intent property on write tools, off by default) |
+| Resources, prompts, notifications | Relayed |
+| Every result | Plus `_meta` receipt and status |
+| Held write | A text block saying it is held, with the receipt |
+| `initialize` | Plus `_meta["sh.sayagain/boundary"]` and one sentence of instructions |
 
 ## Prowords
 

@@ -7,5 +7,6 @@
 | [0003](0003-intent-transport.md) | Intent travels in `_meta`, captured by a schema shim for zero-touch hosts, anchored by out-of-band task intent | Accepted |
 | [0004](0004-hold-by-default.md) | Non-idempotent calls are held, never blindly re-executed | Accepted |
 | [0005](0005-argument-free-telemetry.md) | Shared telemetry never carries arguments or content | Accepted |
+| [0006](0006-onboarding-and-transparency.md) | One virtual server per upstream, one-command onboarding, identity preserved end to end | Accepted |
 
 Template: [0000-template.md](0000-template.md).

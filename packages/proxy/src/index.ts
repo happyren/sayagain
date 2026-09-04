@@ -12,7 +12,7 @@ export const PROXY_VERSION = "0.0.0";
 export interface ProxyOptions {
   /** Upstream MCP server: a URL for HTTP transport or a command for stdio. */
   upstream: string | { command: string; args?: string[] };
-  /** Postgres connection string for the ledger and dead-letter queue. */
+  /** Ledger and dead-letter queue: a sqlite:// path (default) or a postgres:// URL. */
   ledger?: string;
   /** Operator overrides for tool classification, keyed by tool name. */
   toolClasses?: Record<string, ToolClass>;
