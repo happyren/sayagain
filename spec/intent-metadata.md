@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1.2                                      |
+| Status         | Draft v0.1.3                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -145,7 +145,7 @@ One of:
 | `held`            | Not forwarded. Awaiting operator or policy approval. See 5.3.           |
 | `queued`          | Accepted, not yet forwarded (backpressure or scheduled retry).          |
 | `deduplicated`    | Not forwarded; result reproduced from an earlier call with the same key. The response also carries `sh.sayagain/duplicate-of` with the first call's receipt. |
-| `dead-lettered`   | Retries and repairs exhausted; stored for operator review.              |
+| `dead-lettered`   | Retries and repairs exhausted; stored for operator review. The upstream's final error is returned as-is, with one guidance sentence appended to `content`. |
 
 ### 5.3 `sh.sayagain/held` (object)
 
@@ -163,6 +163,13 @@ When an operator rejects a held call, the boundary answers with `isError`
 true, `status` still `held`, and `held.decision` set to `"reject"`. When a
 held call is later approved and executed, its `executed` response carries
 `held` with `decision` `"approve"` so the agent can see it waited.
+
+### 5.4a `sh.sayagain/replay-of` (string)
+
+Present on the result of an operator replay: the receipt of the
+dead-lettered call it re-executed. Replays are boundary-initiated requests;
+their results reach the ledger and the operator, never the model that sent
+the original call.
 
 ### 5.4 `sh.sayagain/repair` (object)
 
@@ -257,3 +264,4 @@ and the schema shim (section 7) are optional features.
 - v0.1 (2026-09-04): initial draft.
 - v0.1.1 (2026-09-04): added 5.5, the boundary announcement on `initialize`.
 - v0.1.2 (2026-09-05): `sh.sayagain/duplicate-of` on deduplicated responses; `held.decision` on rejected and later-approved calls.
+- v0.1.3 (2026-09-05): `sh.sayagain/replay-of`; guidance sentence appended to failed results; dead-lettered semantics clarified.

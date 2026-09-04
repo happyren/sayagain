@@ -41,7 +41,7 @@ approval.
 
 ## Getting started
 
-Today, 0.2: one server, wrapped in place. The daemon, HTTP routes and
+Today, 0.3: one server, wrapped in place. The daemon, HTTP routes and
 `import --rewrite` arrive in 0.4 and 0.5 (see `docs/ROADMAP.md`).
 
 ```bash
@@ -54,12 +54,15 @@ npx sayagain wrap -- npx -y @notionhq/notion-mcp-server
 
 sayagain holds                 # what is waiting
 sayagain approve <receipt>     # or: sayagain reject <receipt>
+sayagain deadletters           # what gave up after retry or repair
+sayagain replay <receipt>      # re-send it, optionally --args '{...}'
 sayagain ledger --tail 20      # what happened
 ```
 
 Options: `--hold destructive|always|never`, `--hold-wait <ms>`,
-`--class <tool>=<class>`, `--dedupe-window <ms>`, `--no-announce`,
-`--ledger <path>`.
+`--class <tool>=<class>`, `--dedupe-window <ms>`, `--retry <n>`,
+`--no-repair`, `--no-rewrite-errors`, `--no-announce`, `--ledger <path>`,
+`--deadletter <path>`.
 
 ### What the agent sees
 

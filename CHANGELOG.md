@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-05
+
+### Added
+
+- Bounded retry with exponential backoff for retryable failures on
+  read-only and idempotent tools (`--retry <n>`, default 3 attempts).
+- Hold-on-unknown-outcome: a write or destructive call that fails with a
+  retryable error is held instead of retried; approve re-sends it once.
+- Deterministic argument repair from the tool's own `inputSchema` on
+  coercible failures: type coercion, key rename by normalised name,
+  defaults for missing required properties. One repair per call, three per
+  task; recorded in `sh.sayagain/repair` and, paths only, in the ledger.
+- Dead-letter: a failure after a retry or repair is `dead-lettered`, kept
+  with its intent in `~/.sayagain/deadletter.jsonl`, listed by
+  `sayagain deadletters`, and re-sent by `sayagain replay <receipt>
+  [--args]` through the running boundary; the result carries
+  `sh.sayagain/replay-of`.
+- Error rewriting: one actionable sentence appended to every failed
+  result, per error class, naming the receipt (`--no-rewrite-errors`).
+- Ledger rows carry `errorClass`, `attempts`, `repairs` and `replayOf`.
+
 ## [0.2.0] - 2026-09-05
 
 ### Added

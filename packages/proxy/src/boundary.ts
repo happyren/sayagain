@@ -5,9 +5,11 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { META, type Status, type ToolClass } from "@sayagain/sdk";
+import { classifyError, type ErrorClass, guidanceFor } from "./errors.js";
 import type { JsonRpcId, JsonRpcMessage, JsonRpcRequest } from "./jsonrpc.js";
 import { isRequest, isResponse } from "./jsonrpc.js";
 import type { LedgerRow } from "./ledger.js";
+import type { RepairChange } from "./repair.js";
 import { resultText, signatureOf } from "./signature.js";
 
 export const BOUNDARY_NAME = "sayagain";
@@ -26,9 +28,12 @@ export interface PendingCall {
   idempotencyKey?: string;
   startedAt: number;
   requestBytes: number;
-  /** The original request line, kept so a held call can be forwarded later unchanged. */
+  /** The request line as it will be (or was) sent upstream; updated by repair. */
   rawLine: string;
   held?: { reason: string; decision?: "approve" | "reject"; waitedMs?: number };
+  attempts: number;
+  repairs: RepairChange[];
+  replayOf?: string;
 }
 
 export interface BoundaryState {
@@ -47,6 +52,7 @@ export interface BoundaryOptions {
   announce: boolean;
   shim: boolean;
   hold?: string;
+  rewriteErrors?: boolean;
 }
 
 export const ANNOUNCEMENT =
@@ -90,6 +96,13 @@ export function ownToolsListRequest(state: BoundaryState): JsonRpcRequest {
   return { jsonrpc: "2.0", id, method: "tools/list", params: {} };
 }
 
+/** An id for a request the boundary sends on its own behalf (replay). */
+export function ownId(state: BoundaryState, kind: string): string {
+  const id = `sayagain:${kind}:${++state.ownCounter}`;
+  state.ownIds.add(keyOf(id));
+  return id;
+}
+
 /** Build the boundary's record of a tools/call request. Does not register it. */
 export function describeCall(
   msg: JsonRpcRequest,
@@ -112,6 +125,8 @@ export function describeCall(
     startedAt: now,
     requestBytes: bytes,
     rawLine,
+    attempts: 1,
+    repairs: [],
   };
   if (typeof meta[META.intent] === "string") call.intent = meta[META.intent] as string;
   if (typeof meta[META.task] === "string") call.task = meta[META.task] as string;
@@ -142,6 +157,48 @@ export function registerPending(state: BoundaryState, call: PendingCall): void {
   state.pending.set(keyOf(call.id), call);
 }
 
+/** Look up the pending call for a response without consuming it. */
+export function pendingFor(msg: JsonRpcMessage, state: BoundaryState): PendingCall | undefined {
+  if (!isResponse(msg) || msg.id === null) return undefined;
+  return state.pending.get(keyOf(msg.id));
+}
+
+/** What a failed response tells the boundary, before it decides to retry, repair, hold or finish. */
+export interface Failure {
+  errorClass: ErrorClass;
+  signature: string;
+  text: string;
+  rpcCode?: number;
+}
+
+export function failureOf(msg: JsonRpcMessage): Failure | null {
+  if (!isResponse(msg)) return null;
+  if (msg.error) {
+    return {
+      errorClass: classifyError(msg.error.message, msg.error.code),
+      signature: signatureOf(msg.error.message),
+      text: msg.error.message,
+      rpcCode: msg.error.code,
+    };
+  }
+  if (
+    typeof msg.result === "object" &&
+    msg.result !== null &&
+    (msg.result as { isError?: unknown }).isError === true
+  ) {
+    const text = resultText(msg.result);
+    return { errorClass: classifyError(text), signature: signatureOf(text), text };
+  }
+  return null;
+}
+
+/** A copy of the request line with new arguments (and optionally a new id), for repair and replay. */
+export function withArguments(rawLine: string, args: unknown, id?: JsonRpcId): string {
+  const msg = JSON.parse(rawLine) as JsonRpcRequest;
+  const params = { ...(msg.params ?? {}), arguments: args };
+  return JSON.stringify({ ...msg, ...(id !== undefined ? { id } : {}), params });
+}
+
 export function baseRow(
   call: PendingCall,
   upstream: string,
@@ -167,6 +224,9 @@ export function baseRow(
   };
   if (call.task !== undefined) row.task = call.task;
   if (call.held) row.held = { ...call.held };
+  if (call.attempts > 1) row.attempts = call.attempts;
+  if (call.repairs.length) row.repairs = call.repairs.map((c) => ({ path: c.path, rule: c.rule }));
+  if (call.replayOf !== undefined) row.replayOf = call.replayOf;
   return row;
 }
 
@@ -180,12 +240,15 @@ export interface Rewrite {
   tools?: unknown;
   /** Set when a tools/call succeeded, so the caller can remember it for dedupe. */
   remember?: { call: PendingCall; result: unknown };
+  /** The call this response completed, when it was a tools/call. */
+  call?: PendingCall;
 }
 
 /**
  * Rewrite a server-to-client message. Only two shapes change: a tools/call
- * response gains receipt and status in result._meta; an initialize response
- * gains the boundary announcement. Everything else passes through untouched.
+ * response gains receipt and status in result._meta (plus guidance on a
+ * failure); an initialize response gains the boundary announcement.
+ * Everything else passes through untouched.
  */
 export function rewriteServerMessage(
   msg: JsonRpcMessage,
@@ -238,34 +301,64 @@ export function rewriteServerMessage(
   const call = state.pending.get(key);
   if (!call) return { message: msg, changed: false };
   state.pending.delete(key);
+  const own = state.ownIds.delete(key);
 
-  const row = baseRow(call, state.upstreamName, "executed", bytes, now);
+  // A failure after the boundary already tried something is exhausted: dead-lettered.
+  const tried = call.attempts > 1 || call.repairs.length > 0;
+  const failure = failureOf(msg);
+  const status: Status =
+    failure && tried && call.replayOf === undefined ? "dead-lettered" : "executed";
+  const row = baseRow(call, state.upstreamName, status, bytes, now);
+  const swallow = own ? { swallow: true } : {};
 
   if (msg.error) {
     row.isError = true;
     row.errorCode = msg.error.code;
     row.errorSignature = signatureOf(msg.error.message);
+    if (failure) row.errorClass = failure.errorClass;
     // A JSON-RPC error has no result to carry _meta; the ledger keeps the receipt.
-    return { message: msg, changed: false, row };
+    return { message: msg, changed: false, row, call, ...swallow };
   }
 
   if (typeof msg.result !== "object" || msg.result === null)
-    return { message: msg, changed: false, row };
+    return { message: msg, changed: false, row, call, ...swallow };
   const result = { ...(msg.result as Record<string, unknown>) };
-  if (result.isError === true) {
+  if (failure) {
     row.isError = true;
-    row.errorSignature = signatureOf(resultText(result));
+    row.errorSignature = failure.signature;
+    row.errorClass = failure.errorClass;
+    if (opts.rewriteErrors ?? true) {
+      const content = Array.isArray(result.content) ? [...result.content] : [];
+      content.push({
+        type: "text",
+        text: guidanceFor({
+          errorClass: failure.errorClass,
+          attempts: call.attempts,
+          repaired: call.repairs.length > 0,
+          receipt: call.receipt,
+          status: status === "dead-lettered" ? "dead-lettered" : "executed",
+          tool: call.tool,
+        }),
+      });
+      result.content = content;
+    }
   }
   const meta = { ...((result._meta as Record<string, unknown> | undefined) ?? {}) };
   meta[META.receipt] = call.receipt;
-  meta[META.status] = "executed";
+  meta[META.status] = status;
   if (call.held)
     meta[META.held] = { reason: call.held.reason, decision: call.held.decision ?? null };
+  if (call.repairs.length)
+    meta[META.repair] = {
+      kind: call.repairs.every((c) => c.rule === "rename") ? "rename" : "coerce",
+      changes: call.repairs,
+    };
+  if (call.replayOf !== undefined) meta[META.replayOf] = call.replayOf;
   result._meta = meta;
   const message = { ...msg, result };
   return row.isError
-    ? { message, changed: true, row }
-    : { message, changed: true, row, remember: { call, result } };
+    ? { message, changed: true, row, call, ...swallow }
+    : { message, changed: true, row, call, remember: { call, result }, ...swallow };
 }
 
 /** The response for a duplicate: the first result again, marked so the agent can tell. */

@@ -15,10 +15,16 @@ export function socketPathFor(pid: number): string {
   return platform() === "win32" ? `\\\\.\\pipe\\sayagain-${pid}` : join(runDir(), `${pid}.sock`);
 }
 
-export type ControlRequest = { op: "list" } | { op: "decide"; receipt: string; decision: Decision };
+export type ControlRequest =
+  | { op: "list" }
+  | { op: "decide"; receipt: string; decision: Decision }
+  | { op: "deadletters" }
+  | { op: "replay"; receipt: string; arguments?: unknown };
 export type ControlResponse =
   | { ok: true; holds: HoldSummary[] }
   | { ok: true; decided: boolean; receipt: string }
+  | { ok: true; deadletters: DeadLetterSummary[] }
+  | { ok: true; replayed: ReplayOutcome }
   | { ok: false; error: string };
 
 export interface HoldSummary {
@@ -31,6 +37,31 @@ export interface HoldSummary {
   createdAt: string;
   expiresAt: string;
   pid: number;
+}
+
+export interface DeadLetterSummary {
+  receipt: string;
+  ts: string;
+  upstream: string;
+  tool: string;
+  intent?: string;
+  errorClass: string;
+  errorSignature: string;
+  attempts: number;
+  repairs: number;
+  pid: number;
+}
+
+export interface ReplayOutcome {
+  receipt: string;
+  replayOf: string;
+  isError: boolean;
+  text: string;
+}
+
+export interface ControlHandlers {
+  deadletters?: () => DeadLetterSummary[];
+  replay?: (receipt: string, args: unknown) => Promise<ReplayOutcome | null>;
 }
 
 const summarize = (h: Hold, pid: number): HoldSummary => {
@@ -48,7 +79,11 @@ const summarize = (h: Hold, pid: number): HoldSummary => {
   return s;
 };
 
-export function startControlServer(queue: HoldQueue, path = socketPathFor(process.pid)): Server {
+export function startControlServer(
+  queue: HoldQueue,
+  path = socketPathFor(process.pid),
+  handlers: ControlHandlers = {},
+): Server {
   if (platform() !== "win32") {
     mkdirSync(runDir(), { recursive: true });
     if (existsSync(path)) rmSync(path);
@@ -61,22 +96,36 @@ export function startControlServer(queue: HoldQueue, path = socketPathFor(proces
       if (nl < 0) return;
       const line = buf.slice(0, nl);
       buf = buf.slice(nl + 1);
-      let response: ControlResponse;
-      try {
+      const handle = async (): Promise<ControlResponse> => {
         const req = JSON.parse(line) as ControlRequest;
         if (req.op === "list")
-          response = { ok: true, holds: queue.list().map((h) => summarize(h, process.pid)) };
-        else if (req.op === "decide")
-          response = {
+          return { ok: true, holds: queue.list().map((h) => summarize(h, process.pid)) };
+        if (req.op === "decide")
+          return {
             ok: true,
             decided: queue.decide(req.receipt, req.decision),
             receipt: req.receipt,
           };
-        else response = { ok: false, error: "unknown op" };
-      } catch (err) {
-        response = { ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
-      socket.end(`${JSON.stringify(response)}\n`);
+        if (req.op === "deadletters")
+          return { ok: true, deadletters: handlers.deadletters ? handlers.deadletters() : [] };
+        if (req.op === "replay") {
+          if (!handlers.replay)
+            return { ok: false, error: "replay not supported by this boundary" };
+          const outcome = await handlers.replay(req.receipt, req.arguments);
+          return outcome
+            ? { ok: true, replayed: outcome }
+            : { ok: false, error: `no dead letter ${req.receipt} here` };
+        }
+        return { ok: false, error: "unknown op" };
+      };
+      handle()
+        .catch(
+          (err: unknown): ControlResponse => ({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        )
+        .then((response) => socket.end(`${JSON.stringify(response)}\n`));
     });
   });
   server.listen(path);
@@ -148,6 +197,34 @@ export async function listAllHolds(): Promise<HoldSummary[]> {
     }
   }
   return holds.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+export async function listAllDeadLetters(): Promise<DeadLetterSummary[]> {
+  const out: DeadLetterSummary[] = [];
+  for (const p of liveSockets()) {
+    try {
+      const r = await ask(p, { op: "deadletters" });
+      if (r.ok && "deadletters" in r) out.push(...r.deadletters);
+    } catch {
+      // a silent boundary has nothing to show
+    }
+  }
+  return out;
+}
+
+export async function replayEverywhere(
+  receipt: string,
+  args: unknown,
+): Promise<ReplayOutcome | null> {
+  for (const p of liveSockets()) {
+    try {
+      const r = await ask(p, { op: "replay", receipt, arguments: args }, 30_000);
+      if (r.ok && "replayed" in r) return r.replayed;
+    } catch {
+      // try the next boundary
+    }
+  }
+  return null;
 }
 
 export async function decideEverywhere(receipt: string, decision: Decision): Promise<boolean> {

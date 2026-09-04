@@ -198,3 +198,126 @@ describe("classifier warm-up", () => {
     });
   });
 });
+
+const text0 = (m: Record<string, unknown>) =>
+  (m.result as { content: { text: string }[] }).content[0]?.text ?? "";
+const texts = (m: Record<string, unknown>) =>
+  (m.result as { content: { text: string }[] }).content.map((c) => c.text);
+
+describe("retry, repair, dead-letter, replay", () => {
+  it("retries a retryable failure on a read-only tool with backoff and records attempts", async () => {
+    const h = harness({ retryAttempts: 3, retryBaseMs: 10 });
+    await h.handshake();
+    h.call(1, "flaky", { failTimes: 2 });
+    const ok = await h.waitFor(1);
+    expect(meta(ok)["sh.sayagain/status"]).toBe("executed");
+    expect(text0(ok)).toContain('"call":3');
+    await h.finish();
+    expect(h.ledger.rows[0]).toMatchObject({
+      tool: "flaky",
+      attempts: 3,
+      isError: false,
+      status: "executed",
+    });
+  });
+
+  it("dead-letters after the retry budget, appends guidance, and replays on request", async () => {
+    const h = harness({ retryAttempts: 2, retryBaseMs: 10 });
+    await h.handshake();
+    h.call(1, "flaky", { failTimes: 2 }, { "sh.sayagain/intent": "read the flaky thing" });
+    const dead = await h.waitFor(1);
+    expect(meta(dead)["sh.sayagain/status"]).toBe("dead-lettered");
+    expect(texts(dead)[1]).toContain("sayagain replay");
+    const receipt = String(meta(dead)["sh.sayagain/receipt"]);
+    expect(h.wrapped.deadLetters.get(receipt)).toMatchObject({
+      tool: "flaky",
+      intent: "read the flaky thing",
+      attempts: 2,
+      errorClass: "retryable",
+    });
+    const outcome = await h.wrapped.replay(receipt);
+    expect(outcome).toMatchObject({ replayOf: receipt, isError: false });
+    await h.finish();
+    expect(h.ledger.rows.map((r) => [r.status, r.replayOf ?? null])).toEqual([
+      ["dead-lettered", null],
+      ["executed", receipt],
+    ]);
+  });
+
+  it("repairs a coercible failure from the schema and records the change", async () => {
+    const h = harness();
+    await h.handshake();
+    h.call(1, "strict", { limit: "10", tags: ["a", "b"] });
+    const ok = await h.waitFor(1);
+    expect(meta(ok)["sh.sayagain/status"]).toBe("executed");
+    expect(meta(ok)["sh.sayagain/repair"]).toMatchObject({
+      kind: "coerce",
+      changes: [
+        { path: "/limit", rule: "string-to-number", to: 10 },
+        { path: "/tags", rule: "array-to-comma-string", to: "a,b" },
+      ],
+    });
+    expect(text0(ok)).toContain('"limit":10');
+    await h.finish();
+    expect(h.ledger.rows[0]).toMatchObject({
+      attempts: 2,
+      repairs: [
+        { path: "/limit", rule: "string-to-number" },
+        { path: "/tags", rule: "array-to-comma-string" },
+      ],
+      isError: false,
+    });
+  });
+
+  it("dead-letters when the repair does not help, and finishes plainly when nothing can be repaired", async () => {
+    const h = harness();
+    await h.handshake();
+    h.call(1, "strict", { limit: "abc" });
+    const plain = await h.waitFor(1);
+    expect(meta(plain)["sh.sayagain/status"]).toBe("executed");
+    expect(texts(plain)[1]).toContain("Say Again:");
+    h.call(2, "strict", { limit: "10", tags: { nested: true } });
+    const dead = await h.waitFor(2);
+    expect(meta(dead)["sh.sayagain/status"]).toBe("dead-lettered");
+    await h.finish();
+    expect(h.ledger.rows.map((r) => r.status)).toEqual(["executed", "dead-lettered"]);
+    expect(h.wrapped.deadLetters.list()).toHaveLength(1);
+  });
+
+  it("holds a write whose outcome is unknown instead of retrying it, and executes once on approve", async () => {
+    const h = harness({ holdWaitMs: 2000 });
+    await h.handshake();
+    h.call(1, "write_flaky", { failTimes: 1, title: "x" });
+    await new Promise((r) => setTimeout(r, 100));
+    const held = h.wrapped.holds.list();
+    expect(held[0]).toMatchObject({ tool: "write_flaky", toolClass: "write" });
+    expect(held[0]?.reason).toContain("unknown outcome");
+    h.wrapped.holds.decide(held[0]?.receipt ?? "", "approve");
+    const ok = await h.waitFor(1);
+    expect(meta(ok)["sh.sayagain/status"]).toBe("executed");
+    expect(meta(ok)["sh.sayagain/held"]).toMatchObject({ decision: "approve" });
+    await h.finish();
+    expect(h.ledger.rows[0]).toMatchObject({
+      status: "executed",
+      attempts: 2,
+      held: { decision: "approve" },
+    });
+  });
+
+  it("appends guidance to a semantic failure without retrying it", async () => {
+    const h = harness();
+    await h.handshake();
+    h.call(1, "missing", {});
+    const m = await h.waitFor(1);
+    expect(meta(m)["sh.sayagain/status"]).toBe("executed");
+    expect(texts(m)).toHaveLength(2);
+    expect(texts(m)[1]).toContain("read-only tool");
+    await h.finish();
+    expect(h.ledger.rows[0]).toMatchObject({
+      isError: true,
+      errorClass: "semantic",
+      status: "executed",
+    });
+    expect(h.ledger.rows[0]?.attempts).toBeUndefined();
+  });
+});

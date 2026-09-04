@@ -12,6 +12,16 @@ export interface PolicyOptions {
   classes: Record<string, ToolClass>;
   /** Retention for idempotency keys and write fingerprints. */
   dedupeWindowMs: number;
+  /** Attempts for retryable failures on read-only and idempotent tools (1 = no retry). */
+  retryAttempts: number;
+  /** First backoff; doubles per attempt. */
+  retryBaseMs: number;
+  /** Deterministic argument repair from inputSchema on coercible failures. */
+  repair: boolean;
+  /** Repairs allowed per task before dead-lettering. */
+  repairsPerTask: number;
+  /** Append one actionable sentence to final failures. */
+  rewriteErrors: boolean;
 }
 
 export const DEFAULT_POLICY: PolicyOptions = {
@@ -19,10 +29,16 @@ export const DEFAULT_POLICY: PolicyOptions = {
   holdWaitMs: 120_000,
   classes: {},
   dedupeWindowMs: 30_000,
+  retryAttempts: 3,
+  retryBaseMs: 250,
+  repair: true,
+  repairsPerTask: 3,
+  rewriteErrors: true,
 };
 
 export class ToolClassifier {
   private readonly annotations = new Map<string, ToolAnnotations>();
+  private readonly schemas = new Map<string, unknown>();
   private resolveReady: (() => void) | undefined;
   /** Resolves the first time annotations are learned. Callers wait on it with a timeout. */
   readonly ready: Promise<void>;
@@ -38,8 +54,13 @@ export class ToolClassifier {
     let n = 0;
     for (const t of tools) {
       if (typeof t !== "object" || t === null) continue;
-      const { name, annotations } = t as { name?: unknown; annotations?: unknown };
+      const { name, annotations, inputSchema } = t as {
+        name?: unknown;
+        annotations?: unknown;
+        inputSchema?: unknown;
+      };
       if (typeof name !== "string") continue;
+      if (inputSchema !== undefined) this.schemas.set(name, inputSchema);
       this.annotations.set(
         name,
         typeof annotations === "object" && annotations !== null
@@ -67,6 +88,10 @@ export class ToolClassifier {
 
   known(): string[] {
     return [...this.annotations.keys()];
+  }
+
+  schemaOf(tool: string): unknown {
+    return this.schemas.get(tool);
   }
 }
 

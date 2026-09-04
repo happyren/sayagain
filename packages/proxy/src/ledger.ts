@@ -19,11 +19,16 @@ export interface LedgerRow {
   isError: boolean;
   errorCode?: number;
   errorSignature?: string;
+  errorClass?: string;
   latencyMs: number;
   requestBytes: number;
   responseBytes: number;
   held?: { reason: string; decision?: "approve" | "reject"; waitedMs?: number };
   duplicateOf?: string;
+  attempts?: number;
+  /** Repair rules applied, paths only, never values. */
+  repairs?: { path: string; rule: string }[];
+  replayOf?: string;
 }
 
 export interface Ledger {
