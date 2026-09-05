@@ -30,7 +30,7 @@ against this rule and the two changes it requires.
 | 0.5 | Onboarding: `import --rewrite`, launcher, `eject` | Phase 3, done early |
 | 0.6 | Ledger analysis: `tools`, `errors`, `report`, OTLP spans, `lint` | Phase 0 and 1 groundwork (the same signatures, recovery paths and rankings the index scores from) |
 | 0.7 | Operator page served by the daemon | Phase 3 ("replay UI"), done early |
-| 0.8 | Learning loop: learned coercions, hints, lift, revert | Phase 4 territory, shipped early; pre-send coercion is the one item the scope guard sends back (ADR-0009) |
+| 0.8 | Learning loop: learned coercions, hints, lift, revert | Phase 4 territory, shipped early; pre-send coercion becomes opt-in in 0.9 (ADR-0009) |
 
 Having the Layer 0 proxy before the corpus is not a loss: it is what makes
 the collectors in Phase 2 cheap, and the hosted tier in Phase 3 is a
@@ -50,6 +50,8 @@ Deliverables
   screenshot-ready HTML page. The `scripts/baseline` analyzer is folded in.
 - Opt-in shape contribution: `sayagain contribute` builds the payload in
   ADR-0009, shows it in full, asks, sends. Nothing leaves without a `y`.
+  The endpoint and its owner are decided later (ADR-0009, decision 3);
+  until then the command writes the document locally and stops.
 - The linter runs over the full public registry (`sayagain lint --registry`
   or a script) and produces the M16 distribution with the rule-set version.
 - Baseline on our own agents: this repository's history, quantbot, the

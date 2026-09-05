@@ -1,6 +1,6 @@
 # ADR-0009: The Tool Reliability Index, the contributed-shape schema, and the scope guard
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-05
 
 ## Context
@@ -139,6 +139,20 @@ Two more places where wording, not code, drifts from the pitch:
   retention today; a default of thirty days with `--retain <days>` is a
   Phase 3 item, and retention beyond it is a paid gate rather than a
   removed feature.
+
+## Decisions taken on 2026-09-05
+
+1. Pre-send learned coercion is opt-in per intervention. Interventions carry
+   a mode: `advise` (the default: the hint in the description, the repair
+   after a failure) or `apply` (also before a read-only call leaves), set
+   by the operator with `sayagain learn --apply <id>` or from the page.
+2. The north star reorders: the unacknowledged-write rate (M9) leads, the
+   failure tax follows, and the intent-versus-action rate joins the first
+   when Layer 1 exists. `docs/measurement.md` carries the dated amendment.
+3. The index endpoint, its hosting and the owner of the data policy are
+   postponed. `sayagain contribute` ships writing the document locally and
+   sending only to an endpoint given with `--endpoint` or in `config.json`;
+   until one exists it says so and stops after the file.
 
 ## Alternatives considered
 
