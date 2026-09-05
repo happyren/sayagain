@@ -42,6 +42,7 @@ import { OtlpExporter, otlpHeadersFromEnv, resolveOtlpEndpoint } from "./otlp.js
 import { parseClassOverrides } from "./policy.js";
 import {
   addServer,
+  daemonBaseUrl,
   isValidServerName,
   loadOrCreateToken,
   loadRegistry,
@@ -52,7 +53,7 @@ import {
   saveRegistry,
   tokenPath,
 } from "./registry.js";
-import { daemonHealthy, runStdioShim, serveArgv, waitForDaemon } from "./shim.js";
+import { daemonHealthy, ensureDaemon, runStdioShim, serveArgv, waitForDaemon } from "./shim.js";
 import { defaultSqlitePath, openStores, type StoreKind } from "./stores.js";
 import { PROXY_VERSION } from "./version.js";
 import { wrap } from "./wrap.js";
@@ -80,6 +81,8 @@ const USAGE = `sayagain ${PROXY_VERSION}
       Register an upstream (stdio command, or --url for Streamable HTTP). --env K alone stores "\${K}",
       resolved from the daemon's environment at spawn; so does a \${VAR} inside --header or --env values.
   sayagain remove <name> | sayagain list | sayagain status | sayagain stop
+  sayagain ui [--no-open]
+      Open the operator page (holds inbox, servers, dead letters, ledger, tools, errors, report); starts the daemon if needed.
   sayagain hosts [--project] [--json]
       Which MCP hosts are configured on this machine (Claude Code, Cursor, Claude Desktop, VS Code) and what they hold.
   sayagain import --host <id>|all [--rewrite] [--dry-run] [--force] [--project] [--file <path>] [--transport stdio|http] [--command <path>] [--no-start]
@@ -530,7 +533,7 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
     process.stdout.write(
-      `daemon pid ${s.info.pid} at http://${s.info.host}:${s.info.port} since ${s.info.startedAt} (version ${s.info.version}; spans ${typeof s.health.otlp === "string" ? `to ${s.health.otlp}` : "not exported"})\n`,
+      `daemon pid ${s.info.pid} at ${daemonBaseUrl(s.info)} since ${s.info.startedAt} (version ${s.info.version}; spans ${typeof s.health.otlp === "string" ? `to ${s.health.otlp}` : "not exported"})\n`,
     );
     for (const srv of s.servers as {
       name: string;
@@ -549,6 +552,51 @@ export async function main(argv: string[]): Promise<number> {
 
   if (command === "stop") {
     process.stdout.write((await stopDaemon()) ? "stopping daemon\n" : "no daemon running\n");
+    return 0;
+  }
+
+  if (command === "ui") {
+    const opts = [...rest];
+    const noOpen = takeFlag(opts, "--no-open");
+    if (opts.length) throw new UsageError(`ui: unknown option ${opts[0]}`);
+    const info = await ensureDaemon({
+      autoStart: true,
+      startTimeoutMs: 10_000,
+      log: (l) => process.stderr.write(`${l}\n`),
+    });
+    if (!info)
+      throw new UsageError("ui: no daemon is running and none could be started (sayagain serve)");
+    // daemon.json is the user's own 0600 file, but the URL still goes to another program: only a
+    // plain host, a port and a token of the shape this tool writes are accepted into it.
+    if (
+      !/^[A-Za-z0-9.:-]+$/.test(info.host) ||
+      !Number.isInteger(info.port) ||
+      !/^[A-Za-z0-9_-]{16,}$/.test(info.token)
+    )
+      throw new UsageError(
+        "ui: daemon.json holds an unexpected host, port or token; stop the daemon and start it again",
+      );
+    const url = `${daemonBaseUrl(info)}/ui?token=${info.token}`;
+    process.stdout.write(`${url}\n`);
+    if (noOpen) return 0;
+    // Each opener takes the URL as an argument; none of them is a shell.
+    const opener =
+      process.platform === "darwin"
+        ? ["open", url]
+        : process.platform === "win32"
+          ? ["rundll32", "url.dll,FileProtocolHandler", url]
+          : ["xdg-open", url];
+    const child = spawn(opener[0] as string, opener.slice(1), { stdio: "ignore", detached: true });
+    // spawn reports failure on the next tick; wait for either outcome so the message is not lost to process.exit.
+    await new Promise<void>((resolve) => {
+      child.once("spawn", () => resolve());
+      child.once("error", (err) => {
+        process.stderr.write(`could not open a browser (${err.message}); open the URL above
+`);
+        resolve();
+      });
+    });
+    child.unref();
     return 0;
   }
 

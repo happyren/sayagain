@@ -1,6 +1,6 @@
 {
   "name": "@sayagain/proxy",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Say Again: the commitment boundary for MCP tool calls. wrap, daemon, receipts, dedupe, holds, repair, dead-letter and replay.",
   "license": "Apache-2.0",
   "type": "module",
@@ -20,8 +20,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.ui.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:ui": "tsc -p tsconfig.ui.json"
   },
   "dependencies": {
     "@sayagain/sdk": "workspace:*",

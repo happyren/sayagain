@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -456,5 +457,74 @@ describe("daemon", () => {
     }, 5000);
     expect(meta(again.body)["sh.sayagain/status"]).toBe("executed");
     expect(logs.some((l) => l.includes("closed: upstream exited"))).toBe(true);
+  });
+
+  it("serves the operator page with a strict CSP, takes the token on the query string for the page only, and answers the analysis routes", async () => {
+    const d = await boot();
+    const page = await fetch(`${d.url}/ui?token=${d.token}`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-security-policy")).toContain("default-src 'self'");
+    expect(page.headers.get("content-type")).toContain("text/html");
+    const html = await page.text();
+    expect(html).toContain('<script type="module" src="/ui/app.js">');
+    expect(html).toContain("0.4.0-test");
+    expect(html).not.toMatch(/https?:\/\/(?!127\.0\.0\.1)/); // no remote origins
+    const css = await fetch(`${d.url}/ui/app.css`); // assets need no token: tags cannot send headers
+    expect(css.status).toBe(200);
+    expect(css.headers.get("content-type")).toContain("text/css");
+    const js = await fetch(`${d.url}/ui/app.js`);
+    expect(js.status).toBe(200);
+    expect(js.headers.get("content-type")).toContain("text/javascript");
+    expect(await js.text()).toContain("sayagain.token");
+    expect((await fetch(`${d.url}/ui`)).status).toBe(200); // the page is public: a reload has no token in its URL
+    expect((await fetch(`${d.url}/ui/`)).status).toBe(200);
+    // fetch drops a custom Host header (a forbidden header name), so the DNS-rebinding guard is checked over node:http.
+    const rebound = await new Promise<number>((resolve) => {
+      const req = httpRequest(
+        { host: "127.0.0.1", port: d.port, path: "/ui", headers: { host: "evil.example" } },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.end();
+    });
+    expect(rebound).toBe(421);
+    expect((await fetch(`${d.url}/api/holds?token=${d.token}`)).status).toBe(401); // never for the API
+    await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "missing", arguments: {} },
+    });
+    await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "echo", arguments: {} },
+    });
+    const tools = (await api(d, "/api/tools?since=1h&minCalls=1")) as {
+      tool: string;
+      failureRatePct: number;
+    }[];
+    expect(tools.map((t) => t.tool)).toEqual(["missing", "echo"]);
+    expect((await api(d, "/api/tools?since=1h&minCalls=1&server=fake")) as unknown[]).toHaveLength(
+      2,
+    ); // registry name
+    expect((await api(d, "/api/tools?since=1h&minCalls=1&server=nope")) as unknown[]).toEqual([]);
+    expect((await api(d, "/api/report?since=2999-01-01")) as { error: string }).toMatchObject({
+      error: expect.stringContaining("past"),
+    });
+    const errors = (await api(d, "/api/errors?since=1h")) as { tool: string; errorClass: string }[];
+    expect(errors).toMatchObject([{ tool: "missing", errorClass: "semantic" }]);
+    const report = (await api(d, "/api/report?since=1h")) as {
+      calls: number;
+      byServer: { server: string }[];
+    };
+    expect(report.calls).toBe(2);
+    expect(report.byServer[0]?.server).toBe("fake-notion");
+    expect((await api(d, "/api/report?since=soon")) as { error: string }).toMatchObject({
+      error: expect.stringContaining("duration"),
+    });
   });
 });
