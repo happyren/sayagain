@@ -98,7 +98,10 @@ number does not move. In order of cost:
    intervention's id stays in the local store, where `sayagain learn`
    shows it with its numbers).
    This is the Databricks fix, applied at the boundary without touching the
-   server.
+   server. Amended 2026-09-05 (ADR-0009, scope guard): a learned coercion
+   advises by default (the fact in the description, the repair after a
+   failure) and changes a read-only call before it leaves only once an
+   operator switches that intervention to `apply`.
 2. **Description augmentation.** The boundary appends learned facts to the
    tool description it serves the client: "`fields` is a comma-separated
    string, not an array", "call `get_repo` first; `create_issue` fails with
@@ -136,7 +139,8 @@ enough to say "this tool fails on `fields` for most people".
   recovery path and shape change (0.6).
 - `sayagain learn` — the current learned coercions, augmentations and
   hints, each with its before and after numbers and a `--revert` (0.8:
-  interventions 1, 2, 3 and 6 of the loop; 4 and 5 later).
+  interventions 1, 2, 3 and 6 of the loop; 4 and 5 later); `--apply` and
+  `--advise` per coercion (0.9, see the amendment above).
 - `sayagain report --weekly` — the one page from `docs/measurement.md`
   section 6, plus the top five signatures (0.6; the annualised cost waits
   for token counts from a host).

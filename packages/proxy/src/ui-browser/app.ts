@@ -334,8 +334,8 @@ async function renderReport(): Promise<void> {
   const sigs = r.topSignatures as SignatureStat[];
   $("#report").innerHTML = `
 <section class="cards">
-  <div class="card"><h3>failure tax</h3><p class="big">${esc(kib(ns.failureTaxBytesPer1kCalls))}</p><p>recovery traffic per 1K calls${prev ? ` · was ${esc(kib(prev.failureTaxBytesPer1kCalls as number))}` : ""}</p></div>
   <div class="card"><h3>unacknowledged writes</h3><p class="big">${esc(ns.unacknowledgedWritesPer1kWrites)}</p><p>per 1K writes without a known outcome</p></div>
+  <div class="card"><h3>failure tax</h3><p class="big">${esc(kib(ns.failureTaxBytesPer1kCalls))}</p><p>recovery traffic per 1K calls${prev ? ` · was ${esc(kib(prev.failureTaxBytesPer1kCalls as number))}` : ""}</p></div>
   <div class="card"><h3>calls</h3><p class="big">${esc(r.calls)}</p><p>${esc(r.writes)} writes${prev ? ` · was ${esc(prev.calls)}` : ""}</p></div>
   <div class="card"><h3>the boundary</h3><p>retry ${esc(b.retriesResolved)} · repair ${esc(b.repairsResolved)} · held ✓${esc(held.approved)} ✗${esc(held.rejected)} ?${esc(held.undecided)} · dead ${esc(b.deadLettered)} · dedup ${esc(b.deduplicated)}</p></div>
 </section>
@@ -376,6 +376,7 @@ interface Intervention {
   evidence: number;
   activatedAt: string;
   state: "active" | "disabled" | "reverted";
+  mode?: "advise" | "apply";
   reason?: string;
   before?: { calls: number; failureRatePct: number; medianCallsToRecover: number };
   after?: { calls: number; failureRatePct: number; medianCallsToRecover: number };
@@ -400,11 +401,11 @@ async function renderLearn(): Promise<void> {
     interventions
       .map(
         (i) => `<article class="learned ${esc(i.state)}" data-id="${esc(i.id)}">
-  <header><strong>${esc(i.server)}/${esc(i.tool)}</strong> <span class="pill">${esc(i.kind)}</span> <span class="pill ${i.state === "active" ? "" : "bad"}">${esc(i.state)}</span> <time>${esc(i.evidence)} occurrences</time></header>
+  <header><strong>${esc(i.server)}/${esc(i.tool)}</strong> <span class="pill">${esc(i.kind)}</span> <span class="pill ${i.state === "active" ? "" : "bad"}">${esc(i.state)}</span>${i.kind === "coerce" ? ` <span class="pill" title="${i.mode === "apply" ? "changes read-only calls before they leave, and repairs after a failure" : "offered as a repair after a failure; never changes a call before it leaves"}">mode ${i.mode === "apply" ? "apply" : "advise"}</span>` : ""} <time>${esc(i.evidence)} occurrences</time></header>
   <p>${esc(i.kind === "coerce" ? `${i.rule} on ${i.path}` : (i.fact ?? ""))}</p>
   <pre>${esc(i.signature)}</pre>
   <p class="suggestion">${lift(i)}${i.reason ? ` &middot; ${esc(i.reason)}` : ""}</p>
-  <footer>${i.state === "active" ? `<button data-learn="disable" class="secondary">Turn off</button>` : `<button data-learn="enable">Turn on</button>`} <code>${esc(i.id)}</code></footer>
+  <footer>${i.state === "active" ? `<button data-learn="disable" class="secondary">Turn off</button>` : `<button data-learn="enable">Turn on</button>`}${i.kind === "coerce" && i.state === "active" ? (i.mode === "apply" ? ` <button data-learn="advise" class="secondary">Switch to advise</button>` : ` <button data-learn="apply" class="secondary">Switch to apply</button>`) : ""} <code>${esc(i.id)}</code></footer>
 </article>`,
       )
       .join("");
@@ -495,7 +496,8 @@ document.addEventListener("click", (ev) => {
   const learn = t.closest<HTMLElement>("[data-learn]");
   if (learn) {
     const id = learn.closest<HTMLElement>("[data-id]")?.dataset.id ?? "";
-    const action = learn.dataset.learn === "enable" ? "enable" : "disable";
+    const wanted = learn.dataset.learn ?? "";
+    const action = ["enable", "apply", "advise"].includes(wanted) ? wanted : "disable";
     void busy(learn, () =>
       api(`/api/learn/${encodeURIComponent(id)}/${action}`, { method: "POST" }).then(() =>
         renderLearn(),

@@ -564,6 +564,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return json(res, 200, buildReport(a.rows, { since: a.since, minCalls: a.minCalls }));
     }
     const path = url.pathname;
+    // The CLI writes learned.json directly when it cannot reach the daemon; pick that up before
+    // reading or saving, or a save from the in-memory copy would undo the operator's change.
+    if (path.startsWith("/api/learn")) learned.maybeReload(0);
     if (req.method === "GET" && path === "/api/learn")
       return json(res, 200, { updatedAt: learned.updatedAt, interventions: learned.list() });
     if (req.method === "POST" && path === "/api/learn/update") {
@@ -573,6 +576,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return json(res, 400, { error: "minEvidence must be a positive integer" });
       relearn(minEvidence);
       return json(res, 200, { updatedAt: learned.updatedAt, interventions: learned.list() });
+    }
+    const learnMode = path.match(/^\/api\/learn\/([^/]+)\/(apply|advise)$/);
+    if (req.method === "POST" && learnMode) {
+      const id = decodeURIComponent(learnMode[1] ?? "");
+      const ok = learned.setMode(id, learnMode[2] === "apply" ? "apply" : "advise");
+      if (ok) {
+        learned.save();
+        emitEvent("learned", { changed: [id] });
+      }
+      return json(
+        res,
+        ok ? 200 : 404,
+        ok ? { id, mode: learned.get(id)?.mode } : { error: `no coercion ${id}` },
+      );
     }
     const learnState = path.match(/^\/api\/learn\/([^/]+)\/(disable|revert|enable)$/);
     if (req.method === "POST" && learnState) {

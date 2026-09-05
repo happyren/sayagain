@@ -537,6 +537,7 @@ describe("daemon", () => {
         {
           id: "coerce:fake/strict/limit:string-number",
           kind: "coerce",
+          mode: "apply",
           server: "fake",
           tool: "strict",
           signature: "Invalid params: limit must be a number",
@@ -633,6 +634,43 @@ describe("daemon", () => {
     });
     expect((await api(d, "/api/learn/nope/enable", { method: "POST" })) as Obj).toMatchObject({
       error: expect.stringContaining("no intervention"),
+    });
+    // Back on, but advising: the loop's default. The call fails first and the schema repairs it.
+    const id = encodeURIComponent("coerce:fake/strict/limit:string-number");
+    expect((await api(d, `/api/learn/${id}/enable`, { method: "POST" })) as Obj).toMatchObject({
+      state: "active",
+    });
+    expect((await api(d, `/api/learn/${id}/advise`, { method: "POST" })) as Obj).toMatchObject({
+      mode: "advise",
+    });
+    const advised = await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: { name: "strict", arguments: { limit: "10" } },
+    });
+    expect(meta(advised.body)["sh.sayagain/status"]).toBe("repaired");
+    expect(meta(advised.body)["sh.sayagain/repair"]).toMatchObject({
+      changes: [{ rule: "string-to-number" }],
+    });
+    expect((await api(d, `/api/learn/${id}/apply`, { method: "POST" })) as Obj).toMatchObject({
+      mode: "apply",
+    });
+    const applied = await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: { name: "strict", arguments: { limit: "10" } },
+    });
+    expect(meta(applied.body)["sh.sayagain/repair"]).toMatchObject({
+      changes: [{ rule: "learned:string-to-number" }],
+    });
+    expect((await api(d, "/api/learn/nope/apply", { method: "POST" })) as Obj).toMatchObject({
+      error: expect.stringContaining("no coercion"),
+    });
+    const hintId = encodeURIComponent("hint:fake/missing:precondition:x");
+    expect((await api(d, `/api/learn/${hintId}/apply`, { method: "POST" })) as Obj).toMatchObject({
+      error: expect.stringContaining("no coercion"), // hints have no mode
     });
     const report = await (
       await fetch(`${d.url}/api/learn/report/fake`, {

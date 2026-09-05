@@ -288,4 +288,4 @@ and the schema shim (section 7) are optional features.
 - v0.1.3 (2026-09-05): `sh.sayagain/replay-of`; guidance sentence appended to failed results; dead-lettered semantics clarified.
 - v0.1.5 (2026-09-05): receipt and status on JSON-RPC error responses via `error.data`; `held.mode`; cancellation of held calls; `repaired` status emitted when arguments were changed and the call succeeded.
 - v0.1.5 (2026-09-05): `boundary.ledger` enumerated and `boundary.hold` added to 5.5.
-- v0.1.6 (2026-09-05): `repair.rule` may be `learned:<id>` for a coercion the boundary derived from its own ledger (5.4).
+- v0.1.6 (2026-09-05): `repair.rule` may be `learned:<rule>` for a coercion the boundary derived from its own ledger (5.4).

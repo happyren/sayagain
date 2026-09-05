@@ -90,12 +90,18 @@ own ledger (`sayagain report`, `tools`, `errors`; recovery cost in bytes on the 
 
 ## 4. North star
 
-Two numbers, one for cost and one for risk, both per 1,000 tool calls:
+Two numbers, one for risk and one for cost, both per 1,000 tool calls:
 
+- **Unacknowledged writes**: M9. Once Layer 1 runs, the intent-versus-action
+  rate (the complement of M14) stands beside it.
 - **Failure tax in dollars**: M5 summed over failures, divided by calls.
-- **Unacknowledged writes**: M9.
 
 The product exists to push both down. Everything else is diagnostic.
+
+Amendment, 2026-09-05: the order was cost then risk until the roadmap
+adjustment of that date. The headline is intent versus action at the
+boundary; cost is a dashboard metric and a trial justification. No metric
+definition changed and both numbers stay reported wherever they were.
 
 ## 5. Protocols
 
@@ -168,7 +174,7 @@ scan is reproducible.
 
 ## 6. Reporting
 
-One page, weekly, in this order: north star pair, M1 and M7 by server,
+One page, weekly, in this order: north star pair (risk first), M1 and M7 by server,
 M8 and M9 with the tools involved, M5 median and mean, then anything that
 moved. The same page becomes the README's "measured on our own agents"
 block when the proxy ships.

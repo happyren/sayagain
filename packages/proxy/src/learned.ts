@@ -4,9 +4,10 @@
  * not help. Two kinds:
  *
  * - `coerce`: a signature's usual shape change was a type conversion, so the
- *   boundary applies that conversion to matching arguments before a
- *   read-only call leaves, and offers it as a repair after a failure on any
- *   tool (a write then waits behind a hold, as every repair does).
+ *   boundary offers that conversion as a repair after a failure on any tool
+ *   (a write then waits behind a hold, as every repair does). Once an
+ *   operator switches the intervention to `apply`, the conversion also runs
+ *   before a read-only call leaves; by default it only advises (ADR-0009).
  * - `hint`: a not-found failure whose usual recovery began with another
  *   tool, appended as a sentence to the tool's description in `tools/list`
  *   and to the error the model sees when the same signature recurs.
@@ -56,6 +57,12 @@ export interface Intervention {
   learnedAt: string;
   activatedAt: string;
   state: "active" | "disabled" | "reverted";
+  /**
+   * Coercions only. advise (default): the fact in the description, the hint in the error, the
+   * repair after a failure. apply: also before a read-only call leaves, which only an operator can
+   * switch on (ADR-0009). Missing or unknown values load as advise.
+   */
+  mode?: "advise" | "apply";
   reason?: string;
   before?: Lift;
   after?: Lift;
@@ -218,6 +225,7 @@ export function deriveInterventions(
           ...base,
           id: `coerce:${slug(s.server)}/${slug(s.tool)}${path}:${fromType}-${toType}`,
           kind: "coerce",
+          mode: "advise", // applying before a call leaves is the operator's switch (ADR-0009)
           path,
           from: fromType,
           to: toType,
@@ -331,6 +339,10 @@ export class LearnedStore {
           ...i,
           signatures:
             Array.isArray(i.signatures) && i.signatures.length ? i.signatures : [i.signature],
+          // Only an explicit "apply" changes a call before it leaves; anything else advises.
+          ...(i.kind === "coerce"
+            ? { mode: (i.mode === "apply" ? "apply" : "advise") as "apply" | "advise" }
+            : {}),
         }));
         this.file = {
           version: 1,
@@ -394,11 +406,25 @@ export class LearnedStore {
     );
   }
 
-  /** Active coercions for a tool. `server` is the registry name; `upstream` the server's own name. */
-  coercionsFor(server: string, tool: string, upstream?: string): Intervention[] {
+  /**
+   * Active coercions for a tool. `server` is the registry name; `upstream` the server's own name.
+   * With `applyOnly`, only the ones an operator switched to apply before a call leaves.
+   */
+  coercionsFor(server: string, tool: string, upstream?: string, applyOnly = false): Intervention[] {
     return this.file.interventions.filter(
-      (i) => i.kind === "coerce" && this.matches(i, server, tool, upstream),
+      (i) =>
+        i.kind === "coerce" &&
+        this.matches(i, server, tool, upstream) &&
+        (!applyOnly || i.mode === "apply"),
     );
+  }
+
+  /** The operator's switch between advising and applying before a call leaves (coercions only). */
+  setMode(id: string, mode: "advise" | "apply"): boolean {
+    const i = this.get(id);
+    if (i?.kind !== "coerce") return false;
+    i.mode = mode;
+    return true;
   }
 
   /** Facts to append to a tool's description. */
@@ -516,7 +542,7 @@ export function upstreamReport(
       .list()
       .filter((x) => x.tool === s.tool && x.signatures.includes(s.signature)))
       lines.push(
-        `- Say Again ${i.state === "active" ? "applies" : `tried (${i.state})`}: ${i.kind === "coerce" ? `${i.rule} on ${i.path}` : i.fact}${i.after ? `; this failure was ${i.before?.failureRatePct ?? "?"}% of calls before, ${i.after.failureRatePct}% after (${i.after.calls} calls)` : ""}.`,
+        `- Say Again ${i.state !== "active" ? `tried (${i.state})` : i.kind === "coerce" && i.mode !== "apply" ? "offers as a repair after a failure" : "applies"}: ${i.kind === "coerce" ? `${i.rule} on ${i.path}` : i.fact}${i.after ? `; this failure was ${i.before?.failureRatePct ?? "?"}% of calls before, ${i.after.failureRatePct}% after (${i.after.calls} calls)` : ""}.`,
       );
     lines.push(`- Suggestion: ${s.suggestion}`, "");
   }

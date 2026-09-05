@@ -16,7 +16,7 @@ operator between the agent and its tools who says it, so the agent never has
 to.
 
 > **Status: pre-alpha.** The `_meta` convention, design records and package
-> skeletons are here. The proxy runs (0.8: `wrap`, the daemon, holds, repair,
+> skeletons are here. The proxy runs (0.9: `wrap`, the daemon, holds, repair,
 > dead letters, one-command onboarding, tool health, an operator page, a
 > learning loop). Watch the repo or open a
 > Discussion.
@@ -83,6 +83,7 @@ sayagain lint --all                  # grade every registered server's tool defi
 sayagain serve --otlp http://127.0.0.1:4318/v1/traces   # or OTEL_EXPORTER_OTLP_ENDPOINT; a local collector on :4318 is found by itself (SAYAGAIN_OTLP=off never exports)
 sayagain ui                          # the same in a browser tab: a live holds inbox, servers, dead letters, ledger, tools, errors, report
 sayagain learn                       # what the loop learned from your ledger: coercions and hints, each with before and after numbers
+                                     # (it advises; `learn --apply <id>` lets one coercion change read-only calls before they leave)
 ```
 
 Options: `--hold destructive|always|never`, `--hold-wait <ms>`,

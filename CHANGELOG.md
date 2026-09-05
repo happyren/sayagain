@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-05
+
+### Changed
+
+- The scope guard from the roadmap adjustment of 2026-09-05 (ADR-0009): the
+  boundary returns verdicts and never acts on the plan. A learned coercion
+  therefore **advises** by default (the fact in the tool description, the
+  hint in the error, the repair after a failure) and changes a read-only
+  call before it leaves only once an operator switches that intervention to
+  **apply**: `sayagain learn --apply <id>` (`--advise` to go back), the
+  `/api/learn/:id/apply` and `/advise` routes, or the Learn screen. Files
+  from 0.8.0 carry no mode and load as advise. `sayagain learn` shows the
+  mode of every coercion. A `wrap` still running from 0.8.0 reads the same
+  file and ignores the mode, so restart wraps after upgrading.
+- The north star is reported risk first: unacknowledged writes lead, the
+  failure tax follows, in `sayagain report`, on the Report screen, and in
+  `docs/measurement.md` (a dated amendment; no metric definition changed).
+- `docs/ROADMAP.md` is the six-phase plan from the adjustment. ADR-0009
+  records the contributed-shape schema and the consent flow for Phase 0,
+  and the audit of 0.1 to 0.8 against the scope guard.
+
 ## [0.8.0] - 2026-09-05
 
 ### Added

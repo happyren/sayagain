@@ -122,15 +122,16 @@ travels, and the index treats the hash as a key, not as a secret.
 | Error rewriting with guidance (0.3) and the learned hint (0.8) | A diagnosis returned to the agent | Keep |
 | Description augmentation (0.8) | A fact returned to the agent inside the tool list, delimited and attributed; the upstream's text is untouched | Keep, and keep the delimiter and the cap |
 | Learned coercion applied after a failure (0.8) | A repair, as above | Keep |
-| **Learned coercion applied before a read-only call leaves (0.8)** | The boundary changes a call the agent made before anything failed and without the agent knowing why: a plan edit in miniature | **Send back: off by default. The rule stays derived and shown; applying it before a call leaves requires the operator to opt the tool in (`sayagain learn --apply <id>`), and the agent still sees `repaired` with the change** |
+| **Learned coercion applied before a read-only call leaves (0.8)** | The boundary changes a call the agent made before anything failed and without the agent knowing why: a plan edit in miniature | **Send back: off by default. The rule stays derived and shown; applying it before a call leaves requires the operator to opt that intervention in (`sayagain learn --apply <id>`, one switch per coercion), and the agent still sees `repaired` with the change** |
 | Automatic revert of an intervention (0.8) | The boundary changing its own behaviour, not the plan | Keep |
 | `import --rewrite` of host configs (0.5) | An operator action with a backup | Keep |
 | The learning pass itself (0.8) | Produces verdicts and records | Keep |
 
 Two more places where wording, not code, drifts from the pitch:
 
-- `docs/measurement.md` names the failure tax in dollars as the first
-  north-star number and `sayagain report` prints it first. The pitch is
+- Until 0.9, `docs/measurement.md` named the failure tax in dollars as the
+  first north-star number and `sayagain report` printed it first (both
+  reordered in 0.9, decision 2 below). The pitch is
   intent versus action at the boundary; token and dollar savings are a
   dashboard metric and a trial justification. The unacknowledged-write rate
   (M9) and, once Layer 1 exists, the intent-versus-action rate lead; the
