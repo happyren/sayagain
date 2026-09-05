@@ -1,7 +1,7 @@
 {
   "name": "@sayagain/proxy",
   "version": "0.4.0",
-  "description": "Say Again: the commitment boundary for MCP tool calls. wrap, ledger, and (coming) hold, repair, dead-letter and replay.",
+  "description": "Say Again: the commitment boundary for MCP tool calls. wrap, daemon, receipts, dedupe, holds, repair, dead-letter and replay.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
     }
   },
   "files": [
@@ -35,5 +39,14 @@
   },
   "bin": {
     "sayagain": "./dist/cli.js"
-  }
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agent",
+    "tool-calls",
+    "proxy",
+    "dead-letter",
+    "idempotency"
+  ]
 }
