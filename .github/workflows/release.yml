@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - name: Version matches tag
+        run: |
+          v=$(node -p "require('./package.json').version")
+          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "package version $v does not match tag ${GITHUB_REF_NAME}"; exit 1; }
+      - name: Publish packages
+        run: pnpm -r publish --access public --no-git-checks --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Release notes from CHANGELOG
+        run: node scripts/release.mjs notes "${GITHUB_REF_NAME#v}" > release-notes.md
+      - name: GitHub Release
+        run: gh release create "${GITHUB_REF_NAME}" --title "Say Again ${GITHUB_REF_NAME}" --notes-file release-notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
