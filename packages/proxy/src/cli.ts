@@ -288,8 +288,8 @@ export async function main(argv: string[]): Promise<number> {
     const replaced = addServer(name, config);
     process.stdout.write(`${replaced ? "replaced" : "registered"} ${name} (${config.transport})\n`);
     if (literalSecrets.length)
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: the hint tells the user to type a reference
       process.stderr.write(
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: the hint tells the user to type a reference
         "note: a value looks like a literal secret; prefer '${VAR}' (single-quoted) so it is resolved from the daemon's environment and never stored\n",
       );
     const live = await liveDaemon();
