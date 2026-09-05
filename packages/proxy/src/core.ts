@@ -537,6 +537,8 @@ export class Boundary extends EventEmitter {
   }
 
   private record(row: ReturnType<typeof baseRow>): void {
+    const routed = this.idMap.get(keyOf(this.callIdOf(row.receipt) ?? ""));
+    if (routed && row.session === undefined) row.session = routed.session.id;
     try {
       this.ledger.append(row);
     } catch (err) {
@@ -545,6 +547,13 @@ export class Boundary extends EventEmitter {
       );
     }
     this.emit("row", row);
+  }
+
+  /** The upstream id of a pending or held call by its receipt, for finding the session that sent it. */
+  private callIdOf(receipt: string): JsonRpcId | undefined {
+    for (const c of this.state.pending.values()) if (c.receipt === receipt) return c.id;
+    for (const c of this.heldById.values()) if (c.receipt === receipt) return c.id;
+    return undefined;
   }
 
   private settle(call: PendingCall, r: Remembered | null): void {

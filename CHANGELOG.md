@@ -6,6 +6,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-05
+
+### Added
+
+- `sayagain tools`: tools ranked by the waste their failures cause per
+  thousand calls (recovery traffic in bytes, the wire's stand-in for
+  tokens), with failure and mis-call rates, identical-retry share, median
+  calls to recover, unrecovered share, latency, and what the boundary did
+  (retried, repaired, held, dead-lettered, deduplicated). `--since 7d`,
+  `--server`, `--min-calls`, `--json`.
+- `sayagain errors [tool]`: failures grouped by masked signature with count,
+  class, first and last seen, median calls to recover, the most common
+  recovery path and argument-shape change, and a suggestion (ADR-0007).
+- `sayagain report`: the weekly page from `docs/measurement.md` section 6,
+  from the ledger alone: the north-star pair (failure tax per 1K calls,
+  unacknowledged writes per 1K writes), M1 and M7 by server, M8 duplicates
+  and M9 with the tools involved, M5 and M17 recovery, M15 boundary
+  outcomes, the top signatures, and what moved against the previous window.
+- OTLP export: one span per call over OTLP/HTTP JSON with GenAI and
+  `sayagain.*` attributes and hold, dead-letter and replay events.
+  `serve --otlp <url>` and `wrap --otlp <url>`; otherwise
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (and `_HEADERS`), otherwise a local
+  collector on port 4318 when one answers; `--otlp off` disables it. Error
+  signatures leave as a hash unless the exporter is built with
+  `signatures: true`; argument values never leave.
+- `sayagain lint <name>|--all|--file tools.json`: grades tool definitions
+  with `@sayagain/lint` through the daemon's `tools/list`.
+- Ledger rows carry the host `session` the call came from, which is what
+  orders calls for recovery analysis. `/api/ledger?since=<iso>` returns
+  every row from a time.
+
+### Deferred from the roadmap row
+
+- The GitHub Action for `@sayagain/lint`, the public registry scan (M16),
+  and the transcript analyzer reading wire-tap logs.
+
 ## [0.5.1] - 2026-09-05
 
 ### Removed

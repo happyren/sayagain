@@ -21,6 +21,8 @@ export interface LedgerRow {
   argsHash: string;
   hasIntent: boolean;
   task?: string;
+  /** The host session the call came from, when the boundary knows it. Orders calls for recovery analysis. */
+  session?: string;
   status: Status;
   isError: boolean;
   errorCode?: number;

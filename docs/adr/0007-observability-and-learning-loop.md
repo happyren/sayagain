@@ -126,7 +126,8 @@ enough to say "this tool fails on `fields` for most people".
 ### Surfaces
 
 - `sayagain tools` — the ranking above, with `--since`, `--server`,
-  `--min-calls`, `--json`.
+  `--min-calls`, `--json` (0.6; waste is recovery traffic in bytes until a
+  host supplies token counts).
 - `sayagain errors [tool]` — signatures with counts, class, turns,
   recovery path and shape change.
 - `sayagain learn` — the current learned coercions, augmentations and
@@ -135,7 +136,8 @@ enough to say "this tool fails on `fields` for most people".
   section 6, plus the top five signatures and their annualised cost at the
   current rate.
 - OTLP export, on by default to a local collector if one is listening,
-  otherwise off.
+  otherwise off (0.6: `--otlp`, `OTEL_EXPORTER_OTLP_ENDPOINT`, port 4318
+  probe; signatures exported as hashes unless opted in).
 - The hosted console shows the same objects across a team's deployments.
 
 ## Alternatives considered

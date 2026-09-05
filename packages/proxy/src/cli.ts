@@ -1,13 +1,23 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { grade, lintTool, type ToolDefinition } from "@sayagain/lint";
+import {
+  report as buildReport,
+  parseSince,
+  type Report,
+  signatureStats,
+  toolStats,
+} from "./analysis.js";
 import {
   allDeadLetters,
   allHolds,
   daemonLedger,
+  daemonLedgerSince,
   daemonStatus,
+  daemonToolsList,
   decideAnywhere,
   liveDaemon,
   replayAnywhere,
@@ -25,8 +35,9 @@ import {
   type Target,
 } from "./hosts.js";
 import { ensureLauncher, launcherCaveat } from "./launcher.js";
-import { defaultLedgerPath, JsonlLedger, readLedger } from "./ledger.js";
+import { defaultLedgerPath, JsonlLedger, type LedgerRow, readLedger } from "./ledger.js";
 import { ejectHost, importHost, inspectHost, installHost } from "./onboarding.js";
+import { OtlpExporter, otlpHeadersFromEnv, resolveOtlpEndpoint } from "./otlp.js";
 import { parseClassOverrides } from "./policy.js";
 import {
   addServer,
@@ -78,6 +89,15 @@ const USAGE = `sayagain ${PROXY_VERSION}
       Say Again entries whose server is no longer registered).
   sayagain stdio <name>
       Thin stdio client for hosts that only spawn commands; starts the daemon if needed.
+  sayagain tools [--since 7d] [--server <name>] [--min-calls 10] [--json]
+      Tools ranked by the waste their failures cause: failure and mis-call rates, identical retries, calls to recover.
+  sayagain errors [<tool>] [--since 7d] [--server <name>] [--json]
+      Error signatures with counts, class, calls to recover, the usual recovery path and argument-shape change.
+  sayagain report [--since 7d] [--server <name>] [--json]
+      The weekly page from docs/measurement.md section 6, from the ledger alone.
+  sayagain lint <name>|--all [--file <tools.json>] [--json]
+      Grade a server's tool definitions (names, descriptions, schemas, annotations) with @sayagain/lint.
+      --otlp <url>|off on serve and wrap exports one span per call (default: $OTEL_EXPORTER_OTLP_ENDPOINT, else a local collector on :4318 if one answers).
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
   sayagain holds [--json]
   sayagain approve <receipt> | sayagain reject <receipt>
@@ -139,6 +159,86 @@ function claudeCodeRunning(): boolean {
   }
 }
 
+/** Every ledger row since a time: from the daemon when one is live, else from the configured store. */
+async function loadRowsSince(since: Date): Promise<LedgerRow[]> {
+  const fromDaemon = await daemonLedgerSince(since);
+  if (fromDaemon) return fromDaemon;
+  const registry = loadRegistry();
+  if (registry.daemon?.store === "sqlite") {
+    const storeOptions: Parameters<typeof openStores>[1] = {};
+    if (registry.daemon.db !== undefined) storeOptions.sqlitePath = resolve(registry.daemon.db);
+    const stores = openStores("sqlite", storeOptions);
+    const rows = stores.readLedger();
+    stores.close();
+    return rows.filter((r) => Date.parse(r.ts) >= since.getTime());
+  }
+  return readLedger(defaultLedgerPath(), {}).filter((r) => Date.parse(r.ts) >= since.getTime());
+}
+
+const kib = (n: number): string => `${Math.round(n / 1024)} KiB`;
+
+/** The one page, in the order docs/measurement.md section 6 asks for. */
+function renderReport(r: Report): string {
+  const out: string[] = [];
+  const was = (prev: number | undefined, unit = "") =>
+    prev === undefined ? "" : `  (was ${prev}${unit})`;
+  const failures = r.byServer.reduce((a, s) => a + s.failures, 0);
+  out.push(
+    `Say Again report: ${r.window.since.slice(0, 16).replace("T", " ")} to ${r.window.until.slice(0, 16).replace("T", " ")} UTC (${r.window.days >= 1 ? `${r.window.days} days` : `${Math.round(r.window.days * 24)} hours`}), ${r.calls} calls, ${r.writes} writes`,
+  );
+  out.push("");
+  out.push("North star");
+  out.push(
+    `  failure tax        ${kib(r.northStar.failureTaxBytesPer1kCalls)} of recovery traffic per 1K calls${was(r.previous?.failureTaxBytesPer1kCalls, " bytes")}`,
+  );
+  out.push(
+    `  unacknowledged     ${r.northStar.unacknowledgedWritesPer1kWrites} writes per 1K writes without a known outcome (${r.unacknowledged.count})`,
+  );
+  out.push("");
+  out.push("Failures by server (M1 rate, M7 addressable share)");
+  for (const s of r.byServer)
+    out.push(
+      `  ${s.server.padEnd(20)} ${String(s.calls).padStart(6)} calls  ${String(s.failureRatePct).padStart(5)}% fail  ${String(s.addressablePct).padStart(5)}% addressable  ${Object.entries(
+        s.classes,
+      )
+        .map(([k, v]) => `${k} ${v}`)
+        .join(", ")}`,
+    );
+  if (!r.byServer.length) out.push("  (no calls)");
+  out.push("");
+  const named = (xs: { tool: string; count: number }[]) =>
+    xs.length ? `  ${xs.map((t) => `${t.tool} ${t.count}`).join(", ")}` : "";
+  out.push(
+    `Duplicates (M8): ${r.duplicates.count} deduplicated, ${r.duplicates.per1kWrites} per 1K writes${named(r.duplicates.tools)}`,
+  );
+  out.push(`Unacknowledged writes (M9): ${r.unacknowledged.count}${named(r.unacknowledged.tools)}`);
+  out.push("");
+  out.push(
+    `Recovery (M5, M17): ${r.recovery.failures} failures, ${r.recovery.recovered} recovered; median ${r.recovery.medianCalls} calls (mean ${r.recovery.meanCalls}), median ${kib(r.recovery.medianBytes)} (mean ${kib(r.recovery.meanBytes)})`,
+  );
+  out.push("");
+  out.push("What the boundary did (M15)");
+  const h = r.boundary.held;
+  out.push(
+    `  resolved by retry ${r.boundary.retriesResolved}, by repair ${r.boundary.repairsResolved}; held: approved ${h.approved}, rejected ${h.rejected}, expired ${h.expired}, cancelled ${h.cancelled}; dead-lettered ${r.boundary.deadLettered}; replays ${r.boundary.replays.count} (${r.boundary.replays.succeeded} succeeded); deduplicated ${r.boundary.deduplicated}`,
+  );
+  out.push("");
+  out.push("Top signatures");
+  for (const x of r.topSignatures)
+    out.push(
+      `  ${x.server}/${x.tool} x${x.count} ${x.errorClass}: ${x.signature}  (median ${x.medianCallsToRecover} calls to recover, ${x.unrecovered} unrecovered)`,
+    );
+  if (!r.topSignatures.length) out.push("  (no failures)");
+  if (r.previous) {
+    out.push("");
+    out.push(
+      `What moved vs the previous ${r.window.days >= 1 ? `${r.window.days} days` : `${Math.round(r.window.days * 24)} hours`}: calls ${r.previous.calls} -> ${r.calls}; failure rate ${r.previous.failureRatePct}% -> ${r.calls ? ((100 * failures) / r.calls).toFixed(1) : "0"}%; dead-lettered ${r.previous.deadLettered} -> ${r.boundary.deadLettered}`,
+    );
+  }
+  out.push("");
+  return `${out.join("\n")}\n`;
+}
+
 export async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
   if (!command || command === "--help" || command === "-h") {
@@ -167,6 +267,7 @@ export async function main(argv: string[]): Promise<number> {
     const retry = takeNumber(opts, "--retry");
     const noRepair = takeFlag(opts, "--no-repair");
     const noRewrite = takeFlag(opts, "--no-rewrite-errors");
+    const wrapOtlp = takeOption(opts, "--otlp");
     const classes = parseClassOverrides(takeAll(opts, "--class"));
     if (opts.length) throw new UsageError(`wrap: unknown option ${opts[0]}`);
     if (hold !== undefined && hold !== "destructive" && hold !== "always" && hold !== "never")
@@ -188,6 +289,16 @@ export async function main(argv: string[]): Promise<number> {
       policy,
     };
     if (upstreamName !== undefined) wrapOptions.upstreamName = upstreamName;
+    const wrapOtlpEndpoint = await resolveOtlpEndpoint(wrapOtlp);
+    if (wrapOtlpEndpoint) {
+      wrapOptions.otlp = new OtlpExporter({
+        endpoint: wrapOtlpEndpoint,
+        headers: otlpHeadersFromEnv(),
+        version: PROXY_VERSION,
+        log: (l) => process.stderr.write(`${l}\n`),
+      });
+      process.stderr.write(`sayagain: exporting spans to ${wrapOtlpEndpoint}\n`);
+    }
     const { done } = wrap(wrapOptions);
     return done;
   }
@@ -197,6 +308,7 @@ export async function main(argv: string[]): Promise<number> {
     const listen = takeOption(opts, "--listen");
     const store = takeOption(opts, "--store");
     const db = takeOption(opts, "--db");
+    const otlpOption = takeOption(opts, "--otlp");
     const detach = takeFlag(opts, "--detach");
     if (opts.length) throw new UsageError(`serve: unknown option ${opts[0]}`);
     if (store !== undefined && store !== "jsonl" && store !== "sqlite")
@@ -215,6 +327,7 @@ export async function main(argv: string[]): Promise<number> {
         ...(listen ? ["--listen", listen] : []),
         ...(store ? ["--store", store] : []),
         ...(db ? ["--db", db] : []),
+        ...(otlpOption ? ["--otlp", otlpOption] : []),
       ]);
       const child = spawn(file, args, { detached: true, stdio: "ignore", env: process.env });
       child.on("error", () => undefined);
@@ -247,6 +360,16 @@ export async function main(argv: string[]): Promise<number> {
       token,
       onShutdown: () => process.exit(0),
     };
+    const otlpEndpoint = await resolveOtlpEndpoint(otlpOption);
+    if (otlpEndpoint) {
+      daemonOptions.otlp = new OtlpExporter({
+        endpoint: otlpEndpoint,
+        headers: otlpHeadersFromEnv(),
+        version: PROXY_VERSION,
+        log: (l) => process.stderr.write(`${l}\n`),
+      });
+      process.stderr.write(`sayagain: exporting spans to ${otlpEndpoint}\n`);
+    }
     if (listen !== undefined) daemonOptions.listen = listen;
     const daemon = await startDaemon(daemonOptions);
     process.stderr.write(
@@ -581,6 +704,144 @@ export async function main(argv: string[]): Promise<number> {
     }
     return failed ? 1 : 0;
   }
+  if (command === "tools" || command === "errors" || command === "report") {
+    const opts = [...rest];
+    const sinceOption = takeOption(opts, "--since") ?? "7d";
+    const server = takeOption(opts, "--server");
+    const minCalls = command === "tools" ? takeNumber(opts, "--min-calls") : undefined;
+    const json = takeFlag(opts, "--json");
+    const toolFilter =
+      command === "errors" && opts[0] && !opts[0].startsWith("-") ? opts.shift() : undefined;
+    if (opts.length) throw new UsageError(`${command}: unknown option ${opts[0]}`);
+    let since: Date;
+    try {
+      since = parseSince(sinceOption);
+    } catch (err) {
+      throw new UsageError(err instanceof Error ? err.message : String(err));
+    }
+    const rows = await loadRowsSince(since);
+    const analysis = {
+      since,
+      ...(server ? { server } : {}),
+      ...(minCalls !== undefined ? { minCalls } : {}),
+    };
+    if (command === "tools") {
+      const stats = toolStats(rows, analysis);
+      if (json) {
+        process.stdout.write(`${JSON.stringify(stats, null, 2)}\n`);
+        return 0;
+      }
+      if (!stats.length) {
+        process.stdout.write(
+          `no tool with ${minCalls ?? 10} or more calls since ${since.toISOString()} (${rows.length} rows)\n`,
+        );
+        return 0;
+      }
+      process.stdout.write(
+        "tool                              calls  fail%  miscall%  same-retry%  calls-to-recover  unrecovered%  waste/1K calls  boundary\n",
+      );
+      for (const t of stats) {
+        const b = t.boundary;
+        const acts = [
+          b.retried ? `retried ${b.retried}` : "",
+          b.repaired ? `repaired ${b.repaired}` : "",
+          b.held ? `held ${b.held}` : "",
+          b.deadLettered ? `dead ${b.deadLettered}` : "",
+          b.deduplicated ? `dedup ${b.deduplicated}` : "",
+        ]
+          .filter(Boolean)
+          .join(", ");
+        process.stdout.write(
+          `${`${t.server}/${t.tool}`.padEnd(33)} ${String(t.calls).padStart(5)}  ${String(t.failureRatePct).padStart(5)}  ${String(t.misCallRatePct).padStart(8)}  ${String(t.identicalRetryPct).padStart(11)}  ${String(t.medianCallsToRecover).padStart(16)}  ${String(t.unrecoveredPct).padStart(12)}  ${kib(t.wasteBytesPer1kCalls).padStart(14)}  ${acts}\n`,
+        );
+      }
+      return 0;
+    }
+    if (command === "errors") {
+      const sigs = signatureStats(rows, analysis).filter(
+        (x) => !toolFilter || x.tool === toolFilter || `${x.server}/${x.tool}` === toolFilter,
+      );
+      if (json) {
+        process.stdout.write(`${JSON.stringify(sigs, null, 2)}\n`);
+        return 0;
+      }
+      if (!sigs.length) {
+        process.stdout.write(`no failures since ${since.toISOString()} (${rows.length} rows)\n`);
+        return 0;
+      }
+      for (const x of sigs) {
+        process.stdout.write(
+          `${x.server}/${x.tool}  x${x.count}  ${x.errorClass}  median ${x.medianCallsToRecover} calls to recover, ${x.unrecovered} unrecovered, ${kib(x.wasteBytes)}\n    ${x.signature}\n`,
+        );
+        if (x.topRecoveryPath) process.stdout.write(`    recovery path: ${x.topRecoveryPath}\n`);
+        if (x.topShapeChange) process.stdout.write(`    shape change: ${x.topShapeChange}\n`);
+        process.stdout.write(`    suggestion: ${x.suggestion}\n`);
+      }
+      return 0;
+    }
+    const r = buildReport(rows, analysis);
+    process.stdout.write(json ? `${JSON.stringify(r, null, 2)}\n` : renderReport(r));
+    return 0;
+  }
+
+  if (command === "lint") {
+    const opts = [...rest];
+    const json = takeFlag(opts, "--json");
+    const all = takeFlag(opts, "--all");
+    const file = takeOption(opts, "--file");
+    const name = opts.shift();
+    if (opts.length) throw new UsageError(`lint: unknown option ${opts[0]}`);
+    if (!all && !file && !name)
+      throw new UsageError("lint: expected a server name, --all, or --file <tools.json>");
+    const sources: { label: string; tools: ToolDefinition[] }[] = [];
+    if (file) {
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as
+        | ToolDefinition[]
+        | { tools?: ToolDefinition[] };
+      sources.push({ label: file, tools: Array.isArray(parsed) ? parsed : (parsed.tools ?? []) });
+    } else {
+      const names = all ? Object.keys(loadRegistry().servers) : [name as string];
+      if (!(await liveDaemon()))
+        throw new UsageError(
+          "lint: the daemon must be running to fetch tool lists (sayagain serve --detach), or pass --file",
+        );
+      for (const n of names) {
+        try {
+          const tools = await daemonToolsList(n);
+          sources.push({ label: n, tools: (tools ?? []) as ToolDefinition[] });
+        } catch (err) {
+          process.stderr.write(`${n}: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+    }
+    const results = sources.map((src) => ({
+      server: src.label,
+      tools: src.tools.map((t) => {
+        const findings = lintTool(t);
+        return { name: t.name, grade: grade(findings), findings };
+      }),
+    }));
+    if (json) {
+      process.stdout.write(`${JSON.stringify(results, null, 2)}\n`);
+      return 0;
+    }
+    for (const r of results) {
+      const dist: Record<string, number> = {};
+      for (const t of r.tools) dist[t.grade] = (dist[t.grade] ?? 0) + 1;
+      process.stdout.write(
+        `${r.server}: ${r.tools.length} tool(s)  ${["A", "B", "C", "D", "F"].map((g) => `${g}:${dist[g] ?? 0}`).join(" ")}\n`,
+      );
+      for (const t of r.tools) {
+        process.stdout.write(`  ${t.grade}  ${t.name}\n`);
+        for (const f of t.findings)
+          process.stdout.write(
+            `       ${f.severity.padEnd(7)} ${f.rule}${f.path ? ` (${f.path})` : ""}: ${f.message}\n`,
+          );
+      }
+    }
+    return sources.length ? 0 : 1;
+  }
+
   if (command === "ledger") {
     const opts = [...rest];
     const ledgerOption = takeOption(opts, "--ledger");

@@ -4,6 +4,20 @@
  * retry, deterministic repair, dead-letter and replay, error rewriting.
  */
 export { classify, META, PROWORD, REPAIR_BUDGET } from "@sayagain/sdk";
+export {
+  type AnalysisOptions,
+  parseSince,
+  type Recovery,
+  type Report,
+  recoveries,
+  report,
+  type SignatureStats,
+  selectRows,
+  shapeDiff,
+  signatureStats,
+  type ToolStats,
+  toolStats,
+} from "./analysis.js";
 export type { BoundaryOptions, BoundaryState, Failure, PendingCall, Rewrite } from "./boundary.js";
 export {
   ANNOUNCEMENT,
@@ -79,6 +93,15 @@ export {
   installHost,
   isBoundaryEntry,
 } from "./onboarding.js";
+export {
+  localCollectorListening,
+  OtlpExporter,
+  type OtlpOptions,
+  otlpEndpointFromEnv,
+  otlpHeadersFromEnv,
+  resolveOtlpEndpoint,
+  spanAttributes,
+} from "./otlp.js";
 export type { HoldMode, PolicyOptions } from "./policy.js";
 export { DEFAULT_POLICY, parseClassOverrides, shouldHold, ToolClassifier } from "./policy.js";
 export type { DaemonInfo, Registry, ServerConfig } from "./registry.js";

@@ -70,6 +70,17 @@ sayagain status                      # SAYAGAIN_HOME=<dir> moves every file the 
 sayagain wrap -- npx -y @notionhq/notion-mcp-server
 ```
 
+Once calls flow, the ledger answers the Databricks questions ("which tool
+errors recur most, how many calls does recovery take") for your own tools:
+
+```bash
+sayagain tools --since 7d            # ranked by the waste their failures cause
+sayagain errors create_page          # signatures, recovery paths, shape changes, suggestions
+sayagain report                      # the weekly page from docs/measurement.md
+sayagain lint --all                  # grade every registered server's tool definitions
+sayagain serve --otlp http://127.0.0.1:4318/v1/traces   # or OTEL_EXPORTER_OTLP_ENDPOINT; a local collector is found by itself
+```
+
 Options: `--hold destructive|always|never`, `--hold-wait <ms>`,
 `--class <tool>=<class>`, `--dedupe-window <ms>`, `--retry <n>`,
 `--no-repair`, `--no-rewrite-errors`, `--no-announce`, `--ledger <path>`,

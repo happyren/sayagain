@@ -9,11 +9,14 @@ import { DeadLetterStore } from "./deadletter.js";
 import type { HoldQueue } from "./holds.js";
 import { LineSplitter } from "./jsonrpc.js";
 import { JsonlLedger, type Ledger } from "./ledger.js";
+import type { OtlpExporter } from "./otlp.js";
 import type { PolicyOptions, ToolClassifier } from "./policy.js";
 import { StdioUpstream } from "./upstream-stdio.js";
 import { PROXY_VERSION } from "./version.js";
 
 export interface WrapOptions {
+  /** Export one span per call to an OTLP/HTTP collector. */
+  otlp?: OtlpExporter;
   command: string;
   args?: string[];
   /** Defaults to process.stdin / process.stdout. */
@@ -94,6 +97,7 @@ export function wrap(options: WrapOptions): Wrapped {
     if (finished) return;
     finished = true;
     void boundary.close();
+    void options.otlp?.close();
     control?.close();
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
@@ -115,6 +119,7 @@ export function wrap(options: WrapOptions): Wrapped {
   process.on("SIGINT", onSigint);
   process.on("SIGTERM", onSigterm);
 
+  if (options.otlp) boundary.on("row", (row) => options.otlp?.record(row));
   boundary.on("upstream-closed", (_reason: string, code: number | null) => {
     exitCode = code ?? 0;
     finish();
