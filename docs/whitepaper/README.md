@@ -15,7 +15,8 @@ document explains them. Draft sections:
 4. **Schemas that fix format, not intent.** What `strict` buys and what it
    does not; examples as the cheapest accuracy lever.
 5. **Writing for a proxy.** Idempotency, postconditions, and how to make a
-   tool safe to hold and replay.
+   tool safe to hold and replay: the `sh.sayagain/idempotency` and
+   `sh.sayagain/compensation` declarations (spec section 8, SEP draft).
 6. **Stating intent.** The `sh.sayagain/intent` convention and the schema
    shim; guidance for host and SDK authors.
 7. **Scoring.** How the linter grades a server; what "A" means.

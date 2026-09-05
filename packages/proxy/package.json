@@ -1,6 +1,6 @@
 {
   "name": "@sayagain/proxy",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Say Again: the commitment boundary for MCP tool calls. wrap, daemon, receipts, dedupe, holds, repair, dead-letter and replay.",
   "license": "Apache-2.0",
   "type": "module",

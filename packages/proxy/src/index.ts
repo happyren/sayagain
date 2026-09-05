@@ -155,6 +155,22 @@ export {
   summarizeScan,
   wilson,
 } from "./registry-scan.js";
+export type {
+  Fix,
+  Grade,
+  IndexedServer,
+  IndexedTool,
+  ReliabilityIndex,
+  RuntimeScore,
+} from "./reliability-index.js";
+export {
+  badgeSvg,
+  buildIndex,
+  fixesText,
+  GRADE_SCORE,
+  renderIndexSite,
+  slugOf,
+} from "./reliability-index.js";
 export type { RepairChange, RepairResult } from "./repair.js";
 export { repairArguments } from "./repair.js";
 export { daemonHealthy, ensureDaemon, runStdioShim } from "./shim.js";

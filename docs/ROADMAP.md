@@ -100,6 +100,17 @@ Deliverables
   (spec v0.1.x), idempotency and compensation annotations, and the SEP
   draft. Compensation declarations become a linter rule.
 
+Status, 2026-09-05 (0.12.0): the index builds as a static site
+(`sayagain index build`, ADR-0010) with a page and a badge per server, a
+badge per tool and `index.json`; `sayagain index fixes <server>` writes the
+outreach message; the `Index` workflow scans and builds on demand and
+publishes to GitHub Pages once the owner sets `SAYAGAIN_INDEX_PAGES`
+(decision 3 stays open, so nothing is public yet). The convention is spec
+v0.1.7 (tool declarations: idempotency, compensation) with the SEP draft
+in `docs/sep-draft.md` and `annotations/compensation` in the linter. The
+data post is drafted in `docs/data-post.md`. Outreach itself, the runtime
+scores' first real data, and the public URL wait on the owner.
+
 Metric that proves it worked
 
 - Index live with a static score for every registry tool and a runtime

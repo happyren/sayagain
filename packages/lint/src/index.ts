@@ -28,7 +28,7 @@ export interface Rule {
  * The rule set's version: the date the catalogue or a check last changed. A scan or a grade
  * quotes it so the number can be reproduced (docs/measurement.md 5.5).
  */
-export const RULE_SET_VERSION = "2026-09-05";
+export const RULE_SET_VERSION = "2026-09-05.1";
 
 export const RULES: readonly Rule[] = [
   {
@@ -132,6 +132,14 @@ export const RULES: readonly Rule[] = [
     implemented: true,
   },
   {
+    id: "annotations/compensation",
+    category: "annotations",
+    severity: "info",
+    summary:
+      'A tool that is neither read-only nor idempotent declares how to undo it, or that it cannot be undone (`_meta["sh.sayagain/compensation"]`, spec section 8).',
+    implemented: true,
+  },
+  {
     id: "examples/present",
     category: "examples",
     severity: "info",
@@ -169,6 +177,8 @@ export interface ToolDefinition {
     idempotentHint?: boolean;
     openWorldHint?: boolean;
   };
+  /** Reverse-DNS keys; `sh.sayagain/compensation` and `sh.sayagain/idempotency` are read here. */
+  _meta?: Record<string, unknown>;
 }
 
 export interface Finding {
@@ -290,6 +300,12 @@ export function lintTool(tool: ToolDefinition): Finding[] {
     );
   if (a?.readOnlyHint === true && a.destructiveHint === true)
     emit("annotations/consistent", "tool is annotated both read-only and destructive");
+  const undoable = a?.readOnlyHint !== true && a?.idempotentHint !== true;
+  if (undoable && tool._meta?.["sh.sayagain/compensation"] === undefined)
+    emit(
+      "annotations/compensation",
+      "neither read-only nor idempotent, and no compensation is declared (nor that none exists)",
+    );
 
   return out;
 }

@@ -19,6 +19,9 @@ const good: ToolDefinition = {
     additionalProperties: false,
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  _meta: {
+    "sh.sayagain/compensation": { tool: "close_issue", arguments: { number: "$result.number" } },
+  },
 };
 
 describe("RULES", () => {
@@ -93,7 +96,31 @@ describe("lintTool", () => {
       lintTool({ name: "x", inputSchema: { type: "object", properties: { a: broken } } }),
     ).not.toThrow();
     expect(RULES.find((r) => r.id === "params/constrained")?.implemented).toBe(true);
-    expect(RULE_SET_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(RULE_SET_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
+  });
+  it("asks a write that cannot be repeated to say how it is undone", () => {
+    const { _meta, ...bare } = good;
+    const ids = lintTool(bare).map((x) => x.rule);
+    expect(ids).toEqual(["annotations/compensation"]);
+    expect(grade(lintTool(bare))).toBe("A"); // informational: the grade does not move
+    expect(
+      lintTool({
+        ...bare,
+        _meta: { "sh.sayagain/compensation": { none: "an email cannot be unsent" } },
+      }),
+    ).toEqual([]);
+    expect(
+      lintTool({
+        ...bare,
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false },
+      }).map((x) => x.rule),
+    ).not.toContain("annotations/compensation");
+    expect(
+      lintTool({
+        ...bare,
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      }).map((x) => x.rule),
+    ).not.toContain("annotations/compensation");
   });
   it("catches contradictory annotations", () => {
     const f = lintTool({

@@ -316,7 +316,7 @@ describe("registry scan", () => {
       concurrency: 3,
       ...local,
     });
-    expect(scan.ruleSet).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(scan.ruleSet).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
     expect(scan.selection).toEqual({ mode: "all", listed: 13, withRemote: 11, chosen: 11 });
     expect(scan.outcomes).toEqual({
       ok: 3,

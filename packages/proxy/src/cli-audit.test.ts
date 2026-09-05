@@ -264,6 +264,101 @@ describe("cli audit and contribute", () => {
     }
   });
 
+  it("index build writes the site and index fixes prints the maintainer's message", async () => {
+    const scan = {
+      generatedAt: "2026-09-05T12:00:00Z",
+      registry: "https://registry.example/v0/servers",
+      ruleSet: "2026-09-05.1",
+      selection: { mode: "all", listed: 2, withRemote: 1, chosen: 1 },
+      outcomes: {
+        ok: 1,
+        auth: 0,
+        refused: 0,
+        unreachable: 0,
+        "not-mcp": 0,
+        "no-tools": 0,
+        skipped: 0,
+      },
+      tools: 1,
+      invalidTools: 0,
+      grades: { A: 0, B: 0, C: 0, D: 0, F: 1 },
+      findingShares: {},
+      m16: {
+        pct: 100,
+        low: 20.7,
+        high: 100,
+        n: 1,
+        servers: 1,
+        serversWithFinding: 1,
+        medianServerSharePct: 100,
+      },
+      servers: [
+        {
+          name: "io.example/one",
+          version: "1",
+          url: "https://one.example/mcp",
+          hasPackages: false,
+          needsSecret: false,
+          outcome: "ok",
+          ms: 1,
+          invalidTools: 0,
+          tools: [
+            {
+              name: "t",
+              grade: "F",
+              findings: [
+                {
+                  rule: "description/present",
+                  severity: "error",
+                  message: "tool has no description",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const from = join(dir, "scan.json");
+    writeFileSync(from, JSON.stringify(scan));
+    mkdirSync(join(dir, "home", "contributions"), { recursive: true });
+    writeFileSync(join(dir, "home", "contributions", "bad.json"), "{}"); // skipped with a note, not fatal
+    const out2 = join(dir, "site");
+    expect(
+      await main([
+        "index",
+        "build",
+        "--from",
+        from,
+        "--out",
+        out2,
+        "--base-url",
+        "https://x.example/",
+      ]),
+    ).toBe(0);
+    expect(out).toContain(
+      "index: 1 servers graded, 0 with runtime data from 0 contributions; 5 files written to",
+    );
+    expect(existsSync(join(out2, "index.html"))).toBe(true);
+    expect(existsSync(join(out2, "servers", "io-example-one.html"))).toBe(true);
+    expect(existsSync(join(out2, "badges", "io-example-one", "t.svg"))).toBe(true);
+    expect(readFileSync(join(out2, "index.html"), "utf8")).toContain(
+      'href="https://x.example/servers/io-example-one.html"',
+    );
+    out = "";
+    expect(await main(["index", "fixes", "io.example/one", "--from", from])).toBe(0);
+    expect(out).toContain("io.example/one 1 on the Tool Reliability Index");
+    expect(out).toContain("1. Tool has a description. (description/present; 1 of 1 tools)");
+    await expect(main(["index", "fixes", "nope", "--from", from])).rejects.toThrow(
+      /no server nope/,
+    );
+    await expect(main(["index", "build"])).rejects.toThrow(/--from/);
+    await expect(main(["index", "publish"])).rejects.toThrow(/build or fixes/);
+    writeFileSync(from, JSON.stringify({ hello: 1 }));
+    await expect(main(["index", "build", "--from", from, "--out", out2])).rejects.toThrow(
+      /not a registry scan/,
+    );
+  });
+
   it("audit writes its page under the home directory by default", async () => {
     const claude = join(dir, "claude");
     writeClaudeCodeFixture(claude);
