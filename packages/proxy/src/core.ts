@@ -42,6 +42,7 @@ import {
   type JsonRpcRequest,
   parseMessage,
 } from "./jsonrpc.js";
+import { applyLearnedCoercions, augmentDescription, type LearnedStore } from "./learned.js";
 import type { Ledger } from "./ledger.js";
 import { DEFAULT_POLICY, type PolicyOptions, shouldHold, ToolClassifier } from "./policy.js";
 import { repairArguments } from "./repair.js";
@@ -68,6 +69,8 @@ export interface BoundaryCoreOptions {
   /** Start the upstream again after it exited, on the next message. Default false (wrap); the daemon sets true. */
   restartUpstream?: boolean;
   clientInfo?: { name: string; version: string };
+  /** The learning loop's interventions for this deployment. */
+  learned?: LearnedStore;
 }
 
 interface SessionEntry {
@@ -86,6 +89,10 @@ type FailureAction = "retry" | "repair" | "hold" | "final";
 
 const MAX_START_BACKOFF_MS = 30_000;
 
+/** A tools/list whose _meta asks for the upstream's own descriptions (the linter does). */
+const plainRequested = (msg: JsonRpcRequest): boolean =>
+  (msg.params?._meta as Record<string, unknown> | undefined)?.["sh.sayagain/plain"] === true;
+
 export class Boundary extends EventEmitter {
   readonly name: string;
   readonly holds: HoldQueue;
@@ -101,6 +108,8 @@ export class Boundary extends EventEmitter {
   private readonly settles = new Map<string, (r: Remembered | null) => void>();
   private readonly heldById = new Map<string, PendingCall>();
   private readonly heldByClient = new Map<string, PendingCall>();
+  /** tools/list requests that asked for the upstream\'s descriptions without the learned block. */
+  private readonly plainLists = new Set<string>();
   private readonly repairBudget = new Map<string, number>();
   private readonly replayWaiters = new Map<
     string,
@@ -521,6 +530,8 @@ export class Boundary extends EventEmitter {
         return;
       }
       if (mapped.method === "tools/list") this.state.toolsListIds.add(keyOf(upstreamId));
+      if (mapped.method === "tools/list" && plainRequested(mapped))
+        this.plainLists.add(keyOf(upstreamId));
       this.sendUpstream(`${JSON.stringify(mapped)}\n`);
       return;
     }
@@ -720,8 +731,26 @@ export class Boundary extends EventEmitter {
     const tool = typeof msg.params?.name === "string" ? msg.params.name : "";
     await this.untilWarm();
     if (!this.classifier.warm) this.warmClassifier();
-    const text = `${JSON.stringify(msg)}\n`;
-    const call = describeCall(msg, text, this.classifier.classOf(tool), Buffer.byteLength(text));
+    const toolClass = this.classifier.classOf(tool);
+    // A learned coercion changes the arguments before a read-only call leaves. Any other class keeps
+    // the 0.3 rule: arguments change only after a failure, and a write's then wait behind a hold.
+    let outgoing = msg;
+    let learned: ReturnType<typeof applyLearnedCoercions> = null;
+    if (this.opts.learned && toolClass === "read-only") {
+      this.opts.learned.maybeReload();
+      const rules = this.opts.learned.coercionsFor(this.name, tool, this.state.upstreamName);
+      if (rules.length) learned = applyLearnedCoercions(msg.params?.arguments, rules);
+      if (learned)
+        outgoing = { ...msg, params: { ...(msg.params ?? {}), arguments: learned.arguments } };
+    }
+    const text = `${JSON.stringify(outgoing)}
+`;
+    const call = describeCall(outgoing, text, toolClass, Buffer.byteLength(text));
+    if (learned) {
+      call.preCoercions = learned.changes;
+      // Dedupe and identical-retry detection compare what the client sent, not what left.
+      call.clientArgsHash = hashArgs(msg.params?.arguments);
+    }
     const routed = this.idMap.get(keyOf(msg.id));
     if (routed && !routed.session.ephemeral) call.session = routed.session.id;
     call.server = this.name;
@@ -781,8 +810,11 @@ export class Boundary extends EventEmitter {
     }
     if (failure.errorClass === "coercible" && this.policy.repair && call.repairs.length === 0) {
       const used = this.repairBudget.get(this.budgetKey(call, now)) ?? 0;
-      if (used < this.policy.repairsPerTask && this.classifier.schemaOf(call.tool) !== undefined)
-        return "repair";
+      const canRepair =
+        this.classifier.schemaOf(call.tool) !== undefined ||
+        (this.opts.learned?.coercionsFor(this.name, call.tool, this.state.upstreamName).length ??
+          0) > 0;
+      if (used < this.policy.repairsPerTask && canRepair) return "repair";
     }
     return "final";
   }
@@ -804,7 +836,14 @@ export class Boundary extends EventEmitter {
       return true;
     }
     if (action === "repair") {
-      const repaired = repairArguments(call.arguments, this.classifier.schemaOf(call.tool));
+      const repaired =
+        repairArguments(call.arguments, this.classifier.schemaOf(call.tool)) ??
+        (this.opts.learned
+          ? applyLearnedCoercions(
+              call.arguments,
+              this.opts.learned.coercionsFor(this.name, call.tool, this.state.upstreamName),
+            )
+          : null);
       if (!repaired) return false;
       // The attempt row describes what failed: the shape before the repair.
       const attemptRow = failedAttemptRow(call, this.state.upstreamName, failure, bytes, now);
@@ -1011,6 +1050,8 @@ export class Boundary extends EventEmitter {
       shim: false,
       hold: this.policy.hold,
       rewriteErrors: this.policy.rewriteErrors,
+      learnedHint: (tool: string, signature: string, applied: string[]) =>
+        this.opts.learned?.hintFor(this.name, tool, signature, this.state.upstreamName, applied),
     };
     const { message, swallow, row, tools, probed, remember, call } = rewriteServerMessage(
       msg,
@@ -1048,6 +1089,37 @@ export class Boundary extends EventEmitter {
       }
     }
     if (swallow) return;
+    if (tools !== undefined && this.opts.learned) {
+      const plain =
+        "id" in msg &&
+        msg.id !== null &&
+        msg.id !== undefined &&
+        this.plainLists.delete(keyOf(msg.id));
+      if (!plain) this.augmentTools(message);
+    }
     this.deliver(message);
+  }
+
+  /** Append the loop's facts to the descriptions a host sees; the upstream's text is kept intact. */
+  private augmentTools(message: JsonRpcMessage): void {
+    const learned = this.opts.learned;
+    if (
+      !learned ||
+      !("result" in message) ||
+      typeof message.result !== "object" ||
+      message.result === null
+    )
+      return;
+    const result = message.result as { tools?: unknown };
+    if (!Array.isArray(result.tools)) return;
+    result.tools = result.tools.map((t) => {
+      if (typeof t !== "object" || t === null || typeof (t as { name?: unknown }).name !== "string")
+        return t;
+      const tool = t as { name: string; description?: unknown };
+      const facts = learned.factsFor(this.name, tool.name, this.state.upstreamName);
+      if (!facts.length) return t;
+      const description = augmentDescription(tool.description, facts);
+      return description === undefined ? t : { ...tool, description };
+    });
   }
 }

@@ -7,6 +7,8 @@
 export interface RepairChange {
   path: string;
   rule: string;
+  /** The learned intervention that produced the change, when one did. Never written to the ledger. */
+  via?: string;
   from?: unknown;
   to?: unknown;
 }

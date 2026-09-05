@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 /**
  * `sayagain wrap`: the boundary in-process around one stdio MCP server,
  * with the host on this process's own stdin and stdout.
@@ -8,6 +9,7 @@ import { Boundary } from "./core.js";
 import { DeadLetterStore } from "./deadletter.js";
 import type { HoldQueue } from "./holds.js";
 import { LineSplitter } from "./jsonrpc.js";
+import { defaultLearnedPath, LearnedStore } from "./learned.js";
 import { JsonlLedger, type Ledger } from "./ledger.js";
 import type { OtlpExporter } from "./otlp.js";
 import type { PolicyOptions, ToolClassifier } from "./policy.js";
@@ -17,6 +19,8 @@ import { PROXY_VERSION } from "./version.js";
 export interface WrapOptions {
   /** Export one span per call to an OTLP/HTTP collector. */
   otlp?: OtlpExporter;
+  /** The learning loop's store; default: ~/.sayagain/learned.json when it exists. */
+  learned?: LearnedStore | false;
   command: string;
   args?: string[];
   /** Defaults to process.stdin / process.stdout. */
@@ -78,6 +82,11 @@ export function wrap(options: WrapOptions): Wrapped {
     log,
   };
   if (options.policy) coreOptions.policy = options.policy;
+  const learned =
+    options.learned === false
+      ? undefined
+      : (options.learned ?? (existsSync(defaultLearnedPath()) ? new LearnedStore() : undefined));
+  if (learned) coreOptions.learned = learned;
   if (options.holdTtlMs !== undefined) coreOptions.holdTtlMs = options.holdTtlMs;
   if (options.warmupMs !== undefined) coreOptions.warmupMs = options.warmupMs;
   if (options.pendingTtlMs !== undefined) coreOptions.pendingTtlMs = options.pendingTtlMs;

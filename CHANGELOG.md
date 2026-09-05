@@ -6,6 +6,47 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-05
+
+### Added
+
+- The learning loop (ADR-0007), from this deployment's own ledger, argument
+  values never read. A signature seen at least three times with a recovery
+  that changed an argument's type becomes a **learned coercion**: the
+  boundary applies the conversion before a read-only or idempotent call
+  leaves (`sh.sayagain/repair` rule `learned:<rule>`, status `repaired`; a
+  coerced call that still fails is an ordinary failure, not a dead letter),
+  and offers it as the repair after a failure on any tool, where a write
+  still waits behind a hold. Only a conversion that prints back as the same
+  text is applied: `"007"` and `"1e3"` are left alone. Evidence counts the
+  specific change, not the signature, and a diff that also added or removed
+  a key teaches nothing. A semantic failure whose usual recovery began with
+  another tool becomes a **hint**: a sentence appended to the tool's
+  description in `tools/list` (delimited `[Say Again learned]`, at most 200
+  characters, the upstream's text untouched) and to the error the model sees
+  when the signature recurs, naming what fixed it last time.
+- Every intervention is measured: the tool's failure rate and median calls
+  to recover before and after activation. After twenty calls without a lower
+  failure rate, measured on that failure's own signatures, it reverts itself
+  and says why. The daemon runs the pass at start and every ten minutes over
+  the last ninety days; `wrap` reads `~/.sayagain/learned.json` when it
+  exists and picks up changes within seconds, but does not measure or
+  revert on its own (`wrap --no-learn` ignores the file).
+- `sayagain learn [--update] [--json]` lists interventions with their
+  numbers (only `--update` derives and writes); `--disable <id>` and
+  `--enable <id>` switch one, keeping the automatic verdict in the record;
+  `--report
+  <server>` prints a tool definition report (signatures with ten or more
+  occurrences, what fixed them, what the loop tried) to file against the
+  upstream. Routes `/api/learn`, `/api/learn/update`,
+  `/api/learn/:id/disable|enable`, `/api/learn/report/:server`; a Learn
+  screen in the page.
+
+### Deferred
+
+- Per-server instruction hints and pruning suggestions from ADR-0007, and
+  the settings screen.
+
 ## [0.7.0] - 2026-09-05
 
 ### Added

@@ -153,4 +153,44 @@ describe("cli analysis", () => {
       /--file takes no server name/,
     );
   });
+
+  it("learn derives from the ledger, lists with numbers, and reverts by id", async () => {
+    const rows: LedgerRow[] = [];
+    for (let i = 0; i < 3; i++) {
+      rows.push(
+        row(5 - i, {
+          tool: "strict",
+          isError: true,
+          errorClass: "coercible",
+          errorSignature: "Invalid params: limit must be a number",
+          argShape: ["limit:string"],
+          argsHash: `a${i}`,
+        }),
+      );
+      rows.push(
+        row(5 - i - 0.01, { tool: "strict", argShape: ["limit:number"], argsHash: `b${i}` }),
+      );
+    }
+    writeFileSync(
+      join(dir, "home", "ledger.jsonl"),
+      `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`,
+    );
+    expect(await main(["learn"])).toBe(0);
+    expect(out).toContain("nothing learned yet"); // listing never derives; only --update writes the file
+    out = "";
+    expect(await main(["learn", "--update"])).toBe(0);
+    expect(out).toContain("active   coerce:fake-notion/strict/limit:string-number");
+    expect(out).toContain("string-to-number on /limit");
+    out = "";
+    expect(await main(["learn", "--revert", "coerce:fake-notion/strict/limit:string-number"])).toBe(
+      0,
+    );
+    expect(out.trim()).toBe("coerce:fake-notion/strict/limit:string-number: disabled");
+    out = "";
+    expect(await main(["learn", "--json"])).toBe(0);
+    expect(
+      (JSON.parse(out) as { interventions: { state: string }[] }).interventions[0]?.state,
+    ).toBe("disabled");
+    await expect(main(["learn", "--enable", "nope"])).rejects.toThrow(/no intervention/);
+  });
 });

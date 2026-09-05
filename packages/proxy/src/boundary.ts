@@ -50,6 +50,8 @@ export interface PendingCall {
   held?: HeldInfo;
   attempts: number;
   repairs: RepairChange[];
+  /** Learned coercions applied before the call left: a change, but not an attempt at recovery. */
+  preCoercions: RepairChange[];
   replayOf?: string;
   /** The last failure the boundary saw for this call, kept for the rows it writes while holding. */
   lastFailure?: Failure;
@@ -74,6 +76,8 @@ export interface BoundaryOptions {
   shim: boolean;
   hold?: string;
   rewriteErrors?: boolean;
+  /** A sentence the learning loop appends to an error whose signature it has seen fixed before; `applied` names interventions already used on this call. */
+  learnedHint?: (tool: string, signature: string, applied: string[]) => string | undefined;
 }
 
 export const ANNOUNCEMENT =
@@ -161,6 +165,7 @@ export function describeCall(
     rawLine,
     attempts: 1,
     repairs: [],
+    preCoercions: [],
   };
   if (intent !== undefined) call.intent = intent;
   if (typeof meta[META.task] === "string") call.task = meta[META.task] as string;
@@ -239,6 +244,16 @@ export function withArguments(rawLine: string, args: unknown, id?: JsonRpcId): s
   return JSON.stringify(out);
 }
 
+const hintText = (
+  opts: BoundaryOptions,
+  tool: string,
+  signature: string,
+  applied: string[],
+): string => {
+  const hint = opts.learnedHint?.(tool, signature, applied);
+  return hint ? ` ${hint}` : "";
+};
+
 const stampMeta = (result: Record<string, unknown>, entries: Record<string, unknown>): void => {
   result._meta = { ...((result._meta as Record<string, unknown> | undefined) ?? {}), ...entries };
 };
@@ -271,7 +286,8 @@ export function baseRow(
   if (call.server !== undefined) row.server = call.server;
   if (call.held) row.held = { ...call.held };
   if (call.attempts > 1) row.attempts = call.attempts;
-  if (call.repairs.length) row.repairs = call.repairs.map((c) => ({ path: c.path, rule: c.rule }));
+  const changed = [...call.preCoercions, ...call.repairs];
+  if (changed.length) row.repairs = changed.map((c) => ({ path: c.path, rule: c.rule }));
   if (call.replayOf !== undefined) row.replayOf = call.replayOf;
   if (call.budget !== undefined) row.budget = call.budget;
   return row;
@@ -375,7 +391,7 @@ export function rewriteServerMessage(
     ? tried && call.replayOf === undefined
       ? "dead-lettered"
       : "executed"
-    : call.repairs.length
+    : call.repairs.length || call.preCoercions.length
       ? "repaired"
       : "executed";
   const row = baseRow(call, state.upstreamName, status, bytes, now);
@@ -386,10 +402,11 @@ export function rewriteServerMessage(
       mode: call.held.mode,
       decision: call.held.decision ?? null,
     };
-  if (call.repairs.length)
+  const allChanges = [...call.preCoercions, ...call.repairs];
+  if (allChanges.length)
     meta[META.repair] = {
-      kind: call.repairs.every((c) => c.rule === "rename") ? "rename" : "coerce",
-      changes: call.repairs,
+      kind: allChanges.every((c) => c.rule === "rename") ? "rename" : "coerce",
+      changes: allChanges.map(({ via: _via, ...c }) => c),
     };
   if (call.replayOf !== undefined) meta[META.replayOf] = call.replayOf;
 
@@ -430,14 +447,21 @@ export function rewriteServerMessage(
       const content = Array.isArray(result.content) ? [...result.content] : [];
       content.push({
         type: "text",
-        text: guidanceFor({
-          errorClass: failure.errorClass,
-          attempts: call.attempts,
-          repaired: call.repairs.length > 0,
-          receipt: call.receipt,
-          status: status === "dead-lettered" ? "dead-lettered" : "executed",
-          tool: call.tool,
-        }),
+        text:
+          guidanceFor({
+            errorClass: failure.errorClass,
+            attempts: call.attempts,
+            repaired: call.repairs.length > 0,
+            receipt: call.receipt,
+            status: status === "dead-lettered" ? "dead-lettered" : "executed",
+            tool: call.tool,
+          }) +
+          hintText(
+            opts,
+            call.tool,
+            failure.signature,
+            call.preCoercions.map((c) => c.via ?? ""),
+          ),
       });
       result.content = content;
     }

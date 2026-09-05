@@ -94,7 +94,9 @@ number does not move. In order of cost:
 1. **Learned coercion.** When a signature's most common shape change is a
    type conversion (array to comma-separated string, string to integer,
    ISO date normalisation), the boundary applies it deterministically for
-   that tool and records `sayagain.repair.rule = learned:<signature-id>`.
+   that tool and records `sayagain.repair.rule = learned:<rule>` (the
+   intervention's id stays in the local store, where `sayagain learn`
+   shows it with its numbers).
    This is the Databricks fix, applied at the boundary without touching the
    server.
 2. **Description augmentation.** The boundary appends learned facts to the
@@ -133,7 +135,8 @@ enough to say "this tool fails on `fields` for most people".
 - `sayagain errors [tool]` — signatures with counts, class, turns,
   recovery path and shape change (0.6).
 - `sayagain learn` — the current learned coercions, augmentations and
-  hints, each with its before and after numbers and a `--revert` (0.8).
+  hints, each with its before and after numbers and a `--revert` (0.8:
+  interventions 1, 2, 3 and 6 of the loop; 4 and 5 later).
 - `sayagain report --weekly` — the one page from `docs/measurement.md`
   section 6, plus the top five signatures (0.6; the annualised cost waits
   for token counts from a host).

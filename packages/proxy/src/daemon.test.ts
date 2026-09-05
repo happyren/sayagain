@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type Daemon, startDaemon } from "./daemon.js";
+import { LearnedStore } from "./learned.js";
 import { runStdioShim } from "./shim.js";
 import { openStores, sqliteAvailable } from "./stores.js";
 
@@ -526,5 +527,118 @@ describe("daemon", () => {
     expect((await api(d, "/api/report?since=soon")) as { error: string }).toMatchObject({
       error: expect.stringContaining("duration"),
     });
+  });
+
+  it("applies a learned coercion before a safe call leaves, augments tools/list, hints on a known failure, and obeys revert", async () => {
+    const seeded = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      interventions: [
+        {
+          id: "coerce:fake/strict/limit:string-number",
+          kind: "coerce",
+          server: "fake",
+          tool: "strict",
+          signature: "Invalid params: limit must be a number",
+          errorClass: "coercible",
+          path: "/limit",
+          from: "string",
+          to: "number",
+          rule: "string-to-number",
+          fact: "`limit` is a number, not a string.",
+          errorHint:
+            "Say Again: last time this failed it was fixed by passing `limit` as a number instead of a string.",
+          evidence: 3,
+          learnedAt: new Date().toISOString(),
+          activatedAt: new Date().toISOString(),
+          state: "active",
+        },
+        {
+          id: "hint:fake/missing:precondition:x",
+          kind: "hint",
+          server: "fake",
+          tool: "missing",
+          signature: "Error: page <str> not found",
+          errorClass: "semantic",
+          fact: "Call `echo` first; `missing` fails otherwise.",
+          errorHint: "Say Again: last time this was fixed by calling `echo` first.",
+          evidence: 3,
+          learnedAt: new Date().toISOString(),
+          activatedAt: new Date().toISOString(),
+          state: "active",
+        },
+      ],
+    };
+    writeFileSync(join(home, "learned.json"), JSON.stringify(seeded));
+    const d = await boot("memory", {
+      learned: new LearnedStore(join(home, "learned.json")),
+      learnEveryMs: 3_600_000,
+    });
+    const call = await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "strict", arguments: { limit: "10" } },
+    });
+    const m = meta(call.body);
+    expect(m["sh.sayagain/status"]).toBe("repaired");
+    expect(m["sh.sayagain/repair"]).toMatchObject({
+      changes: [{ path: "/limit", rule: "learned:string-to-number" }],
+    });
+    expect(JSON.stringify(m["sh.sayagain/repair"])).not.toContain("via");
+    expect((call.body.result as Obj).isError).toBeUndefined();
+    const rows = (await api(d, "/api/ledger?tail=1")) as {
+      status: string;
+      attempts?: number;
+      repairs?: { rule: string }[];
+    }[];
+    expect(rows[0]).toMatchObject({
+      status: "repaired",
+      repairs: [{ rule: "learned:string-to-number" }],
+    });
+    expect(rows[0]?.attempts).toBeUndefined(); // one attempt: the failure never happened
+    const list = await rpc(d, "fake", { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+    const tools = (list.body.result as Obj).tools as { name: string; description?: string }[];
+    expect(tools.find((t) => t.name === "strict")?.description).toBe(
+      "[Say Again learned] `limit` is a number, not a string.",
+    );
+    expect(tools.find((t) => t.name === "echo")?.description).toBeUndefined();
+    const missing = await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "missing", arguments: {} },
+    });
+    const text = ((missing.body.result as Obj).content as { text: string }[])
+      .map((c) => c.text)
+      .join("\n");
+    expect(text).toContain("Say Again: last time this was fixed by calling `echo` first.");
+    expect(
+      ((await api(d, "/api/learn")) as { interventions: unknown[] }).interventions,
+    ).toHaveLength(2);
+    expect(
+      (await api(d, "/api/learn/coerce%3Afake%2Fstrict%2Flimit%3Astring-number/revert", {
+        method: "POST",
+      })) as Obj,
+    ).toMatchObject({ state: "disabled" });
+    const after = await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "strict", arguments: { limit: "10" } },
+    });
+    expect(meta(after.body)["sh.sayagain/status"]).toBe("repaired"); // the schema repair still catches it, after a failure
+    expect(meta(after.body)["sh.sayagain/repair"]).toMatchObject({
+      changes: [{ rule: "string-to-number" }],
+    });
+    expect((await api(d, "/api/learn/nope/enable", { method: "POST" })) as Obj).toMatchObject({
+      error: expect.stringContaining("no intervention"),
+    });
+    const report = await (
+      await fetch(`${d.url}/api/learn/report/fake`, {
+        headers: { authorization: `Bearer ${d.token}` },
+      })
+    ).text();
+    expect(report).toContain("# Tool definition report: fake");
   });
 });

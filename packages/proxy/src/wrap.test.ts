@@ -1,6 +1,9 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
+import { LearnedStore } from "./learned.js";
 import { MemoryLedger } from "./ledger.js";
 import { OtlpExporter } from "./otlp.js";
 import { PROXY_VERSION } from "./version.js";
@@ -494,5 +497,64 @@ describe("lifecycle", () => {
       b.resourceSpans.flatMap((r) => r.scopeSpans.flatMap((x) => x.spans)),
     );
     expect(spans.map((s) => s.name)).toEqual(["tools/call echo"]);
+  });
+
+  it("applies a learned coercion from learned.json and notices when the file changes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sayagain-wrap-learned-"));
+    const path = join(dir, "learned.json");
+    const intervention = {
+      id: "coerce:fake/strict/limit:string-number",
+      kind: "coerce",
+      server: "upstream",
+      tool: "strict",
+      signature: "x",
+      signatures: ["x"],
+      errorClass: "coercible",
+      path: "/limit",
+      from: "string",
+      to: "number",
+      rule: "string-to-number",
+      evidence: 3,
+      learnedAt: "2026-09-05T00:00:00Z",
+      activatedAt: "2026-09-05T00:00:00Z",
+      state: "active",
+    };
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        updatedAt: "2026-09-05T00:00:00Z",
+        interventions: [intervention],
+      }),
+    );
+    const store = new LearnedStore(path);
+    const h = harness({}, { learned: store });
+    try {
+      await h.handshake();
+      h.call(1, "strict", { limit: "10" });
+      const first = await h.waitFor(1);
+      const firstMeta = (first.result as Record<string, unknown>)._meta as Record<string, unknown>;
+      expect(firstMeta["sh.sayagain/status"]).toBe("repaired");
+      expect(JSON.stringify(firstMeta["sh.sayagain/repair"])).toContain(
+        '"rule":"learned:string-to-number"',
+      );
+      writeFileSync(
+        path,
+        JSON.stringify({
+          version: 1,
+          updatedAt: "2026-09-05T00:00:01Z",
+          interventions: [{ ...intervention, state: "disabled" }],
+        }),
+      );
+      store.maybeReload(0);
+      h.call(2, "strict", { limit: "10" });
+      const second = await h.waitFor(2);
+      const meta = (second.result as Record<string, unknown>)._meta as Record<string, unknown>;
+      expect(meta["sh.sayagain/status"]).toBe("repaired"); // the schema repair, after a failure this time
+      expect(JSON.stringify(meta["sh.sayagain/repair"])).toContain('"rule":"string-to-number"');
+    } finally {
+      await h.finish();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -15,6 +15,8 @@ import {
 import {
   allDeadLetters,
   allHolds,
+  daemonLearn,
+  daemonLearnReport,
   daemonLedger,
   daemonLedgerSince,
   daemonStatus,
@@ -36,6 +38,7 @@ import {
   type Target,
 } from "./hosts.js";
 import { ensureLauncher, launcherCaveat } from "./launcher.js";
+import { type Intervention, LearnedStore, upstreamReport } from "./learned.js";
 import { defaultLedgerPath, JsonlLedger, type LedgerRow, readLedger } from "./ledger.js";
 import { ejectHost, importHost, inspectHost, installHost } from "./onboarding.js";
 import { OtlpExporter, otlpHeadersFromEnv, resolveOtlpEndpoint } from "./otlp.js";
@@ -74,6 +77,7 @@ const USAGE = `sayagain ${PROXY_VERSION}
       --no-repair              disable deterministic argument repair
       --no-rewrite-errors      do not append guidance to failures
       --otlp <url>|off         export one span per call (default: $OTEL_EXPORTER_OTLP_ENDPOINT, else a local collector on :4318; serve remembers it in config.json; SAYAGAIN_OTLP=off disables machine-wide)
+      --no-learn               ignore ~/.sayagain/learned.json (the loop's coercions and hints)
   sayagain serve [--listen 127.0.0.1:7777] [--store jsonl|sqlite] [--db <path>] [--otlp <url>|off] [--detach]
       Run the daemon: one virtual server per registered upstream at /mcp/<name>, plus the control API.
       The bearer token is in ~/.sayagain/token. SAYAGAIN_HOME moves every file elsewhere.
@@ -102,6 +106,11 @@ const USAGE = `sayagain ${PROXY_VERSION}
   sayagain report [--since 7d | --weekly] [--server <name>] [--ledger <path>] [--json]
       The weekly page from docs/measurement.md section 6, from the ledger alone, with the previous window for comparison.
       --server takes the registry name or the upstream's own name. Rows come from the running daemon, else the store.
+  sayagain learn [--update] [--min-evidence 3] [--json]
+      What the loop has learned from your own ledger: coercions applied before a call leaves, facts appended to
+      tool descriptions and errors; each with its before and after numbers, reverted by itself when it does not help.
+  sayagain learn --disable <id> | --enable <id> | --report <server>
+      Switch one intervention off or on (a wrap picks the change up within seconds); or print a tool definition report.
   sayagain lint <name>|--all [--file <tools.json>] [--fail-below A|B|C|D] [--json]
       Grade a server's tool definitions with @sayagain/lint (starts the upstream through the daemon if needed).
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
@@ -291,6 +300,7 @@ export async function main(argv: string[]): Promise<number> {
     const noRepair = takeFlag(opts, "--no-repair");
     const noRewrite = takeFlag(opts, "--no-rewrite-errors");
     const wrapOtlp = takeOption(opts, "--otlp");
+    const noLearn = takeFlag(opts, "--no-learn");
     const classes = parseClassOverrides(takeAll(opts, "--class"));
     if (opts.length) throw new UsageError(`wrap: unknown option ${opts[0]}`);
     if (hold !== undefined && hold !== "destructive" && hold !== "always" && hold !== "never")
@@ -313,6 +323,7 @@ export async function main(argv: string[]): Promise<number> {
     };
     if (upstreamName !== undefined) wrapOptions.upstreamName = upstreamName;
     const wrapOtlpEndpoint = await resolveOtlpEndpoint(wrapOtlp);
+    if (noLearn) wrapOptions.learned = false;
     if (wrapOtlpEndpoint) {
       wrapOptions.otlp = new OtlpExporter({
         endpoint: wrapOtlpEndpoint,
@@ -859,6 +870,96 @@ export async function main(argv: string[]): Promise<number> {
     }
     const r = buildReport(rows, analysis);
     process.stdout.write(json ? `${JSON.stringify(r, null, 2)}\n` : renderReport(r));
+    return 0;
+  }
+
+  if (command === "learn") {
+    const opts = [...rest];
+    const json = takeFlag(opts, "--json");
+    const update = takeFlag(opts, "--update");
+    const revert = takeOption(opts, "--disable") ?? takeOption(opts, "--revert");
+    const enable = takeOption(opts, "--enable");
+    const reportFor = takeOption(opts, "--report");
+    const minEvidence = takeNumber(opts, "--min-evidence");
+    if (opts.length) throw new UsageError(`learn: unknown option ${opts[0]}`);
+    if (reportFor) {
+      const viaDaemon = await daemonLearnReport(reportFor);
+      process.stdout.write(
+        viaDaemon ??
+          upstreamReport(reportFor, await loadRowsSince(new Date(0)), new LearnedStore()),
+      );
+      return 0;
+    }
+    if (revert || enable) {
+      const id = (revert ?? enable) as string;
+      const state = revert ? "disable" : "enable";
+      const viaDaemon = await daemonLearn({ id, state });
+      if (viaDaemon) {
+        process.stdout.write(`${id}: ${(viaDaemon as { state: string }).state}\n`);
+        return 0;
+      }
+      const store = new LearnedStore();
+      if (
+        !store.setState(
+          id,
+          state === "enable" ? "active" : "disabled",
+          state === "enable" ? undefined : "disabled by the operator",
+        )
+      )
+        throw new UsageError(`learn: no intervention ${id}`);
+      store.save();
+      process.stdout.write(`${id}: ${store.get(id)?.state}\n`);
+      return 0;
+    }
+    let interventions: Intervention[];
+    let updatedAt: string;
+    const viaDaemon = await daemonLearn(
+      update
+        ? {
+            update: true,
+            ...(minEvidence !== undefined ? { minEvidence: Math.max(1, minEvidence) } : {}),
+          }
+        : undefined,
+    );
+    if (viaDaemon && "interventions" in viaDaemon) {
+      interventions = viaDaemon.interventions as Intervention[];
+      updatedAt = viaDaemon.updatedAt;
+    } else {
+      const store = new LearnedStore();
+      // Only --update writes the file: listing must never switch the loop on for a wrap.
+      if (update) {
+        store.reconcile(
+          await loadRowsSince(new Date(0)),
+          minEvidence !== undefined ? { minEvidence: Math.max(1, minEvidence) } : {},
+        );
+        store.save();
+      }
+      interventions = store.list();
+      updatedAt = store.updatedAt;
+    }
+    if (json) {
+      process.stdout.write(`${JSON.stringify({ updatedAt, interventions }, null, 2)}\n`);
+      return 0;
+    }
+    if (!interventions.length) {
+      process.stdout.write(
+        "nothing learned yet: the loop needs a signature seen at least 3 times with a recovery that changed the arguments or called another tool first\n",
+      );
+      return 0;
+    }
+    process.stdout.write(`learned as of ${updatedAt.slice(0, 19).replace("T", " ")} UTC\n`);
+    for (const i of interventions) {
+      const what = i.kind === "coerce" ? `${i.rule} on ${i.path}` : (i.fact ?? "");
+      const lift = i.after
+        ? `before ${i.before?.failureRatePct ?? "?"}% fail (${i.before?.calls ?? 0} calls, median ${i.before?.medianCallsToRecover ?? 0} to recover) -> after ${i.after.failureRatePct}% (${i.after.calls} calls, median ${i.after.medianCallsToRecover})`
+        : "";
+      process.stdout.write(
+        `${i.state.padEnd(8)} ${i.id}\n    ${i.server}/${i.tool}: ${what}  (${i.evidence} occurrences of: ${i.signature.slice(0, 80)})\n${lift ? `    ${lift}\n` : ""}${i.reason ? `    ${i.reason}\n` : ""}`,
+      );
+    }
+    process.stdout.write(
+      "\nsayagain learn --disable <id> turns one off; --enable <id> turns it back on; --report <server> writes the upstream report\n",
+    );
     return 0;
   }
 

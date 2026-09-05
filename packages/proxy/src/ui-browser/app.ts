@@ -364,6 +364,52 @@ ${
 }`;
 }
 
+interface Intervention {
+  id: string;
+  kind: "coerce" | "hint";
+  server: string;
+  tool: string;
+  signature: string;
+  path?: string;
+  rule?: string;
+  fact?: string;
+  evidence: number;
+  activatedAt: string;
+  state: "active" | "disabled" | "reverted";
+  reason?: string;
+  before?: { calls: number; failureRatePct: number; medianCallsToRecover: number };
+  after?: { calls: number; failureRatePct: number; medianCallsToRecover: number };
+}
+
+async function renderLearn(): Promise<void> {
+  const { updatedAt, interventions } = await api<{
+    updatedAt: string;
+    interventions: Intervention[];
+  }>("/api/learn");
+  const el = $("#learn");
+  if (!interventions.length) {
+    el.innerHTML = `<p class="empty">Nothing learned yet. The loop needs a signature seen at least three times with a recovery that changed the arguments or called another tool first. Last pass: ${esc(fmtWhen(updatedAt))}.</p>`;
+    return;
+  }
+  const lift = (i: Intervention) =>
+    i.after
+      ? `${esc(i.before?.failureRatePct ?? "?")}% fail (${esc(i.before?.calls ?? 0)} calls) &rarr; ${esc(i.after.failureRatePct)}% (${esc(i.after.calls)} calls)`
+      : "not measured yet";
+  el.innerHTML =
+    `<p class="empty">Last pass: ${esc(fmtWhen(updatedAt))}. An intervention reverts itself after 20 calls without a lower failure rate.</p>` +
+    interventions
+      .map(
+        (i) => `<article class="learned ${esc(i.state)}" data-id="${esc(i.id)}">
+  <header><strong>${esc(i.server)}/${esc(i.tool)}</strong> <span class="pill">${esc(i.kind)}</span> <span class="pill ${i.state === "active" ? "" : "bad"}">${esc(i.state)}</span> <time>${esc(i.evidence)} occurrences</time></header>
+  <p>${esc(i.kind === "coerce" ? `${i.rule} on ${i.path}` : (i.fact ?? ""))}</p>
+  <pre>${esc(i.signature)}</pre>
+  <p class="suggestion">${lift(i)}${i.reason ? ` &middot; ${esc(i.reason)}` : ""}</p>
+  <footer>${i.state === "active" ? `<button data-learn="disable" class="secondary">Turn off</button>` : `<button data-learn="enable">Turn on</button>`} <code>${esc(i.id)}</code></footer>
+</article>`,
+      )
+      .join("");
+}
+
 // ---------------------------------------------------------------- wiring
 
 const screens: Record<string, () => Promise<void>> = {
@@ -374,6 +420,7 @@ const screens: Record<string, () => Promise<void>> = {
   tools: renderTools,
   errors: renderErrors,
   report: renderReport,
+  learn: renderLearn,
 };
 
 let current = location.hash.slice(1) || "holds";
@@ -445,6 +492,21 @@ document.addEventListener("click", (ev) => {
     );
     return;
   }
+  const learn = t.closest<HTMLElement>("[data-learn]");
+  if (learn) {
+    const id = learn.closest<HTMLElement>("[data-id]")?.dataset.id ?? "";
+    const action = learn.dataset.learn === "enable" ? "enable" : "disable";
+    void busy(learn, () =>
+      api(`/api/learn/${encodeURIComponent(id)}/${action}`, { method: "POST" }).then(() =>
+        renderLearn(),
+      ),
+    );
+    return;
+  }
+  if (t.id === "learn-update") {
+    void busy(t, () => api("/api/learn/update", { method: "POST" }).then(() => renderLearn()));
+    return;
+  }
   const nav = t.closest<HTMLAnchorElement>("nav a[data-screen]");
   if (nav) {
     ev.preventDefault();
@@ -466,6 +528,7 @@ events.addEventListener(
   () => void (current === "deadletters" && renderDeadLetters()),
 );
 events.addEventListener("row", () => void (current === "ledger" && loadLedger().catch(report)));
+events.addEventListener("learned", () => void (current === "learn" && renderLearn().catch(report)));
 events.onerror = () => {
   // The browser reconnects on its own after a dropped connection, but not after a refused one.
   $("#status").textContent =
