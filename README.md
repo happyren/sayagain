@@ -78,7 +78,7 @@ sayagain tools --since 7d            # ranked by the waste their failures cause
 sayagain errors create_page          # signatures, recovery paths, shape changes, suggestions
 sayagain report                      # the weekly page from docs/measurement.md
 sayagain lint --all                  # grade every registered server's tool definitions
-sayagain serve --otlp http://127.0.0.1:4318/v1/traces   # or OTEL_EXPORTER_OTLP_ENDPOINT; a local collector is found by itself
+sayagain serve --otlp http://127.0.0.1:4318/v1/traces   # or OTEL_EXPORTER_OTLP_ENDPOINT; a local collector on :4318 is found by itself (SAYAGAIN_OTLP=off never exports)
 ```
 
 Options: `--hold destructive|always|never`, `--hold-wait <ms>`,

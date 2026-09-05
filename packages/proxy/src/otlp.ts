@@ -1,11 +1,11 @@
 /**
  * One span per tools/call, exported over OTLP/HTTP (JSON) to whatever the
  * operator already runs. Attributes follow ADR-0007: GenAI semantic
- * conventions plus sayagain.* keys. Error signatures leave as a hash unless
- * the operator opts in; argument values never leave at all.
+ * conventions plus sayagain.* keys. Error signatures and task ids leave as
+ * hashes (grouping keys, not secrets) unless the operator opts in; argument
+ * values never leave at all.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { connect } from "node:net";
 import type { LedgerRow } from "./ledger.js";
 
 export interface OtlpOptions {
@@ -40,7 +40,12 @@ const strs = (key: string, v: string[]): Attr => ({
 });
 
 const hex = (buf: Buffer): string => buf.toString("hex");
+/** A grouping key, not a secret: the first 64 bits of SHA-256 of the text. */
+const hash16 = (text: string): string =>
+  createHash("sha256").update(text).digest("hex").slice(0, 16);
 const nanos = (ms: number): string => `${Math.round(ms)}000000`;
+const holdOutcome = (held: NonNullable<LedgerRow["held"]>): string =>
+  held.cancelled ? "cancelled" : (held.decision ?? "undecided");
 
 /** Attributes for one ledger row. Exported for tests and for anyone building their own exporter. */
 export function spanAttributes(row: LedgerRow, opts: { signatures?: boolean } = {}): Attr[] {
@@ -58,7 +63,9 @@ export function spanAttributes(row: LedgerRow, opts: { signatures?: boolean } = 
     int("sayagain.request.bytes", row.requestBytes),
     int("sayagain.response.bytes", row.responseBytes),
   ];
-  if (row.task !== undefined) attrs.push(str("sayagain.task", row.task));
+  if (row.server !== undefined) attrs.push(str("sayagain.server", row.server));
+  // A task id may be free text; only a hash leaves (ADR-0005).
+  if (row.task !== undefined) attrs.push(str("sayagain.task_hash", hash16(row.task)));
   if (row.session !== undefined) attrs.push(str("sayagain.session", row.session));
   if (row.errorClass) attrs.push(str("sayagain.error.class", row.errorClass));
   if (row.errorCode !== undefined) attrs.push(int("sayagain.error.code", row.errorCode));
@@ -66,14 +73,18 @@ export function spanAttributes(row: LedgerRow, opts: { signatures?: boolean } = 
     attrs.push(
       opts.signatures
         ? str("sayagain.error.signature", row.errorSignature)
-        : str(
-            "sayagain.error.signature_hash",
-            createHash("sha256").update(row.errorSignature).digest("hex").slice(0, 16),
-          ),
+        : str("sayagain.error.signature_hash", hash16(row.errorSignature)),
     );
+  if (row.attempts !== undefined || row.held)
+    attrs.push(int("sayagain.attempt", row.attempts ?? 1));
   if (row.attempts !== undefined) attrs.push(int("sayagain.attempts", row.attempts));
   if (row.repairs?.length) {
-    attrs.push(str("sayagain.repair.kind", "coerce"));
+    const kinds = new Set(
+      row.repairs.map((r) =>
+        r.rule === "rename" ? "rename" : r.rule === "default" ? "default" : "coerce",
+      ),
+    );
+    attrs.push(str("sayagain.repair.kind", [...kinds].join(",")));
     attrs.push(
       strs(
         "sayagain.repair.rule",
@@ -83,12 +94,7 @@ export function spanAttributes(row: LedgerRow, opts: { signatures?: boolean } = 
   }
   if (row.held) {
     attrs.push(str("sayagain.held.mode", row.held.mode));
-    attrs.push(
-      str(
-        "sayagain.held.decision",
-        row.held.cancelled ? "cancelled" : (row.held.decision ?? "expired"),
-      ),
-    );
+    attrs.push(str("sayagain.held.decision", holdOutcome(row.held)));
     if (row.held.waitedMs !== undefined)
       attrs.push(int("sayagain.held.waited_ms", row.held.waitedMs));
   }
@@ -102,6 +108,7 @@ export class OtlpExporter {
   private timer: NodeJS.Timeout | undefined;
   private readonly doFetch: typeof fetch;
   private readonly log: (line: string) => void;
+  private readonly inFlight = new Set<Promise<void>>();
   private failures = 0;
   private closed = false;
   constructor(private readonly opts: OtlpOptions) {
@@ -109,15 +116,24 @@ export class OtlpExporter {
     this.log = opts.log ?? (() => {});
   }
 
+  get endpoint(): string {
+    return this.opts.endpoint;
+  }
+
   /** Queue a span for the row. Spans are batched; nothing blocks the call path. */
   record(row: LedgerRow): void {
     if (this.closed) return;
-    const end = Date.parse(row.ts) + row.latencyMs;
     const start = Date.parse(row.ts);
-    const traceId = hex(createHash("sha256").update(row.receipt).digest().subarray(0, 16));
+    const end = start + row.latencyMs;
+    // Every row of one receipt shares a trace; the first attempt is the root, later rows its children.
+    const digest = createHash("sha256").update(row.receipt).digest();
+    const traceId = hex(digest.subarray(0, 16));
+    const rootSpanId = hex(digest.subarray(16, 24));
+    const followUp = (row.attempts ?? 1) > 1 || row.held !== undefined || row.status === "repaired";
     const span = {
       traceId,
-      spanId: hex(randomBytes(8)),
+      spanId: followUp ? hex(randomBytes(8)) : rootSpanId,
+      ...(followUp ? { parentSpanId: rootSpanId } : {}),
       name: `tools/call ${row.tool}`,
       kind: 3, // CLIENT
       startTimeUnixNano: nanos(start),
@@ -125,14 +141,7 @@ export class OtlpExporter {
       attributes: spanAttributes(row, { signatures: this.opts.signatures ?? false }),
       status: row.isError ? { code: 2, message: row.errorClass ?? "error" } : { code: 1 },
       events: [
-        ...(row.held
-          ? [
-              {
-                name: `hold.${row.held.cancelled ? "cancelled" : (row.held.decision ?? "expired")}`,
-                timeUnixNano: nanos(end),
-              },
-            ]
-          : []),
+        ...(row.held ? [{ name: `hold.${holdOutcome(row.held)}`, timeUnixNano: nanos(end) }] : []),
         ...(row.status === "dead-lettered"
           ? [{ name: "dead-letter", timeUnixNano: nanos(end) }]
           : []),
@@ -140,6 +149,8 @@ export class OtlpExporter {
       ],
     };
     this.buffer.push(span);
+    // A collector that is down must not eat memory: keep the newest five thousand.
+    if (this.buffer.length > 5000) this.buffer.splice(0, this.buffer.length - 5000);
     if (this.buffer.length >= (this.opts.batchSize ?? 100)) void this.flush();
     else if (!this.timer) {
       this.timer = setTimeout(() => void this.flush(), this.opts.flushMs ?? 2000);
@@ -147,6 +158,7 @@ export class OtlpExporter {
     }
   }
 
+  /** Send what is buffered now. Resolves when that batch has been sent (or given up on). */
   async flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -155,6 +167,13 @@ export class OtlpExporter {
     if (!this.buffer.length) return;
     const spans = this.buffer;
     this.buffer = [];
+    const p = this.send(spans).finally(() => this.inFlight.delete(p));
+    this.inFlight.add(p);
+    await p;
+    await Promise.allSettled([...this.inFlight]); // and any batch that was already on its way
+  }
+
+  private async send(spans: unknown[], retried = false): Promise<void> {
     const body = {
       resourceSpans: [
         {
@@ -171,7 +190,7 @@ export class OtlpExporter {
     try {
       const res = await this.doFetch(this.opts.endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json", ...(this.opts.headers ?? {}) },
+        headers: { ...(this.opts.headers ?? {}), "content-type": "application/json" },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(5000),
       });
@@ -183,12 +202,19 @@ export class OtlpExporter {
         this.log(
           `sayagain: OTLP export to ${this.opts.endpoint} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
+      if (!retried) {
+        // One more try after a pause; after that the batch is dropped rather than queued forever.
+        await new Promise((r) => setTimeout(r, this.closed ? 100 : 1000).unref());
+        await this.send(spans, true);
+      }
     }
   }
 
+  /** Flush what is buffered and wait for every batch in flight. Records after this are dropped. */
   async close(): Promise<void> {
-    this.closed = true;
     await this.flush();
+    this.closed = true;
+    await Promise.allSettled([...this.inFlight]);
   }
 }
 
@@ -201,40 +227,57 @@ export function otlpEndpointFromEnv(env: NodeJS.ProcessEnv = process.env): strin
   return undefined;
 }
 
-/** OTEL_EXPORTER_OTLP_HEADERS ("k=v,k2=v2") as an object. */
+/** OTEL_EXPORTER_OTLP_HEADERS ("k=v,k2=v2") as an object. Values may be percent-encoded. */
 export function otlpHeadersFromEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = {};
   for (const pair of (env.OTEL_EXPORTER_OTLP_HEADERS ?? "").split(",")) {
     const i = pair.indexOf("=");
-    if (i > 0) out[pair.slice(0, i).trim()] = decodeURIComponent(pair.slice(i + 1).trim());
+    if (i <= 0) continue;
+    const raw = pair.slice(i + 1).trim();
+    let value = raw;
+    try {
+      value = decodeURIComponent(raw);
+    } catch {
+      // not percent-encoded; use it as written
+    }
+    out[pair.slice(0, i).trim()] = value;
   }
   return out;
 }
 
-/** Is something listening on the default local OTLP/HTTP port? A cheap probe, so the export can be on by default. */
-export function localCollectorListening(
+/**
+ * Is an OTLP/HTTP collector answering on the default local port? A bare TCP connect is not enough,
+ * since anything could own 4318: an empty traces request must come back 2xx.
+ */
+export async function localCollectorListening(
   port = 4318,
   host = "127.0.0.1",
   timeoutMs = 300,
+  doFetch: typeof fetch = fetch,
 ): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = connect({ port, host });
-    const done = (ok: boolean) => {
-      socket.destroy();
-      resolve(ok);
-    };
-    socket.setTimeout(timeoutMs, () => done(false));
-    socket.once("connect", () => done(true));
-    socket.once("error", () => done(false));
-  });
+  try {
+    const res = await doFetch(`http://${host}:${port}/v1/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ resourceSpans: [] }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
-/** Resolve where to export: an explicit endpoint, the environment, or a local collector if one answers. */
+/**
+ * Resolve where to export: off when asked (explicitly, or SAYAGAIN_OTLP=off / OTEL_SDK_DISABLED=true),
+ * else an explicit endpoint, else the environment, else a local collector if one answers.
+ */
 export async function resolveOtlpEndpoint(
   explicit: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | undefined> {
-  if (explicit === "off") return undefined;
+  if (explicit === "off" || env.SAYAGAIN_OTLP === "off" || env.OTEL_SDK_DISABLED === "true")
+    return undefined;
   if (explicit) return explicit;
   const fromEnv = otlpEndpointFromEnv(env);
   if (fromEnv) return fromEnv;

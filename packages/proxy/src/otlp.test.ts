@@ -44,6 +44,11 @@ describe("otlp", () => {
     });
     expect(attrs["sayagain.error.signature"]).toBeUndefined();
     expect(attrs["sayagain.held.decision"]).toEqual({ stringValue: "reject" });
+    expect(attrs["sayagain.task"]).toBeUndefined();
+    expect(attrs["sayagain.task_hash"]).toMatchObject({
+      stringValue: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
+    expect(attrs["sayagain.attempt"]).toEqual({ intValue: "3" });
     expect(attrs["sayagain.attempts"]).toEqual({ intValue: "3" });
     expect(attrs["sayagain.args.shape"]).toEqual({
       arrayValue: { values: [{ stringValue: "title:string" }] },
@@ -70,7 +75,8 @@ describe("otlp", () => {
           res.writeHead(503);
           return res.end();
         }
-        bodies.push(JSON.parse(body));
+        const parsed = JSON.parse(body) as { resourceSpans: unknown[] };
+        if (parsed.resourceSpans.length) bodies.push(parsed);
         res.writeHead(200, { "content-type": "application/json" });
         res.end("{}");
       });
@@ -92,33 +98,39 @@ describe("otlp", () => {
       isError: false,
       status: "executed",
       held: undefined as never,
+      attempts: undefined as never, // a first attempt: the root span of its trace
     });
-    await new Promise((r) => setTimeout(r, 50));
+    await exporter.flush();
     exporter.record({ ...row, receipt: "rcpt_3" });
     await exporter.close();
     expect(logs.some((l) => l.includes("HTTP 503"))).toBe(true);
-    expect(bodies).toHaveLength(1);
-    const spans =
-      (
-        bodies[0] as {
-          resourceSpans: {
-            scopeSpans: {
-              spans: {
-                name: string;
-                status: { code: number };
-                traceId: string;
-                events: { name: string }[];
-              }[];
-            }[];
-          }[];
-        }
-      ).resourceSpans[0]?.scopeSpans[0]?.spans ?? [];
-    expect(spans.map((s) => s.name)).toEqual(["tools/call create_page"]);
-    expect(spans[0]?.status.code).toBe(2);
-    expect(spans[0]?.traceId).toMatch(/^[0-9a-f]{32}$/);
-    expect(spans[0]?.events.map((e) => e.name)).toEqual(["hold.reject", "dead-letter"]);
+    expect(bodies).toHaveLength(2); // the first batch failed once and was sent again
+    type Span = {
+      name: string;
+      status: { code: number };
+      traceId: string;
+      parentSpanId?: string;
+      events: { name: string }[];
+    };
+    const spans = bodies.flatMap(
+      (b) =>
+        (b as { resourceSpans: { scopeSpans: { spans: Span[] }[] }[] }).resourceSpans[0]
+          ?.scopeSpans[0]?.spans ?? [],
+    );
+    expect(spans.map((s) => s.name)).toEqual([
+      "tools/call create_page",
+      "tools/call create_page",
+      "tools/call create_page",
+    ]);
+    expect(spans.every((s) => /^[0-9a-f]{32}$/.test(s.traceId))).toBe(true);
+    expect(spans.filter((s) => s.parentSpanId !== undefined)).toHaveLength(2); // attempt 3 rows hang off the root
+    const failed = spans.find((s) => s.status.code === 2);
+    expect(failed?.events.map((e) => e.name)).toEqual(["hold.reject", "dead-letter"]);
     expect(await localCollectorListening(port)).toBe(true);
-    server.close();
+    await new Promise<void>((r) => {
+      server.close(() => r());
+      server.closeAllConnections();
+    });
     expect(await localCollectorListening(port)).toBe(false);
   });
 

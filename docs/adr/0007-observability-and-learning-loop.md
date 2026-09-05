@@ -34,9 +34,11 @@ Say Again attributes, so the data lands in whatever the user already runs
 | `mcp.server.name`, `mcp.server.version`, `mcp.method` | From `initialize` and the request |
 | `sayagain.receipt`, `sayagain.status`, `sayagain.tool_class` | Spec section 5 |
 | `sayagain.error.class` | `retryable`, `coercible`, `semantic`, `blocked`, `other` |
-| `sayagain.error.signature` | Masked first line of the error (values, paths, ids and numbers replaced). Local ledger only; exported as a hash unless the operator opts in |
+| `sayagain.error.signature` | Masked first line of the error (values, paths, ids and numbers replaced). Local ledger only; exported as `sayagain.error.signature_hash`, a 64-bit grouping key (masked text is low-entropy, so the hash is a key, not a secret), unless the operator opts in |
 | `sayagain.args.shape` | Sorted `key:type` list, never values |
-| `sayagain.task`, `sayagain.intent.present` | Task id and whether intent was supplied |
+| `sayagain.task_hash`, `sayagain.intent.present` | A 64-bit hash of the task id (it may be free text) and whether intent was supplied |
+| `sayagain.session`, `sayagain.server` | The host session the call came from (a stable id, never a one-shot request's) and the registry name of the boundary |
+| `sayagain.attempt`, `sayagain.attempts` | Which attempt this span is; later attempts, holds and repairs are children of the first attempt's span |
 | `sayagain.repair.kind`, `sayagain.repair.rule` | When arguments were changed |
 | `sayagain.turns_to_recover`, `sayagain.recovery_path` | Filled in retroactively when the same tool next succeeds in the task |
 | `sayagain.cost.recovery_usd` | Tokens spent between failure and recovery, priced |
@@ -129,16 +131,18 @@ enough to say "this tool fails on `fields` for most people".
   `--min-calls`, `--json` (0.6; waste is recovery traffic in bytes until a
   host supplies token counts).
 - `sayagain errors [tool]` — signatures with counts, class, turns,
-  recovery path and shape change.
+  recovery path and shape change (0.6).
 - `sayagain learn` — the current learned coercions, augmentations and
-  hints, each with its before and after numbers and a `--revert`.
+  hints, each with its before and after numbers and a `--revert` (0.8).
 - `sayagain report --weekly` — the one page from `docs/measurement.md`
-  section 6, plus the top five signatures and their annualised cost at the
-  current rate.
+  section 6, plus the top five signatures (0.6; the annualised cost waits
+  for token counts from a host).
 - OTLP export, on by default to a local collector if one is listening,
   otherwise off (0.6: `--otlp`, `OTEL_EXPORTER_OTLP_ENDPOINT`, port 4318
-  probe; signatures exported as hashes unless opted in).
-- The hosted console shows the same objects across a team's deployments.
+  probe; signatures exported as hashes unless the exporter is built with
+  `signatures: true`, an API-only opt-in for now).
+- The hosted console shows the same objects across a team's deployments
+  (hosted tier, after 0.6 telemetry has traffic behind it).
 
 ## Alternatives considered
 

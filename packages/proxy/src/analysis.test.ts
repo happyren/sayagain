@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  duplicateWrites,
+  finalRows,
   parseSince,
   recoveries,
   report,
@@ -66,12 +68,18 @@ describe("analysis", () => {
     expect(first).toMatchObject({
       recovered: true,
       calls: 2,
+      retried: true,
       identicalRetry: true,
       path: ["create_page", "get_page"],
       shapeChange: "changed limit:string->number",
     });
     expect(first?.bytes).toBe(300 * 4);
-    expect(recs[2]).toMatchObject({ recovered: false, calls: 10, identicalRetry: false });
+    expect(recs[2]).toMatchObject({
+      recovered: false,
+      calls: 10,
+      retried: false,
+      identicalRetry: false,
+    });
   });
 
   it("ranks tools by waste per 1K calls and groups signatures with suggestions", () => {
@@ -113,13 +121,14 @@ describe("analysis", () => {
     expect(sigs[1]?.suggestion).toContain("read-before-write");
   });
 
-  it("treats a held-then-approved call as one outcome and counts boundary actions", () => {
+  it("treats a held-then-approved call as one outcome, counts boundary actions, and finds duplicate writes", () => {
     const held: LedgerRow = row({
       tool: "delete_page",
       at: 1,
       toolClass: "destructive",
       status: "held",
       held: { reason: "r", mode: "pre" },
+      argsHash: "d1",
     });
     const executed: LedgerRow = {
       ...row({
@@ -127,6 +136,7 @@ describe("analysis", () => {
         at: 2,
         toolClass: "destructive",
         held: { reason: "r", mode: "pre", decision: "approve" },
+        argsHash: "d1",
       }),
       receipt: held.receipt,
     };
@@ -136,13 +146,16 @@ describe("analysis", () => {
       toolClass: "destructive",
       status: "held",
       held: { reason: "r", mode: "pre", decision: "reject" },
+      argsHash: "d2",
     });
-    const retried = row({ tool: "flaky", at: 4, attempts: 3 });
+    const retried = row({ tool: "flaky", at: 4, attempts: 3, argsHash: "f1" });
     const repaired = row({
       tool: "strict",
       at: 5,
       status: "repaired",
+      attempts: 2,
       repairs: [{ path: "limit", rule: "string-to-number" }],
+      argsHash: "s1",
     });
     const dead = row({
       tool: "write_flaky",
@@ -151,35 +164,87 @@ describe("analysis", () => {
       status: "dead-lettered",
       isError: true,
       errorClass: "retryable",
-      errorSignature: "timed out",
+      errorSignature: "sayagain: upstream exited before answering",
+      argsHash: "w1",
     });
-    const dup = row({
+    const first = row({ tool: "create_page", at: 7, toolClass: "write", argsHash: "c1" });
+    const again = row({ tool: "create_page", at: 8, toolClass: "write", argsHash: "c1" });
+    const dedup = row({
       tool: "create_page",
-      at: 7,
+      at: 9,
       toolClass: "write",
       status: "deduplicated",
-      duplicateOf: "r1",
+      duplicateOf: first.receipt,
+      argsHash: "c1",
     });
-    const r = report([held, executed, rejected, retried, repaired, dead, dup], {
+    const failedAttempt = row({
+      tool: "strict_write",
+      at: 10,
+      toolClass: "write",
+      isError: true,
+      errorClass: "coercible",
+      errorSignature: "limit must be a number",
+      argsHash: "x1",
+    });
+    const thenHeld: LedgerRow = {
+      ...row({
+        tool: "strict_write",
+        at: 11,
+        toolClass: "write",
+        status: "held",
+        held: { reason: "repaired", mode: "repaired" },
+        argsHash: "x2",
+      }),
+      receipt: failedAttempt.receipt,
+    };
+    const replay = row({
+      tool: "write_flaky",
+      at: 12,
+      toolClass: "write",
+      replayOf: dead.receipt,
+      argsHash: "w1",
+    });
+    const all = [
+      held,
+      executed,
+      rejected,
+      retried,
+      repaired,
+      dead,
+      first,
+      again,
+      dedup,
+      failedAttempt,
+      thenHeld,
+      replay,
+    ];
+    expect(finalRows(all).map((r) => r.receipt)).not.toContain(replay.receipt);
+    expect(finalRows(all).find((r) => r.receipt === failedAttempt.receipt)?.status).toBe("held"); // the later word wins
+    const r = report(all, {
       since: new Date(t0 - 1000),
       until: new Date(t0 + 100_000),
       minCalls: 1,
     });
-    expect(r.calls).toBe(4); // a rejected hold never became a call
+    expect(r.calls).toBe(6); // executed, retried, repaired, dead, first, again; holds and dedups are not calls
     expect(r.boundary).toEqual({
       retriesResolved: 1,
       repairsResolved: 1,
-      held: { approved: 1, rejected: 1, expired: 0, cancelled: 0 },
+      held: { approved: 1, rejected: 1, undecided: 1, cancelled: 0 },
       deadLettered: 1,
-      replays: { count: 0, succeeded: 0 },
+      replays: { count: 1, succeeded: 1 },
       deduplicated: 1,
+      infrastructure: 1,
     });
     expect(r.unacknowledged).toEqual({
       count: 1,
       tools: [{ tool: "notion/write_flaky", count: 1 }],
     });
-    expect(r.northStar.unacknowledgedWritesPer1kWrites).toBe(500);
-    expect(r.duplicates.count).toBe(1);
+    expect(r.duplicates).toMatchObject({
+      count: 2,
+      tools: [{ tool: "notion/create_page", count: 2 }],
+    }); // the repeat the agent got through, and the one the boundary answered
+    expect(duplicateWrites(all).map((x) => x.receipt)).toEqual([again.receipt, dedup.receipt]);
+    expect(r.topSignatures[0]?.suggestion).toContain("boundary-side");
     expect(r.previous).toBeUndefined();
   });
 

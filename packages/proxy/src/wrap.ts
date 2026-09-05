@@ -84,7 +84,10 @@ export function wrap(options: WrapOptions): Wrapped {
   if (options.replayTimeoutMs !== undefined) coreOptions.replayTimeoutMs = options.replayTimeoutMs;
   const boundary = new Boundary(coreOptions);
 
-  const session = { id: "stdio", send: (msg: unknown) => output.write(`${JSON.stringify(msg)}\n`) };
+  const session = {
+    id: `stdio-${process.pid}`,
+    send: (msg: unknown) => output.write(`${JSON.stringify(msg)}\n`),
+  };
   boundary.attach(session);
 
   let resolveDone: (code: number) => void = () => {};
@@ -96,12 +99,16 @@ export function wrap(options: WrapOptions): Wrapped {
   const finish = () => {
     if (finished) return;
     finished = true;
-    void boundary.close();
-    void options.otlp?.close();
     control?.close();
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
-    resolveDone(exitCode);
+    // Rows for abandoned calls are written as the upstream closes; the last spans must reach the
+    // collector after that and before the process exits.
+    void boundary
+      .close()
+      .then(() => options.otlp?.close())
+      .catch(() => undefined)
+      .then(() => resolveDone(exitCode));
   };
 
   const control =

@@ -99,7 +99,11 @@ export async function daemonToolsList(name: string): Promise<unknown[] | null> {
     body: JSON.stringify({ jsonrpc: "2.0", id: "lint", method: "tools/list", params: {} }),
   });
   if (!res.ok) {
-    const detail = ((await res.json().catch(() => ({}))) as { error?: string }).error ?? "";
+    const body = (await res.json().catch(() => ({}))) as { error?: string | { message?: string } };
+    const detail =
+      typeof body.error === "object" && body.error
+        ? (body.error.message ?? "")
+        : (body.error ?? "");
     throw new Error(`daemon answered ${res.status} for ${name}: ${detail}`);
   }
   const msg = (await res.json()) as {

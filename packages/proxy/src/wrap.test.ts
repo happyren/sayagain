@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { MemoryLedger } from "./ledger.js";
+import { OtlpExporter } from "./otlp.js";
 import { PROXY_VERSION } from "./version.js";
 import { wrap } from "./wrap.js";
 
@@ -431,5 +432,67 @@ describe("lifecycle", () => {
     await h.wrapped.done;
     expect(process.listenerCount("SIGINT")).toBe(before);
     expect(h.wrapped.deadLetters.list()).toHaveLength(1);
+  });
+
+  it("exports a span per call and flushes the last one before done resolves", async () => {
+    const bodies: { resourceSpans: { scopeSpans: { spans: { name: string }[] }[] }[] }[] = [];
+    const fakeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    const otlp = new OtlpExporter({
+      endpoint: "http://collector/v1/traces",
+      fetch: fakeFetch,
+      flushMs: 10_000,
+    });
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const lines: string[] = [];
+    let buf = "";
+    output.on("data", (c: Buffer) => {
+      buf += c.toString();
+      let nl = buf.indexOf("\n");
+      while (nl >= 0) {
+        lines.push(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        nl = buf.indexOf("\n");
+      }
+    });
+    const wrapped = wrap({
+      command: process.execPath,
+      args: [fixture],
+      input,
+      output,
+      ledger: new MemoryLedger(),
+      control: false,
+      otlp,
+      log: () => {},
+    });
+    const send = (msg: unknown) => input.write(`${JSON.stringify(msg)}\n`);
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2026-07-28",
+        capabilities: {},
+        clientInfo: { name: "t", version: "0" },
+      },
+    });
+    send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "echo", arguments: { a: 1 } },
+    });
+    for (let i = 0; i < 200 && !lines.some((l) => l.includes('"id":2')); i++)
+      await new Promise((r) => setTimeout(r, 25));
+    input.end();
+    expect(await wrapped.done).toBe(0);
+    const spans = bodies.flatMap((b) =>
+      b.resourceSpans.flatMap((r) => r.scopeSpans.flatMap((x) => x.spans)),
+    );
+    expect(spans.map((s) => s.name)).toEqual(["tools/call echo"]);
   });
 });

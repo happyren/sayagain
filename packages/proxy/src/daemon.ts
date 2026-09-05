@@ -364,6 +364,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         id: `http-${++sessionSeq}`,
         send: () => undefined,
         bidirectional: false,
+        ephemeral: true,
       };
       boundary.attach(session);
       try {
@@ -390,6 +391,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       session = {
         id: `http-${++sessionSeq}`,
         bidirectional: false,
+        ephemeral: true,
         send: (m: JsonRpcMessage) => {
           if (isResponse(m) && m.id !== null && m.id !== undefined && keyOfId(m.id) === wanted)
             settle(m);
@@ -440,6 +442,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         pid: process.pid,
         servers: Object.keys(options.registry.servers),
         ledger: options.stores.kind,
+        otlp: options.otlp?.endpoint ?? null,
       });
     }
     if (req.method === "GET" && path === "/api/servers") {
@@ -514,10 +517,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (sinceRaw) {
         const since = Date.parse(sinceRaw);
         if (Number.isNaN(since)) return json(res, 400, { error: "since must be an ISO date" });
+        const matching = options.stores.readLedger().filter((r) => Date.parse(r.ts) >= since);
+        const tailRaw = url.searchParams.get("tail");
         return json(
           res,
           200,
-          options.stores.readLedger().filter((r) => Date.parse(r.ts) >= since),
+          tailRaw === null ? matching : matching.slice(-clampTail(tailRaw, matching.length)),
         );
       }
       return json(

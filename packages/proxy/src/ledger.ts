@@ -23,6 +23,8 @@ export interface LedgerRow {
   task?: string;
   /** The host session the call came from, when the boundary knows it. Orders calls for recovery analysis. */
   session?: string;
+  /** The registry name of the boundary that recorded it (the host's key), beside the upstream's own name. */
+  server?: string;
   status: Status;
   isError: boolean;
   errorCode?: number;

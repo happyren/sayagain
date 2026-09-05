@@ -8,11 +8,11 @@
 import type { LedgerRow } from "./ledger.js";
 
 export interface AnalysisOptions {
-  /** Only rows at or after this time. */
+  /** Only failures at or after this time count; earlier rows still provide context. */
   since?: Date;
   /** Only rows before this time. */
   until?: Date;
-  /** Only this upstream. */
+  /** Only this upstream (its own name or its registry name). */
   server?: string;
   /** Tools with fewer calls are not ranked. Default 10. */
   minCalls?: number;
@@ -31,6 +31,9 @@ export interface Recovery {
   path: string[];
   /** Argument keys or types that differed between the failing and the recovering call. */
   shapeChange: string | undefined;
+  /** The same tool was called again within three calls (M2). */
+  retried: boolean;
+  /** ...with the same arguments (M3). */
   identicalRetry: boolean;
 }
 
@@ -58,6 +61,9 @@ export interface ToolStats {
   failures: number;
   failureRatePct: number;
   misCallRatePct: number;
+  /** Failures followed by the same tool within three calls (M2). */
+  retryRatePct: number;
+  /** Retries whose arguments were unchanged, as a share of retries (M3). */
   identicalRetryPct: number;
   medianCallsToRecover: number;
   unrecoveredPct: number;
@@ -96,11 +102,14 @@ export interface Report {
     addressablePct: number;
     classes: Record<string, number>;
   }[];
+  /** Non-read-only calls repeated with the same arguments within five calls (M8), caught by the boundary or not. */
   duplicates: { count: number; per1kWrites: number; tools: { tool: string; count: number }[] };
   unacknowledged: { count: number; tools: { tool: string; count: number }[] };
   recovery: {
     failures: number;
     recovered: number;
+    retryRatePct: number;
+    identicalRetryPct: number;
     medianCalls: number;
     meanCalls: number;
     medianBytes: number;
@@ -109,10 +118,12 @@ export interface Report {
   boundary: {
     retriesResolved: number;
     repairsResolved: number;
-    held: { approved: number; rejected: number; expired: number; cancelled: number };
+    held: { approved: number; rejected: number; undecided: number; cancelled: number };
     deadLettered: number;
     replays: { count: number; succeeded: number };
     deduplicated: number;
+    /** Failures the boundary itself produced: upstream exits and timeouts. */
+    infrastructure: number;
   };
   topSignatures: SignatureStats[];
   tools: ToolStats[];
@@ -124,6 +135,9 @@ export interface Report {
     failureTaxBytesPer1kCalls: number;
   };
 }
+
+/** Signatures the boundary writes itself when it abandons a call. */
+export const BOUNDARY_SIGNATURE = /^sayagain: /;
 
 const quantile = (xs: number[], q: number): number => {
   if (!xs.length) return 0;
@@ -140,34 +154,40 @@ const top = (o: Record<string, number>): string | undefined =>
   Object.entries(o).sort((a, b) => b[1] - a[1])[0]?.[0];
 const isWrite = (r: LedgerRow): boolean => r.toolClass !== "read-only";
 const bytesOf = (r: LedgerRow): number => (r.requestBytes ?? 0) + (r.responseBytes ?? 0);
+const sameTool = (a: LedgerRow, b: LedgerRow): boolean =>
+  a.upstream === b.upstream && a.tool === b.tool;
+const inWindow = (r: LedgerRow, since: Date | undefined): boolean =>
+  since === undefined || Date.parse(r.ts) >= since.getTime();
 
-/** Rows in the window (and server), oldest first. */
+/** Rows for the server (either name) and before `until`, oldest first. Rows before `since` stay: they give context. */
 export function selectRows(rows: LedgerRow[], opts: AnalysisOptions = {}): LedgerRow[] {
-  const since = opts.since?.getTime() ?? Number.NEGATIVE_INFINITY;
   const until = opts.until?.getTime() ?? Number.POSITIVE_INFINITY;
   return rows
-    .filter((r) => r.method === "tools/call" && (!opts.server || r.upstream === opts.server))
-    .filter((r) => {
-      const t = Date.parse(r.ts);
-      return t >= since && t < until;
-    })
+    .filter(
+      (r) =>
+        r.method === "tools/call" &&
+        (!opts.server || r.upstream === opts.server || r.server === opts.server),
+    )
+    .filter((r) => Date.parse(r.ts) < until)
     .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
 }
 
-/** The key that orders a host's calls: its session, else its task, else everything together. */
+/** The key that orders a host's calls: its session, else its task, else the upstream as a whole. */
 const streamOf = (r: LedgerRow): string =>
-  r.session ?? (r.task !== undefined ? `task:${r.task}` : "-");
+  r.session !== undefined
+    ? `session:${r.session}`
+    : r.task !== undefined
+      ? `task:${r.task}`
+      : `upstream:${r.upstream}`;
 
 /**
- * The last word on each call. A held row that was later approved is followed by the executed
- * row under the same receipt; a failed attempt by the hold that followed it.
+ * The last word on each call. Rows for one receipt are written in time order: a failed attempt,
+ * then the hold that followed it, then the execution after an approval. The last row wins.
+ * Replays are operator actions, not agent calls, and are left out.
  */
-function finalRows(rows: LedgerRow[]): LedgerRow[] {
+export function finalRows(rows: LedgerRow[]): LedgerRow[] {
   const last = new Map<string, LedgerRow>();
-  for (const r of rows) {
-    const prev = last.get(r.receipt);
-    if (!prev || r.status !== "held" || prev.status === "held") last.set(r.receipt, r);
-  }
+  for (const r of rows) if (r.replayOf === undefined) last.set(r.receipt, r);
   return rows.filter((r) => last.get(r.receipt) === r);
 }
 
@@ -189,32 +209,40 @@ export function shapeDiff(a: string[], b: string[]): string | undefined {
   return parts.length ? parts.join("; ") : undefined;
 }
 
-/** Recovery windows for every failed final row. */
-export function recoveries(rows: LedgerRow[], opts: AnalysisOptions = {}): Recovery[] {
-  const cap = opts.recoveryCap ?? 10;
-  const streams = new Map<string, LedgerRow[]>();
+function streams(rows: LedgerRow[]): LedgerRow[][] {
+  const out = new Map<string, LedgerRow[]>();
   for (const r of finalRows(rows)) {
     const k = streamOf(r);
-    const s = streams.get(k);
+    const s = out.get(k);
     if (s) s.push(r);
-    else streams.set(k, [r]);
+    else out.set(k, [r]);
   }
+  return [...out.values()];
+}
+
+/** Recovery windows for every failed final row at or after `since` (earlier rows give context only). */
+export function recoveries(rows: LedgerRow[], opts: AnalysisOptions = {}): Recovery[] {
+  const cap = opts.recoveryCap ?? 10;
   const out: Recovery[] = [];
-  for (const stream of streams.values()) {
+  for (const stream of streams(rows)) {
     for (let i = 0; i < stream.length; i++) {
       const r = stream[i] as LedgerRow;
-      if (!r.isError || r.status === "deduplicated") continue;
+      if (!r.isError || r.status === "deduplicated" || !inWindow(r, opts.since)) continue;
       let recovered = false;
       let calls = 0;
       let bytes = bytesOf(r);
       const path: string[] = [];
       let shapeChange: string | undefined;
+      let retried = false;
       let identicalRetry = false;
       for (let j = i + 1; j < stream.length && calls < cap; j++) {
         const n = stream[j] as LedgerRow;
         bytes += bytesOf(n);
-        if (n.tool === r.tool && n.argsHash === r.argsHash && j - i <= 3) identicalRetry = true;
-        if (n.tool === r.tool && !n.isError) {
+        if (sameTool(n, r) && j - i <= 3) {
+          retried = true;
+          if (n.argsHash === r.argsHash) identicalRetry = true;
+        }
+        if (sameTool(n, r) && !n.isError) {
           recovered = true;
           shapeChange = shapeDiff(r.argShape, n.argShape);
           break;
@@ -229,6 +257,7 @@ export function recoveries(rows: LedgerRow[], opts: AnalysisOptions = {}): Recov
         bytes,
         path,
         shapeChange,
+        retried,
         identicalRetry,
       });
     }
@@ -236,7 +265,28 @@ export function recoveries(rows: LedgerRow[], opts: AnalysisOptions = {}): Recov
   return out;
 }
 
+/** Non-read-only calls whose tool and arguments repeat within the next five calls of the same stream (M8). */
+export function duplicateWrites(rows: LedgerRow[], opts: AnalysisOptions = {}): LedgerRow[] {
+  const out: LedgerRow[] = [];
+  for (const stream of streams(rows)) {
+    for (let i = 0; i < stream.length; i++) {
+      const r = stream[i] as LedgerRow;
+      if (!isWrite(r) || !inWindow(r, opts.since)) continue;
+      for (let j = i + 1; j < stream.length && j <= i + 5; j++) {
+        const n = stream[j] as LedgerRow;
+        if (sameTool(n, r) && n.argsHash === r.argsHash) {
+          out.push(n);
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
 export function suggestionFor(errorClass: string, signature: string): string {
+  if (BOUNDARY_SIGNATURE.test(signature))
+    return "boundary-side: the upstream exited or stopped answering; check the server process and its logs";
   if (errorClass === "coercible")
     return "deterministic coercion at the boundary; tighten the schema type in the tool definition";
   if (errorClass === "retryable")
@@ -268,6 +318,7 @@ interface ToolAcc {
   calls: number;
   failures: number;
   misCalls: number;
+  retried: number;
   identical: number;
   turns: number[];
   unrecovered: number;
@@ -277,11 +328,15 @@ interface ToolAcc {
   sigs: Map<string, SigAcc>;
 }
 
+/** Resolved by the boundary's own retry: more than one attempt, and neither a repair nor an operator decision explains it. */
+const resolvedByRetry = (r: LedgerRow): boolean =>
+  (r.attempts ?? 1) > 1 && !r.isError && !r.repairs?.length && !r.held;
+
 /** Per-tool statistics with their signatures, ranked by waste per 1,000 calls. */
 export function toolStats(rows: LedgerRow[], opts: AnalysisOptions = {}): ToolStats[] {
   const minCalls = opts.minCalls ?? 10;
   const cap = opts.recoveryCap ?? 10;
-  const finals = finalRows(rows);
+  const finals = finalRows(rows).filter((r) => inWindow(r, opts.since));
   const recByReceipt = new Map(recoveries(rows, opts).map((x) => [x.row.receipt, x]));
   const acc = new Map<string, ToolAcc>();
   const keyOf = (r: LedgerRow) => `${r.upstream} ${r.tool}`;
@@ -295,6 +350,7 @@ export function toolStats(rows: LedgerRow[], opts: AnalysisOptions = {}): ToolSt
         calls: 0,
         failures: 0,
         misCalls: 0,
+        retried: 0,
         identical: 0,
         turns: [],
         unrecovered: 0,
@@ -315,23 +371,26 @@ export function toolStats(rows: LedgerRow[], opts: AnalysisOptions = {}): ToolSt
     return a;
   };
   for (const r of rows) {
-    const a = accFor(r);
-    if (r.status === "deduplicated") a.boundary.deduplicated++;
-    if (r.replayOf) a.boundary.replayed++;
+    if (!inWindow(r, opts.since)) continue;
+    if (r.status === "deduplicated") accFor(r).boundary.deduplicated++;
+    if (r.replayOf !== undefined) accFor(r).boundary.replayed++;
   }
   for (const r of finals) {
     if (r.status === "deduplicated" || r.status === "held") continue;
     const a = accFor(r);
     a.calls++;
     a.latencies.push(r.latencyMs);
-    if ((r.attempts ?? 1) > 1 && !r.isError) a.boundary.retried++;
+    if (resolvedByRetry(r)) a.boundary.retried++;
     if (r.status === "repaired") a.boundary.repaired++;
     if (r.held?.decision === "approve") a.boundary.held++;
     if (r.status === "dead-lettered") a.boundary.deadLettered++;
     if (!r.isError) continue;
     a.failures++;
-    if (r.errorClass === "coercible" || r.errorClass === "semantic") a.misCalls++;
+    const boundaryMade = BOUNDARY_SIGNATURE.test(r.errorSignature ?? "");
+    if (!boundaryMade && (r.errorClass === "coercible" || r.errorClass === "semantic"))
+      a.misCalls++;
     const rec = recByReceipt.get(r.receipt);
+    if (rec?.retried) a.retried++;
     if (rec?.identicalRetry) a.identical++;
     const turns = rec ? rec.calls : cap;
     a.turns.push(turns);
@@ -343,7 +402,7 @@ export function toolStats(rows: LedgerRow[], opts: AnalysisOptions = {}): ToolSt
     if (!s) {
       s = {
         count: 0,
-        cls: r.errorClass ?? "other",
+        cls: boundaryMade ? "other" : (r.errorClass ?? "other"),
         first: r.ts,
         last: r.ts,
         turns: [],
@@ -375,7 +434,8 @@ export function toolStats(rows: LedgerRow[], opts: AnalysisOptions = {}): ToolSt
       failures: a.failures,
       failureRatePct: pct(a.failures, a.calls),
       misCallRatePct: pct(a.misCalls, a.calls),
-      identicalRetryPct: pct(a.identical, a.failures),
+      retryRatePct: pct(a.retried, a.failures),
+      identicalRetryPct: pct(a.identical, a.retried),
       medianCallsToRecover: quantile(a.turns, 0.5),
       unrecoveredPct: pct(a.unrecovered, a.failures),
       wasteBytes: a.waste,
@@ -411,6 +471,26 @@ export function signatureStats(rows: LedgerRow[], opts: AnalysisOptions = {}): S
     .sort((x, y) => y.wasteBytes - x.wasteBytes || y.count - x.count);
 }
 
+/** A write whose outcome nobody acknowledged: dead-lettered, failed with an unknown outcome, or held for that reason and never approved. */
+const unacknowledged = (r: LedgerRow): boolean =>
+  isWrite(r) &&
+  (r.status === "dead-lettered" ||
+    (r.status === "held" && r.held?.mode === "unknown-outcome" && r.held.decision !== "approve") ||
+    (r.status !== "held" && r.isError && r.errorClass === "retryable"));
+
+function windowNumbers(
+  allRows: LedgerRow[],
+  opts: AnalysisOptions,
+  since: Date,
+  until: Date,
+): { outcomes: LedgerRow[]; finals: LedgerRow[]; recs: Recovery[]; wasteBytes: number } {
+  const rows = selectRows(allRows, { ...opts, until });
+  const finals = finalRows(rows).filter((r) => inWindow(r, since) && r.status !== "deduplicated");
+  const outcomes = finals.filter((r) => r.status !== "held");
+  const recs = recoveries(rows, { ...opts, since });
+  return { outcomes, finals, recs, wasteBytes: recs.reduce((a, x) => a + x.bytes, 0) };
+}
+
 /** The one page from docs/measurement.md section 6, from ledger rows alone. */
 export function report(
   allRows: LedgerRow[],
@@ -419,21 +499,12 @@ export function report(
   const until = opts.until ?? new Date();
   const windowMs = until.getTime() - opts.since.getTime();
   const rows = selectRows(allRows, { ...opts, until });
-  const finals = finalRows(rows).filter((r) => r.status !== "deduplicated");
-  const outcomes = finals.filter((r) => r.status !== "held");
+  const { outcomes, finals, recs, wasteBytes } = windowNumbers(allRows, opts, opts.since, until);
   const writes = outcomes.filter(isWrite);
-  const recs = recoveries(rows, opts);
   const failures = outcomes.filter((r) => r.isError);
-  const wasteBytes = recs.reduce((a, x) => a + x.bytes, 0);
-  const unack = finals.filter(
-    (r) =>
-      isWrite(r) &&
-      (r.status === "dead-lettered" ||
-        (r.status === "held" &&
-          r.held?.mode === "unknown-outcome" &&
-          r.held.decision !== "approve")),
-  );
-  const dup = rows.filter((r) => r.status === "deduplicated");
+  const unack = finals.filter(unacknowledged);
+  const dup = duplicateWrites(rows, { ...opts, since: opts.since });
+  const dedup = rows.filter((r) => r.status === "deduplicated" && inWindow(r, opts.since));
   const countBy = (xs: LedgerRow[]) => {
     const o: Record<string, number> = {};
     for (const r of xs) bump(o, `${r.upstream}/${r.tool}`);
@@ -458,22 +529,22 @@ export function report(
       bump(s.classes, r.errorClass ?? "other");
     }
   }
-  const held = { approved: 0, rejected: 0, expired: 0, cancelled: 0 };
+  const held = { approved: 0, rejected: 0, undecided: 0, cancelled: 0 };
   for (const r of finals) {
     if (!r.held) continue;
     if (r.status === "held") {
       if (r.held.cancelled) held.cancelled++;
       else if (r.held.decision === "reject") held.rejected++;
-      else held.expired++;
+      else held.undecided++;
     } else if (r.held.decision === "approve") held.approved++;
   }
-  const replays = rows.filter((r) => r.replayOf);
-  const previousWindow = { since: new Date(opts.since.getTime() - windowMs), until: opts.since };
-  const prevRows = selectRows(allRows, { ...opts, ...previousWindow });
-  const prevOutcomes = finalRows(prevRows).filter(
-    (r) => r.status !== "deduplicated" && r.status !== "held",
+  const replays = rows.filter((r) => r.replayOf !== undefined && inWindow(r, opts.since));
+  const previous = windowNumbers(
+    allRows,
+    opts,
+    new Date(opts.since.getTime() - windowMs),
+    opts.since,
   );
-  const prevWaste = recoveries(prevRows, opts).reduce((a, x) => a + x.bytes, 0);
   const out: Report = {
     generatedAt: new Date().toISOString(),
     window: {
@@ -511,6 +582,11 @@ export function report(
     recovery: {
       failures: failures.length,
       recovered: recs.filter((x) => x.recovered).length,
+      retryRatePct: pct(recs.filter((x) => x.retried).length, recs.length),
+      identicalRetryPct: pct(
+        recs.filter((x) => x.identicalRetry).length,
+        recs.filter((x) => x.retried).length,
+      ),
       medianCalls: quantile(
         recs.map((x) => x.calls),
         0.5,
@@ -523,22 +599,29 @@ export function report(
       meanBytes: mean(recs.map((x) => x.bytes)),
     },
     boundary: {
-      retriesResolved: outcomes.filter((r) => (r.attempts ?? 1) > 1 && !r.isError).length,
+      retriesResolved: outcomes.filter(resolvedByRetry).length,
       repairsResolved: outcomes.filter((r) => r.status === "repaired").length,
       held,
       deadLettered: outcomes.filter((r) => r.status === "dead-lettered").length,
       replays: { count: replays.length, succeeded: replays.filter((r) => !r.isError).length },
-      deduplicated: dup.length,
+      deduplicated: dedup.length,
+      infrastructure: failures.filter((r) => BOUNDARY_SIGNATURE.test(r.errorSignature ?? ""))
+        .length,
     },
-    topSignatures: signatureStats(rows, opts).slice(0, 5),
-    tools: toolStats(rows, opts),
+    topSignatures: signatureStats(rows, { ...opts, since: opts.since }).slice(0, 5),
+    tools: toolStats(rows, { ...opts, since: opts.since }),
   };
-  if (prevOutcomes.length)
+  if (previous.outcomes.length)
     out.previous = {
-      calls: prevOutcomes.length,
-      failureRatePct: pct(prevOutcomes.filter((r) => r.isError).length, prevOutcomes.length),
-      deadLettered: prevOutcomes.filter((r) => r.status === "dead-lettered").length,
-      failureTaxBytesPer1kCalls: Math.round((1000 * prevWaste) / prevOutcomes.length),
+      calls: previous.outcomes.length,
+      failureRatePct: pct(
+        previous.outcomes.filter((r) => r.isError).length,
+        previous.outcomes.length,
+      ),
+      deadLettered: previous.outcomes.filter((r) => r.status === "dead-lettered").length,
+      failureTaxBytesPer1kCalls: Math.round(
+        (1000 * previous.wasteBytes) / previous.outcomes.length,
+      ),
     };
   return out;
 }
