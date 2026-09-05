@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 /**
- * Baseline metrics M1 to M11 from Claude Code session transcripts.
- * See docs/measurement.md for definitions.
+ * Baseline metrics M1 to M11 and the tool-health report (M17 to M20) from
+ * Claude Code session transcripts. See docs/measurement.md and ADR-0007.
  *
  * Privacy: reads ~/.claude/projects locally and emits only tool names,
- * counts, token totals and timing. Argument values, results and prompts are
- * never written out. Argument hashes exist in memory for duplicate detection
- * and are discarded.
+ * counts, token totals, timing, argument key names and types, and masked
+ * error signatures. Argument values, results and prompts are never written
+ * out. Argument hashes exist in memory for duplicate detection and are
+ * discarded. Signatures stay on this machine; do not share the JSON.
  *
  * Usage:
  *   node scripts/baseline/claude-code-baseline.mjs [--dir ~/.claude/projects]
- *        [--since YYYY-MM-DD] [--json out.json] [--top 15]
+ *        [--since YYYY-MM-DD] [--json out.json] [--top 15] [--min-calls 10]
  */
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -26,6 +27,7 @@ const DIR = opt("--dir", join(homedir(), ".claude", "projects"));
 const SINCE = opt("--since") ? Date.parse(opt("--since")) : 0;
 const JSON_OUT = opt("--json");
 const TOP = Number(opt("--top", "15"));
+const MIN_CALLS = Number(opt("--min-calls", "10"));
 
 // USD per million tokens (input, output). Cache read = 10% of input,
 // cache creation = 125% of input. Adjust when list prices change.
@@ -68,13 +70,17 @@ function toolClass(name) {
 }
 
 const serverOf = (name) => (name.startsWith("mcp__") ? name.split("__")[1] : "builtin");
+const shortName = (name) => (name.startsWith("mcp__") ? name.slice(5).replace("__", ".") : name);
 
 // Error classes, first match wins. Interrupts are excluded from failure counts.
 const ERROR_CLASSES = [
-  ["interrupt", /interrupted by user|request interrupted|user cancel/i],
+  [
+    "interrupt",
+    /interrupted by user|request interrupted|user cancel|user doesn't want|tool use was rejected|wait for the user/i,
+  ],
   [
     "retryable",
-    /timed? ?out|ETIMEDOUT|deadline exceeded|rate limit|too many requests|\b429\b|ECONNRESET|ECONNREFUSED|socket hang up/i,
+    /timed? ?out|ETIMEDOUT|deadline exceeded|rate limit|too many requests|\b429\b|ECONNRESET|ECONNREFUSED|socket hang up|unavailable|not running|unresponsive|is stuck/i,
   ],
   [
     "coercible",
@@ -86,12 +92,44 @@ const ERROR_CLASSES = [
   ],
   [
     "semantic",
-    /not found|no such file|ENOENT|does not exist|\b404\b|old_string|not unique|did not match|no match(es)? found|already exists|conflict|\b409\b|EEXIST|not a git repository|nothing to commit|has no|unknown (tool|command|option)/i,
+    /not found|no such file|ENOENT|does not exist|\b404\b|old_string|not unique|did not match|no match(es)? found|already exists|conflict|\b409\b|EEXIST|not a git repository|nothing to commit|has no|unknown (tool|command|option)|has not been read|call \w+ first|requires a prior|not active|not initialized|not loaded|no \w+ cached/i,
   ],
 ];
 function classifyError(text) {
   for (const [cls, re] of ERROR_CLASSES) if (re.test(text)) return cls;
   return "other";
+}
+
+/** Masked first line of an error: stable across occurrences, safe to show an operator. */
+function signatureOf(text) {
+  const cleaned = (text || "").replace(/<\/?tool_use_error>/g, "");
+  const line = cleaned.split("\n").find((l) => l.trim()) ?? "";
+  return line
+    .replace(/https?:\/\/\S+/g, "<url>")
+    .replace(/(?:\/[\w.@-]+){2,}/g, "<path>")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "<id>")
+    .replace(/\b[0-9a-f]{12,}\b/gi, "<id>")
+    .replace(/"[^"]*"|'[^']*'|`[^`]*`/g, "<str>")
+    .replace(/\b\d+(\.\d+)?\b/g, "<n>")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 140);
+}
+
+/** Argument shape: sorted key:type entries, never values. */
+function shapeOf(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  return Object.entries(input)
+    .map(([k, v]) => `${k}:${Array.isArray(v) ? "array" : v === null ? "null" : typeof v}`)
+    .sort();
+}
+function shapeDiff(a, b) {
+  const A = new Set(a);
+  const B = new Set(b);
+  const removed = a.filter((x) => !B.has(x));
+  const added = b.filter((x) => !A.has(x));
+  if (!removed.length && !added.length) return null;
+  return `${removed.length ? `-${removed.join(",")}` : ""}${added.length ? ` +${added.join(",")}` : ""}`.trim();
 }
 
 function resultText(block, top) {
@@ -186,6 +224,7 @@ function parseSession(file) {
               id: b.id,
               name: b.name,
               hash: hashArgs(b.input),
+              shape: shapeOf(b.input),
               sidechain: !!e.isSidechain,
             });
           }
@@ -209,6 +248,7 @@ function parseSession(file) {
             hash: use.hash,
             isError,
             cls,
+            sig: isError ? signatureOf(text) : "",
             latencyMs: ts - use.ts,
           });
         }
@@ -225,6 +265,7 @@ function parseSession(file) {
       hash: events[ui].hash,
       isError: false,
       cls: "no-result",
+      sig: "",
       latencyMs: Number.NaN,
     });
   return events;
@@ -234,12 +275,17 @@ function parseSession(file) {
 const tally = () => ({
   calls: 0,
   failures: 0,
+  misCalls: 0,
   interrupts: 0,
   noResult: 0,
   retries: 0,
   identicalRetries: 0,
+  unrecovered: 0,
   classes: {},
   latencies: [],
+  turns: [],
+  waste: 0,
+  sigs: {},
 });
 const bump = (o, k, n = 1) => {
   o[k] = (o[k] ?? 0) + n;
@@ -257,6 +303,11 @@ const usd = (ev) => {
     1e6
   );
 };
+const sigEntry = (t, sig) => {
+  if (!t.sigs[sig])
+    t.sigs[sig] = { n: 0, cls: "", turns: [], unrecovered: 0, waste: 0, paths: {}, shapes: {} };
+  return t.sigs[sig];
+};
 
 const overall = {
   sessions: 0,
@@ -266,6 +317,8 @@ const overall = {
   usd: 0,
   recoveryTokens: 0,
   recoveryUsd: 0,
+  minTs: Number.POSITIVE_INFINITY,
+  maxTs: 0,
 };
 const all = tally();
 const mcp = tally();
@@ -314,6 +367,10 @@ for (const { project, file } of sessionFiles(DIR)) {
       sessionTokens += e.input + e.cacheRead + e.cacheCreate + e.output;
       bump(models, priceFor(e.model)[0]);
     }
+    if (Number.isFinite(e.ts)) {
+      if (e.ts < overall.minTs) overall.minTs = e.ts;
+      if (e.ts > overall.maxTs) overall.maxTs = e.ts;
+    }
   }
 
   // sequential scan over results
@@ -337,10 +394,10 @@ for (const { project, file } of sessionFiles(DIR)) {
     if (cls === "write") {
       writes.calls++;
       bump(writes.tools, ev.name);
+      if (ev.name !== "Bash") writes.callsNonBash++;
       if (ev.cls === "no-result" || ev.cls === "interrupt" || ev.cls === "retryable")
         writes.unacknowledged++;
       const key = `${ev.name}:${ev.hash}`;
-      if (ev.name !== "Bash") writes.callsNonBash++;
       if (recentWrites.includes(key)) {
         writes.duplicates++;
         if (ev.name !== "Bash") writes.duplicatesNonBash++;
@@ -370,9 +427,11 @@ for (const { project, file } of sessionFiles(DIR)) {
     }
 
     // a real failure
+    const misCall = ev.cls === "coercible" || ev.cls === "semantic";
     for (const x of tallies) {
       x.failures++;
       bump(x.classes, ev.cls);
+      if (misCall) x.misCalls++;
     }
     if (failRunTool === ev.name) {
       failRun++;
@@ -399,26 +458,57 @@ for (const { project, file } of sessionFiles(DIR)) {
 
     // recovery window: until next success of same tool, cap 10 results
     let endIdx = results[Math.min(r + 10, results.length - 1)];
+    let recoveredAt = -1;
+    const path = [];
     for (let k = r + 1; k <= Math.min(r + 10, results.length - 1); k++) {
       const nx = events[results[k]];
       if (nx.name === ev.name && !nx.isError) {
         endIdx = results[k];
+        recoveredAt = k;
         break;
       }
+      path.push(shortName(nx.name));
     }
     let winUsd = 0;
     let winTok = 0;
+    let turns = 0;
     for (let i = results[r] + 1; i <= endIdx; i++) {
       const e = events[i];
       if (e.kind === "assist") {
         winUsd += usd(e);
         winTok += e.input + e.cacheRead + e.cacheCreate + e.output;
+        turns++;
       }
     }
     recoveryCosts.push(winUsd);
     recoveryTokensPer.push(winTok);
     overall.recoveryUsd += winUsd;
     overall.recoveryTokens += winTok;
+
+    const recovered = recoveredAt >= 0;
+    const turnsCapped = recovered ? turns : 10;
+    for (const x of tallies) {
+      x.waste += winUsd;
+      x.turns.push(turnsCapped);
+      if (!recovered) x.unrecovered++;
+    }
+    const se = sigEntry(t, ev.sig || "(no message)");
+    se.n++;
+    se.cls = ev.cls;
+    se.turns.push(turnsCapped);
+    se.waste += winUsd;
+    if (!recovered) se.unrecovered++;
+    if (recovered) {
+      const p = path.length
+        ? path.slice(0, 5).join(" > ") + (path.length > 5 ? " > …" : "")
+        : "(direct retry)";
+      bump(se.paths, p);
+      const d = shapeDiff(
+        events[ev.useIndex].shape,
+        events[events[results[recoveredAt]].useIndex].shape,
+      );
+      if (d) bump(se.shapes, d);
+    }
   }
   const last = events[results[results.length - 1]];
   if (last.isError && last.cls !== "interrupt") overall.endedOnFailure++;
@@ -433,6 +523,8 @@ const fmtClasses = (c) =>
     .map(([k, v]) => `${k} ${v}`)
     .join(", ");
 const per1k = (n) => (all.calls ? (1000 * n) / all.calls : 0);
+const windowDays = Math.max(1, (overall.maxTs - overall.minTs) / 86400e3);
+const annualize = (x) => (x * 365) / windowDays;
 const summarize = (t) => ({
   calls: t.calls,
   failures: t.failures,
@@ -452,11 +544,60 @@ const totalTokens =
   overall.tokens.cacheCreate +
   overall.tokens.output;
 
+const top = (obj, n) =>
+  Object.entries(obj)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n);
+
+const suggestion = (cls, sig) => {
+  if (cls === "coercible")
+    return "learned coercion or schema fix at the boundary; file a tool definition report";
+  if (cls === "retryable") return "bounded retry with backoff; raise the timeout for this tool";
+  if (cls === "blocked") return "permission or auth configuration; not a model problem";
+  if (cls === "semantic")
+    return /has not been read|old_string|not found in file/i.test(sig)
+      ? "precondition check: read-before-write ordering hint in the tool description"
+      : "verify-before-call or reroute; add the constraint to the description";
+  return "rewrite the error into an actionable message; measure turns to recover";
+};
+
+const toolHealth = [...byTool]
+  .filter(([, t]) => t.calls >= MIN_CALLS && t.failures > 0)
+  .map(([name, t]) => ({
+    tool: name,
+    calls: t.calls,
+    failures: t.failures,
+    failureRatePct: +pct(t.failures, t.calls).toFixed(1),
+    misCallRatePct: +pct(t.misCalls, t.calls).toFixed(1),
+    identicalRetryPct: +pct(t.identicalRetries, t.failures).toFixed(0),
+    medianTurnsToRecover: quantile(t.turns, 0.5),
+    unrecoveredPct: +pct(t.unrecovered, t.failures).toFixed(0),
+    wasteUsd: +t.waste.toFixed(2),
+    wastePer1kCallsUsd: +((1000 * t.waste) / t.calls).toFixed(2),
+    annualizedWasteUsd: +annualize(t.waste).toFixed(0),
+    signatures: Object.entries(t.sigs)
+      .sort((a, b) => b[1].waste - a[1].waste)
+      .slice(0, 3)
+      .map(([sig, s]) => ({
+        signature: sig,
+        n: s.n,
+        class: s.cls,
+        medianTurns: quantile(s.turns, 0.5),
+        unrecovered: s.unrecovered,
+        wasteUsd: +s.waste.toFixed(2),
+        topRecoveryPath: top(s.paths, 1)[0] ?? null,
+        topShapeChange: top(s.shapes, 1)[0] ?? null,
+        suggestion: suggestion(s.cls, sig),
+      })),
+  }))
+  .sort((a, b) => b.wastePer1kCallsUsd - a.wastePer1kCallsUsd);
+
 const report = {
   generatedAt: new Date().toISOString(),
   scope: {
     dir: DIR,
     since: SINCE ? new Date(SINCE).toISOString().slice(0, 10) : null,
+    windowDays: +windowDays.toFixed(1),
     sessions: overall.sessions,
     sessionsWithCalls: overall.sessionsWithCalls,
   },
@@ -487,6 +628,7 @@ const report = {
     recoveryUsd: +overall.recoveryUsd.toFixed(2),
     shareOfTokensPct: +pct(overall.recoveryTokens, totalTokens).toFixed(2),
     shareOfUsdPct: +pct(overall.recoveryUsd, overall.usd).toFixed(2),
+    annualizedUsd: +annualize(overall.recoveryUsd).toFixed(0),
   },
   M7_addressable: {
     classes: all.classes,
@@ -499,11 +641,11 @@ const report = {
     duplicatesPer1kWrites: +(writes.calls ? (1000 * writes.duplicates) / writes.calls : 0).toFixed(
       2,
     ),
-    unacknowledgedPer1kWrites: +(
-      writes.calls ? (1000 * writes.unacknowledged) / writes.calls : 0
-    ).toFixed(2),
     duplicatesPer1kNonBashWrites: +(
       writes.callsNonBash ? (1000 * writes.duplicatesNonBash) / writes.callsNonBash : 0
+    ).toFixed(2),
+    unacknowledgedPer1kWrites: +(
+      writes.calls ? (1000 * writes.unacknowledged) / writes.calls : 0
     ).toFixed(2),
     duplicates: writes.duplicates,
     duplicatesNonBash: writes.duplicatesNonBash,
@@ -514,6 +656,11 @@ const report = {
   M10_endedOnFailure: {
     sessions: overall.endedOnFailure,
     pctOfSessionsWithCalls: +pct(overall.endedOnFailure, overall.sessionsWithCalls).toFixed(1),
+  },
+  M17_turnsToRecover: {
+    medianAll: quantile(all.turns, 0.5),
+    medianMcp: quantile(mcp.turns, 0.5),
+    unrecoveredPctAll: +pct(all.unrecovered, all.failures).toFixed(1),
   },
   northStar: {
     failureTaxUsdPer1kCalls: +per1k(overall.recoveryUsd).toFixed(2),
@@ -532,6 +679,7 @@ const report = {
       .slice(0, TOP)
       .map(([k, v]) => [k, { ...summarize(v), estimatedUsd: +(v.usd ?? 0).toFixed(2) }]),
   ),
+  toolHealth: toolHealth.slice(0, TOP),
 };
 
 if (JSON_OUT) writeFileSync(JSON_OUT, `${JSON.stringify(report, null, 2)}\n`);
@@ -542,7 +690,7 @@ const f = (n, d = 0) =>
     : "n/a";
 const lines = [];
 lines.push(
-  `# Baseline from Claude Code transcripts (${report.scope.since ?? "all time"} to ${report.generatedAt.slice(0, 10)})`,
+  `# Baseline from Claude Code transcripts (${report.scope.since ?? "all time"} to ${report.generatedAt.slice(0, 10)}, ${f(windowDays, 0)} days observed)`,
 );
 lines.push("");
 lines.push(
@@ -563,6 +711,9 @@ lines.push(
 lines.push(
   `| M7 addressable share | ${f(report.M7_addressable.addressablePct, 1)}% | ${f(report.M7_addressable.mcpAddressablePct, 1)}% |`,
 );
+lines.push(
+  `| M17 median turns to recover | ${f(report.M17_turnsToRecover.medianAll)} | ${f(report.M17_turnsToRecover.medianMcp)} |`,
+);
 lines.push(`| Calls with no result | ${f(all.noResult)} | ${f(mcp.noResult)} |`);
 lines.push("");
 lines.push(
@@ -572,7 +723,7 @@ lines.push(
   `M5 recovery cost per failure: median $${f(report.M5_recoveryCost.medianUsd, 4)}, mean $${f(report.M5_recoveryCost.meanUsd, 4)}, p90 $${f(report.M5_recoveryCost.p90Usd, 4)} (median ${f(report.M5_recoveryCost.medianTokens)} tokens).`,
 );
 lines.push(
-  `M6 failure tax: $${f(report.M6_failureTax.recoveryUsd, 2)} = ${f(report.M6_failureTax.shareOfUsdPct, 1)}% of estimated spend, ${f(report.M6_failureTax.shareOfTokensPct, 1)}% of tokens.`,
+  `M6 failure tax: $${f(report.M6_failureTax.recoveryUsd, 2)} = ${f(report.M6_failureTax.shareOfUsdPct, 1)}% of estimated spend, ${f(report.M6_failureTax.shareOfTokensPct, 1)}% of tokens; annualised at this rate $${f(report.M6_failureTax.annualizedUsd)}.`,
 );
 lines.push(
   `M8/M9 writes: ${f(writes.calls)} write calls (${f(writes.callsNonBash)} excluding Bash); duplicates ${f(report.M8_M9_writes.duplicatesPer1kWrites, 1)} per 1K writes, ${f(report.M8_M9_writes.duplicatesPer1kNonBashWrites, 1)} per 1K excluding Bash; unacknowledged ${f(report.M8_M9_writes.unacknowledgedPer1kWrites, 1)} per 1K writes; write retried after error ${f(writes.retriedAfterError)}.`,
@@ -606,4 +757,32 @@ for (const [k, v] of Object.entries(report.byProject))
   lines.push(
     `| ${k} | ${f(v.calls)} | ${f(v.failures)} | ${f(v.failureRatePct, 1)}% | ${f(v.estimatedUsd, 2)} |`,
   );
+lines.push("");
+lines.push(
+  `## Tool health (ADR-0007). Ranked by waste per 1K calls; minimum ${MIN_CALLS} calls. Signatures are masked error text and stay on this machine.`,
+);
+lines.push("");
+lines.push(
+  "| Tool | Calls | Fail | Mis-call | Identical retry | Median turns | Unrecovered | Waste | Waste / 1K calls | Annualised |",
+);
+lines.push("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+for (const t of report.toolHealth)
+  lines.push(
+    `| ${shortName(t.tool)} | ${f(t.calls)} | ${f(t.failureRatePct, 1)}% | ${f(t.misCallRatePct, 1)}% | ${f(t.identicalRetryPct)}% | ${f(t.medianTurnsToRecover)} | ${f(t.unrecoveredPct)}% | $${f(t.wasteUsd, 2)} | $${f(t.wastePer1kCallsUsd, 2)} | $${f(t.annualizedWasteUsd)} |`,
+  );
+lines.push("");
+for (const t of report.toolHealth.slice(0, 8)) {
+  lines.push(`### ${shortName(t.tool)}`);
+  for (const s of t.signatures) {
+    lines.push(
+      `- **${s.signature}** ×${s.n}, ${s.class}, median ${f(s.medianTurns)} turns, ${s.unrecovered} unrecovered, $${f(s.wasteUsd, 2)}.`,
+    );
+    if (s.topRecoveryPath)
+      lines.push(`  - recovery path: ${s.topRecoveryPath[0]} (×${s.topRecoveryPath[1]})`);
+    if (s.topShapeChange)
+      lines.push(`  - shape change: ${s.topShapeChange[0]} (×${s.topShapeChange[1]})`);
+    lines.push(`  - suggestion: ${s.suggestion}`);
+  }
+  lines.push("");
+}
 console.log(lines.join("\n"));

@@ -21,6 +21,8 @@ jobs:
           head="${{ github.event.pull_request.head.sha }}"
           missing=0
           for sha in $(git rev-list "$base..$head"); do
+            # Bots do not certify the DCO; their bumps are reviewed like any other change.
+            if git show -s --format=%an "$sha" | grep -qE '\[bot\]$'; then continue; fi
             if ! git show -s --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
               echo "::error::commit $sha has no Signed-off-by line. Use: git commit -s"
               missing=1

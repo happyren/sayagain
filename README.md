@@ -30,13 +30,52 @@ properties:
 3. **Held, not retried**, when the tool is not provably idempotent.
 4. **Replayable** by an operator, with the original intent attached.
 
-**Layer 0, zero-touch (any MCP client):** queue, bounded backoff retry,
-dead-letter queue on Postgres, deterministic argument coercion, and error
-rewriting into model-actionable feedback.
+**Layer 0, zero-touch (any MCP client):** bounded backoff retry, holds for
+destructive tools and for writes with an unknown outcome, deterministic
+argument repair from the tool's own schema, dead-letter and replay, and
+error rewriting into model-actionable feedback. The ledger is a JSONL file
+today; SQLite and Postgres arrive with the daemon in 0.4.
 
 **Layer 1, opt-in:** intent capture, intent verification and reroute, bounded
 side-model repair, intent-drift detection, and hold-before-write with
 approval.
+
+## Getting started
+
+Today, 0.3: one server, wrapped in place. The daemon, HTTP routes and
+`import --rewrite` arrive in 0.4 and 0.5 (see `docs/ROADMAP.md`).
+
+```bash
+# Wrap a stdio server. Its name, tools and errors are untouched; every result
+# gains a receipt; destructive tools are held until you approve.
+npx sayagain wrap -- npx -y @notionhq/notion-mcp-server
+
+# In your host config, keep the key and wrap the command:
+#   "notion": { "command": "npx", "args": ["sayagain", "wrap", "--", "npx", "-y", "@notionhq/notion-mcp-server"] }
+
+sayagain holds                 # what is waiting
+sayagain approve <receipt>     # or: sayagain reject <receipt>
+sayagain deadletters           # what gave up after retry or repair
+sayagain replay <receipt>      # re-send it, optionally --args '{...}'
+sayagain ledger --tail 20      # what happened
+```
+
+Options: `--hold destructive|always|never`, `--hold-wait <ms>`,
+`--class <tool>=<class>`, `--dedupe-window <ms>`, `--retry <n>`,
+`--no-repair`, `--no-rewrite-errors`, `--no-announce`, `--ledger <path>`,
+`--deadletter <path>`. A write that fails with an unknown outcome, or whose
+arguments were repaired, waits for your approval before it is sent again.
+
+### What the agent sees
+
+| Surface | With Say Again in the path |
+| ------- | -------------------------- |
+| Server name and key | Unchanged |
+| Tool names, descriptions, schemas | Unchanged (optional intent property on write tools, off by default) |
+| Resources, prompts, notifications | Relayed |
+| Every result | Plus `_meta` receipt and status |
+| Held write | A text block saying it is held, with the receipt |
+| `initialize` | Plus `_meta["sh.sayagain/boundary"]` and one sentence of instructions |
 
 ## Prowords
 
