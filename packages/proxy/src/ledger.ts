@@ -3,6 +3,12 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Status, ToolClass } from "@sayagain/sdk";
 
+/**
+ * One row per outcome the boundary produced for a call. A receipt normally
+ * appears once; it appears twice when an attempt failed and the call was
+ * then held (the failed attempt, then the hold or the approved re-send).
+ * Consumers that want one row per call keep the last row per receipt.
+ */
 export interface LedgerRow {
   receipt: string;
   ts: string;
@@ -23,12 +29,20 @@ export interface LedgerRow {
   latencyMs: number;
   requestBytes: number;
   responseBytes: number;
-  held?: { reason: string; decision?: "approve" | "reject"; waitedMs?: number };
+  held?: {
+    reason: string;
+    mode: string;
+    decision?: "approve" | "reject";
+    waitedMs?: number;
+    cancelled?: boolean;
+  };
   duplicateOf?: string;
   attempts?: number;
   /** Repair rules applied, paths only, never values. */
   repairs?: { path: string; rule: string }[];
   replayOf?: string;
+  /** Which budget a repair counted against: the client's task id, or a time window when none was given. */
+  budget?: "task" | "window";
 }
 
 export interface Ledger {
@@ -37,7 +51,7 @@ export interface Ledger {
 
 export const defaultLedgerPath = (): string => join(homedir(), ".sayagain", "ledger.jsonl");
 
-/** Append-only JSON lines. One file, one row per call, durable across restarts. */
+/** Append-only JSON lines. Durable across restarts. */
 export class JsonlLedger implements Ledger {
   constructor(readonly path: string = defaultLedgerPath()) {
     mkdirSync(dirname(path), { recursive: true });

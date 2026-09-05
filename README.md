@@ -62,7 +62,8 @@ sayagain ledger --tail 20      # what happened
 Options: `--hold destructive|always|never`, `--hold-wait <ms>`,
 `--class <tool>=<class>`, `--dedupe-window <ms>`, `--retry <n>`,
 `--no-repair`, `--no-rewrite-errors`, `--no-announce`, `--ledger <path>`,
-`--deadletter <path>`.
+`--deadletter <path>`. A write that fails with an unknown outcome, or whose
+arguments were repaired, waits for your approval before it is sent again.
 
 ### What the agent sees
 

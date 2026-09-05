@@ -20,6 +20,8 @@ export interface PolicyOptions {
   repair: boolean;
   /** Repairs allowed per task before dead-lettering. */
   repairsPerTask: number;
+  /** When no task id is supplied, the repair budget is per window of this length (spec 3.3 fallback). */
+  repairWindowMs: number;
   /** Append one actionable sentence to final failures. */
   rewriteErrors: boolean;
 }
@@ -33,6 +35,7 @@ export const DEFAULT_POLICY: PolicyOptions = {
   retryBaseMs: 250,
   repair: true,
   repairsPerTask: 3,
+  repairWindowMs: 600_000,
   rewriteErrors: true,
 };
 
@@ -78,6 +81,14 @@ export class ToolClassifier {
 
   get warm(): boolean {
     return this.resolveReady === undefined;
+  }
+
+  /** The probe answered without tools (error or empty): stop waiting, there is nothing to learn yet. */
+  markProbed(): void {
+    if (this.resolveReady) {
+      this.resolveReady();
+      this.resolveReady = undefined;
+    }
   }
 
   classOf(tool: string): ToolClass {

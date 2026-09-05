@@ -45,6 +45,14 @@ describe("repairArguments", () => {
     expect(r?.arguments).toEqual({ page_size: 5, limit: 1 });
     expect(r?.changes[0]).toMatchObject({ path: "/pageSize", rule: "rename", to: "/page_size" });
   });
+  it("refuses a second rename onto a property that is already filled", () => {
+    const r = repairArguments(
+      { page_id: "a", "page-id": "b", limit: 1 },
+      { properties: { pageId: { type: "string" }, limit: { type: "number" } } },
+    );
+    expect(r?.arguments).toEqual({ pageId: "a", "page-id": "b", limit: 1 });
+    expect(r?.changes).toHaveLength(1);
+  });
   it("returns null when nothing deterministic applies", () => {
     expect(repairArguments({ limit: "abc", page_size: 1 }, schema)).toBeNull();
     expect(repairArguments({ limit: 1, page_size: 1 }, schema)).toBeNull();

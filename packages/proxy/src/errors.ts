@@ -4,16 +4,16 @@ export type ErrorClass = "retryable" | "coercible" | "blocked" | "semantic" | "o
 
 const CLASSES: [ErrorClass, RegExp][] = [
   [
-    "retryable",
-    /timed? ?out|ETIMEDOUT|deadline exceeded|rate limit|too many requests|\b429\b|ECONNRESET|ECONNREFUSED|socket hang up|unavailable|not running|unresponsive|is stuck|\b50[234]\b/i,
-  ],
-  [
     "coercible",
     /InputValidationError|invalid (param|argument|input)|schema|required (param|field|property)|missing required|must be (a|an|of type)|expected .{1,40} (but )?(got|received)|not a valid|unexpected (property|field|key)|is required\b/i,
   ],
   [
     "blocked",
     /permission|denied|unauthori[sz]ed|forbidden|\b401\b|\b403\b|EACCES|not allowed|requires? (approval|auth)/i,
+  ],
+  [
+    "retryable",
+    /\btimed out\b|\btime-?out\b(?!\s*(must|should|is|param|value))|ETIMEDOUT|deadline exceeded|rate limit|too many requests|\b429\b|ECONNRESET|ECONNREFUSED|socket hang up|unavailable|not running|unresponsive|is stuck|\b50[234]\b/i,
   ],
   [
     "semantic",

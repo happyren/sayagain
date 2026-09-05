@@ -45,7 +45,7 @@ export function repairArguments(args: unknown, schema: unknown): RepairResult | 
     let name = key;
     if (!(key in properties)) {
       const match = propNames.find(
-        (p) => normalise(p) === normalise(key) && !(p in (args as object)),
+        (p) => normalise(p) === normalise(key) && !(p in (args as object)) && !(p in out),
       );
       if (match) {
         changes.push({ path: `/${key}`, rule: "rename", to: `/${match}` });

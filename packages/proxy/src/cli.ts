@@ -24,17 +24,30 @@ const USAGE = `sayagain ${PROXY_VERSION}
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
   sayagain holds [--json]
   sayagain approve <receipt> | sayagain reject <receipt>
-  sayagain deadletters [--json]
+  sayagain deadletters [--json] [--deadletter <path>]
   sayagain replay <receipt> [--args '<json>']
+      Re-send a dead-lettered call through the running boundary that holds it.
   sayagain --version | --help
 `;
+
+class UsageError extends Error {}
 
 function takeOption(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
   if (i < 0) return undefined;
   const value = args[i + 1];
+  if (value === undefined) throw new UsageError(`${name} expects a value`);
   args.splice(i, 2);
   return value;
+}
+
+/** A non-negative integer option, or a UsageError naming the flag. */
+function takeNumber(args: string[], name: string): number | undefined {
+  const raw = takeOption(args, name);
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw.trim()))
+    throw new UsageError(`${name} expects a non-negative integer, got ${JSON.stringify(raw)}`);
+  return Number(raw);
 }
 
 function takeAll(args: string[], name: string): string[] {
@@ -67,37 +80,30 @@ export async function main(argv: string[]): Promise<number> {
 
   if (command === "wrap") {
     const sep = rest.indexOf("--");
-    if (sep < 0 || sep === rest.length - 1) {
-      process.stderr.write("wrap: expected -- followed by the server command\n");
-      return 2;
-    }
+    if (sep < 0 || sep === rest.length - 1)
+      throw new UsageError("wrap: expected -- followed by the server command");
     const opts = rest.slice(0, sep);
     const [serverCommand, ...serverArgs] = rest.slice(sep + 1);
-    if (!serverCommand) return 2;
+    if (!serverCommand) throw new UsageError("wrap: expected a server command");
     const ledgerPath = takeOption(opts, "--ledger") ?? defaultLedgerPath();
     const deadLetterPath = takeOption(opts, "--deadletter") ?? defaultDeadLetterPath();
     const upstreamName = takeOption(opts, "--name");
     const announce = !takeFlag(opts, "--no-announce");
     const hold = takeOption(opts, "--hold");
-    const holdWait = takeOption(opts, "--hold-wait");
-    const dedupeWindow = takeOption(opts, "--dedupe-window");
-    const retry = takeOption(opts, "--retry");
+    const holdWait = takeNumber(opts, "--hold-wait");
+    const dedupeWindow = takeNumber(opts, "--dedupe-window");
+    const retry = takeNumber(opts, "--retry");
     const noRepair = takeFlag(opts, "--no-repair");
     const noRewrite = takeFlag(opts, "--no-rewrite-errors");
     const classes = parseClassOverrides(takeAll(opts, "--class"));
-    if (opts.length) {
-      process.stderr.write(`wrap: unknown option ${opts[0]}\n`);
-      return 2;
-    }
-    if (hold !== undefined && hold !== "destructive" && hold !== "always" && hold !== "never") {
-      process.stderr.write("wrap: --hold must be destructive, always or never\n");
-      return 2;
-    }
+    if (opts.length) throw new UsageError(`wrap: unknown option ${opts[0]}`);
+    if (hold !== undefined && hold !== "destructive" && hold !== "always" && hold !== "never")
+      throw new UsageError("wrap: --hold must be destructive, always or never");
     const policy: NonNullable<Parameters<typeof wrap>[0]["policy"]> = { classes };
     if (hold !== undefined) policy.hold = hold;
-    if (holdWait !== undefined) policy.holdWaitMs = Number(holdWait);
-    if (dedupeWindow !== undefined) policy.dedupeWindowMs = Number(dedupeWindow);
-    if (retry !== undefined) policy.retryAttempts = Math.max(1, Number(retry));
+    if (holdWait !== undefined) policy.holdWaitMs = holdWait;
+    if (dedupeWindow !== undefined) policy.dedupeWindowMs = dedupeWindow;
+    if (retry !== undefined) policy.retryAttempts = Math.max(1, retry);
     if (noRepair) policy.repair = false;
     if (noRewrite) policy.rewriteErrors = false;
     const wrapOptions: Parameters<typeof wrap>[0] = {
@@ -117,10 +123,10 @@ export async function main(argv: string[]): Promise<number> {
   if (command === "ledger") {
     const opts = [...rest];
     const ledgerPath = takeOption(opts, "--ledger") ?? defaultLedgerPath();
-    const tailRaw = takeOption(opts, "--tail");
+    const tail = takeNumber(opts, "--tail");
     const json = takeFlag(opts, "--json");
     const readOptions: { tail?: number } = {};
-    if (tailRaw !== undefined) readOptions.tail = Number(tailRaw);
+    if (tail !== undefined) readOptions.tail = tail;
     const rows = readLedger(ledgerPath, readOptions);
     if (json) {
       process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
@@ -136,7 +142,10 @@ export async function main(argv: string[]): Promise<number> {
         : "";
       const bits: string[] = [];
       if (r.duplicateOf) bits.push(`duplicate of ${r.duplicateOf}`);
-      if (r.held) bits.push(`held: ${r.held.decision ?? "pending"}`);
+      if (r.held)
+        bits.push(
+          `held (${r.held.mode}): ${r.held.cancelled ? "cancelled" : (r.held.decision ?? "pending")}`,
+        );
       if (r.attempts) bits.push(`attempts ${r.attempts}`);
       if (r.repairs?.length)
         bits.push(`repaired ${r.repairs.map((c) => `${c.path} ${c.rule}`).join(", ")}`);
@@ -175,10 +184,7 @@ export async function main(argv: string[]): Promise<number> {
 
   if (command === "approve" || command === "reject") {
     const receipt = rest[0];
-    if (!receipt) {
-      process.stderr.write(`${command}: expected a receipt\n`);
-      return 2;
-    }
+    if (!receipt) throw new UsageError(`${command}: expected a receipt`);
     const ok = await decideEverywhere(receipt, command);
     process.stdout.write(
       ok ? `${command}d ${receipt}\n` : `no running boundary holds ${receipt}\n`,
@@ -187,10 +193,12 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (command === "deadletters" || command === "dead") {
-    const json = rest.includes("--json");
+    const opts = [...rest];
+    const json = takeFlag(opts, "--json");
+    const deadLetterPath = takeOption(opts, "--deadletter") ?? defaultDeadLetterPath();
     const live = await listAllDeadLetters();
     const liveReceipts = new Set(live.map((d) => d.receipt));
-    const stored = readDeadLetters().filter((d) => !liveReceipts.has(d.receipt));
+    const stored = readDeadLetters(deadLetterPath).filter((d) => !liveReceipts.has(d.receipt));
     if (json) {
       process.stdout.write(`${JSON.stringify({ live, stored }, null, 2)}\n`);
       return 0;
@@ -207,7 +215,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     for (const d of stored) {
       process.stdout.write(
-        `${d.receipt}  ${d.upstream}/${d.tool}  ${d.errorClass}: ${d.errorSignature}  attempts ${d.attempts}, repairs ${d.repairs}  (stored; no running boundary)\n`,
+        `${d.receipt}  ${d.upstream}/${d.tool}  ${d.errorClass}: ${d.errorSignature}  attempts ${d.attempts}, repairs ${d.repairs}  (stored; start the same wrap to replay)\n`,
       );
     }
     return 0;
@@ -217,15 +225,12 @@ export async function main(argv: string[]): Promise<number> {
     const opts = [...rest];
     const argsRaw = takeOption(opts, "--args");
     const receipt = opts[0];
-    if (!receipt) {
-      process.stderr.write("replay: expected a receipt\n");
-      return 2;
-    }
+    if (!receipt) throw new UsageError("replay: expected a receipt");
     const args = argsRaw !== undefined ? (JSON.parse(argsRaw) as unknown) : undefined;
     const outcome = await replayEverywhere(receipt, args);
     if (!outcome) {
       process.stdout.write(
-        `no running boundary has dead letter ${receipt}; start the same wrap and try again\n`,
+        `no running boundary has dead letter ${receipt}; start the same wrap (it reloads its dead letters) and try again\n`,
       );
       return 1;
     }
@@ -235,8 +240,7 @@ export async function main(argv: string[]): Promise<number> {
     return outcome.isError ? 1 : 0;
   }
 
-  process.stderr.write(`unknown command: ${command}\n${USAGE}`);
-  return 2;
+  throw new UsageError(`unknown command: ${command}\n${USAGE}`);
 }
 
 const invokedDirectly =
@@ -244,9 +248,9 @@ const invokedDirectly =
 if (invokedDirectly) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
-    (err) => {
+    (err: unknown) => {
       process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
+      process.exit(err instanceof UsageError ? 2 : 1);
     },
   );
 }

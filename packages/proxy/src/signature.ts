@@ -1,6 +1,12 @@
 /** Masked first line of an error: stable across occurrences, safe to show an operator. */
-export function signatureOf(text: string): string {
-  const cleaned = text.replace(/<\/?tool_use_error>/g, "");
+export function signatureOf(text: unknown): string {
+  const cleaned = (
+    typeof text === "string"
+      ? text
+      : text === undefined || text === null
+        ? ""
+        : JSON.stringify(text)
+  ).replace(/<\/?tool_use_error>/g, "");
   const line = cleaned.split("\n").find((l) => l.trim()) ?? "";
   return line
     .replace(/https?:\/\/\S+/g, "<url>")

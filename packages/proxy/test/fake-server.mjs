@@ -5,6 +5,11 @@ const rl = createInterface({ input: process.stdin });
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 let calls = 0;
 const flaky = new Map(); // tool -> remaining failures
+const strictSchema = {
+  type: "object",
+  properties: { limit: { type: "number" }, tags: { type: "string" }, title: { type: "string" } },
+  required: ["limit"],
+};
 
 rl.on("line", (line) => {
   let msg;
@@ -39,20 +44,10 @@ rl.on("line", (line) => {
           },
           { name: "flaky", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
           { name: "write_flaky", inputSchema: { type: "object" } },
-          {
-            name: "strict",
-            inputSchema: {
-              type: "object",
-              properties: {
-                limit: { type: "number" },
-                tags: { type: "string" },
-                title: { type: "string" },
-              },
-              required: ["limit"],
-            },
-            annotations: { readOnlyHint: true },
-          },
+          { name: "strict", inputSchema: strictSchema, annotations: { readOnlyHint: true } },
+          { name: "strict_write", inputSchema: strictSchema },
           { name: "missing", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+          { name: "slow_write", inputSchema: { type: "object" } },
         ],
       },
     });
@@ -81,6 +76,8 @@ rl.on("line", (line) => {
         id: msg.id,
         error: { code: -32602, message: "Invalid params: limit must be a number" },
       });
+    } else if (args.rpcErrorNoMessage) {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32000 } });
     } else if (args.fail) {
       fail("Error: page 'abc-123' not found");
     } else if (name === "flaky" || name === "write_flaky") {
@@ -90,13 +87,15 @@ rl.on("line", (line) => {
         flaky.set(name, left - 1);
         fail("Error: Request timed out");
       } else ok();
-    } else if (name === "strict") {
+    } else if (name === "strict" || name === "strict_write") {
       if (typeof args.limit !== "number") fail("Invalid params: limit must be a number");
       else if (args.tags !== undefined && typeof args.tags !== "string")
         fail("Invalid params: tags must be a string");
       else ok();
     } else if (name === "missing") {
       fail("Error: page 'zzz' not found");
+    } else if (name === "slow_write") {
+      setTimeout(ok, Number(args.delayMs ?? 200));
     } else ok();
   } else if (msg.method === "ping") {
     send({ jsonrpc: "2.0", id: msg.id, result: {} });

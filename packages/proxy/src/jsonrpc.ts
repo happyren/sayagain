@@ -1,4 +1,5 @@
 /** Minimal JSON-RPC 2.0 helpers for newline-delimited MCP stdio framing. */
+import { StringDecoder } from "node:string_decoder";
 
 export type JsonRpcId = string | number;
 
@@ -56,12 +57,13 @@ export function isResponse(m: unknown): m is JsonRpcResponse {
   );
 }
 
-/** Splits a byte stream into complete lines; keeps the partial tail. */
+/** Splits a byte stream into complete lines; keeps the partial tail and never splits a multi-byte character. */
 export class LineSplitter {
   private buffer = "";
+  private readonly decoder = new StringDecoder("utf8");
 
   push(chunk: string | Buffer): string[] {
-    this.buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    this.buffer += typeof chunk === "string" ? chunk : this.decoder.write(chunk);
     const lines: string[] = [];
     let nl = this.buffer.indexOf("\n");
     while (nl >= 0) {
@@ -73,7 +75,7 @@ export class LineSplitter {
   }
 
   flush(): string | null {
-    const rest = this.buffer;
+    const rest = this.buffer + this.decoder.end();
     this.buffer = "";
     return rest.length ? rest : null;
   }

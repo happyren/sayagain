@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1.3                                      |
+| Status         | Draft v0.1.4                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -131,8 +131,11 @@ returns to the client.
 ### 5.1 `sh.sayagain/receipt` (string)
 
 Unique identifier for this call in the boundary's ledger. MUST be present
-on every response that passed through the boundary, including pass-through
-responses.
+on every `tools/call` response that passed through the boundary. On a
+JSON-RPC error response there is no `result`; the boundary places the same
+keys in `error.data` when that member is absent or an object, and omits
+them (keeping the receipt in its ledger) when `error.data` is something
+else.
 
 ### 5.2 `sh.sayagain/status` (string)
 
@@ -159,10 +162,18 @@ Present when status is `held`.
 }
 ```
 
-When an operator rejects a held call, the boundary answers with `isError`
-true, `status` still `held`, and `held.decision` set to `"reject"`. When a
-held call is later approved and executed, its `executed` response carries
-`held` with `decision` `"approve"` so the agent can see it waited.
+`held.mode` says why the call is waiting: `pre` (held before it was ever
+sent), `unknown-outcome` (it was sent, failed with an error that does not
+prove it did not apply, and has NOT been re-sent), or `repaired` (the
+server rejected the arguments and a corrected version awaits approval).
+The text block the agent receives says the same in words; for
+`unknown-outcome` it tells the agent not to repeat the call. When an
+operator rejects a held call, the boundary answers with `isError` true,
+`status` still `held`, and `held.decision` set to `"reject"`. When a held
+call is later approved and executed, its response carries `held` with
+`decision` `"approve"` so the agent can see it waited. A client that
+cancels a held request with `notifications/cancelled` gets no response, as
+the protocol allows, and the hold is dropped.
 
 ### 5.4a `sh.sayagain/replay-of` (string)
 
@@ -265,3 +276,4 @@ and the schema shim (section 7) are optional features.
 - v0.1.1 (2026-09-04): added 5.5, the boundary announcement on `initialize`.
 - v0.1.2 (2026-09-05): `sh.sayagain/duplicate-of` on deduplicated responses; `held.decision` on rejected and later-approved calls.
 - v0.1.3 (2026-09-05): `sh.sayagain/replay-of`; guidance sentence appended to failed results; dead-lettered semantics clarified.
+- v0.1.4 (2026-09-05): receipt and status on JSON-RPC error responses via `error.data`; `held.mode`; cancellation of held calls; `repaired` status emitted when arguments were changed and the call succeeded.
