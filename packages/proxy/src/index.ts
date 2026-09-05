@@ -138,6 +138,23 @@ export {
   saveRegistry,
   upstreamFor,
 } from "./registry.js";
+export type {
+  ProbeOutcome,
+  ProbeResult,
+  RegistryScan,
+  RegistryServer,
+  ScannedServer,
+  ScannedTool,
+} from "./registry-scan.js";
+export {
+  listRegistry,
+  probeTools,
+  REGISTRY_URL,
+  renderRegistryScan,
+  scanRegistry,
+  summarizeScan,
+  wilson,
+} from "./registry-scan.js";
 export type { RepairChange, RepairResult } from "./repair.js";
 export { repairArguments } from "./repair.js";
 export { daemonHealthy, ensureDaemon, runStdioShim } from "./shim.js";

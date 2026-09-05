@@ -69,6 +69,7 @@ import {
   saveRegistry,
   tokenPath,
 } from "./registry.js";
+import { renderRegistryScan, scanRegistry } from "./registry-scan.js";
 import { daemonHealthy, ensureDaemon, runStdioShim, serveArgv, waitForDaemon } from "./shim.js";
 import { defaultSqlitePath, openStores, type StoreKind } from "./stores.js";
 import {
@@ -134,11 +135,12 @@ const USAGE = `sayagain ${PROXY_VERSION}
       Switch one intervention off or on. --apply <id> lets a coercion change read-only calls before they leave
       (by default the loop only advises: the hint, and the repair after a failure); --advise <id> switches it back.
       --report <server> prints a tool definition report. A wrap picks changes up within seconds.
-  sayagain audit [--source claude-code|codex|cursor|all] [--dir <path>] [--since 30d] [--min-calls 10] [--top 15]
-                 [--html <file>|--no-html] [--json]
+  sayagain audit [--source claude-code|codex|cursor|all] [--dir <path>] [--project <name>] [--since 30d]
+                 [--min-calls 10] [--top 15] [--html <file>|--no-html] [--json]
       The one page from docs/measurement.md over your own transcripts (Claude Code, Codex, Cursor), risk first:
       unacknowledged writes, the failure tax in dollars, failures by server, duplicates, recovery, the tools most
       prone to mis-calls. Writes a shareable HTML page (names, counts and masked signatures; never arguments).
+      --project <name> keeps one project's sessions (its directory name; worktrees included).
   sayagain contribute [--source ledger|claude-code|codex|cursor] [--dir <path>] [--ledger <path>] [--since 30d]
                       [--yes] [--accept-terms <version>] [--endpoint <url>] [--json]
       Build the contributed-shape document of ADR-0009 (tool names, counts, error classes, argument shapes,
@@ -150,6 +152,13 @@ const USAGE = `sayagain ${PROXY_VERSION}
       rotate the id and ask the index to delete the old one's data.
   sayagain lint <name>|--all [--file <tools.json>] [--fail-below A|B|C|D] [--json]
       Grade a server's tool definitions with @sayagain/lint (starts the upstream through the daemon if needed).
+  sayagain lint --registry [--sample <n> [--seed 20260905] | --first <n>] [--concurrency 8] [--timeout 10s]
+                 [--out <file>] [--json] [--registry-url <url> [--allow-private]]
+      Scan the public MCP registry (docs/measurement.md 5.5): ask every server with a Streamable HTTP remote for
+      its tools without credentials, grade them, print the grade distribution and M16 (tools without documented
+      parameter constraints) with the rule-set version. The page and --json name no server; the progress log on
+      stderr does. --out writes every probed server (registry name, version, remote URL, outcome, status, error
+      text) and every graded tool with its findings, all of it public registry data.
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
   sayagain holds [--json]
   sayagain approve <receipt> | sayagain reject <receipt>
@@ -1038,6 +1047,7 @@ export async function main(argv: string[]): Promise<number> {
     const htmlOut = takeOption(opts, "--html");
     const sourceOption = takeOption(opts, "--source") ?? "all";
     const dir = takeOption(opts, "--dir");
+    const project = takeOption(opts, "--project");
     const sinceOption = takeOption(opts, "--since") ?? "30d";
     const minCalls = takeNumber(opts, "--min-calls");
     const top = takeNumber(opts, "--top");
@@ -1058,6 +1068,7 @@ export async function main(argv: string[]): Promise<number> {
     const scan = scanTranscripts({
       sources,
       since: loadFrom,
+      ...(project !== undefined ? { project } : {}),
       ...(dir && sources[0] ? { dirs: { [sources[0]]: resolve(dir) } } : {}),
     });
     const audit = runAudit(
@@ -1276,6 +1287,55 @@ export async function main(argv: string[]): Promise<number> {
     process.stdout.write(
       `sent: the index answered ${receipt.status}${receipt.receipt ? `, receipt ${receipt.receipt}` : ""}${receipt.url ? `\nyour servers on the index: ${receipt.url}` : ""}\n`,
     );
+    return 0;
+  }
+
+  if (command === "lint" && rest.includes("--registry")) {
+    const opts = [...rest];
+    takeFlag(opts, "--registry");
+    const json = takeFlag(opts, "--json");
+    const sample = takeNumber(opts, "--sample");
+    const first = takeNumber(opts, "--first");
+    const seed = takeNumber(opts, "--seed");
+    const concurrency = takeNumber(opts, "--concurrency");
+    const timeoutOption = takeOption(opts, "--timeout");
+    const outFile = takeOption(opts, "--out");
+    const registryUrl = takeOption(opts, "--registry-url");
+    const allowPrivate = takeFlag(opts, "--allow-private");
+    if (opts.length) throw new UsageError(`lint: unknown option ${opts[0]}`);
+    if (sample !== undefined && first !== undefined)
+      throw new UsageError("lint: --sample and --first are alternatives");
+    if (seed !== undefined && sample === undefined)
+      throw new UsageError("lint: --seed goes with --sample");
+    if (sample === 0 || first === 0)
+      throw new UsageError("lint: --sample and --first need a positive number");
+    let timeoutMs: number | undefined;
+    if (timeoutOption !== undefined) {
+      const m = timeoutOption.match(/^(\d+)\s*(ms|s)?$/);
+      if (!m) throw new UsageError("lint: --timeout expects a number of seconds, like 10s");
+      timeoutMs = Number(m[1]) * (m[2] === "ms" ? 1 : 1000);
+      if (timeoutMs <= 0) throw new UsageError("lint: --timeout must be positive");
+    }
+    const scan = await scanRegistry({
+      ...(sample !== undefined ? { sample } : {}),
+      ...(first !== undefined ? { first } : {}),
+      ...(seed !== undefined ? { seed } : {}),
+      ...(concurrency !== undefined ? { concurrency: Math.max(1, concurrency) } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(registryUrl !== undefined ? { registryUrl } : {}),
+      ...(allowPrivate ? { allowPrivate: true } : {}),
+      log: (line) => process.stderr.write(`${line}\n`),
+    });
+    if (outFile !== undefined) {
+      mkdirSync(resolve(outFile, ".."), { recursive: true });
+      writeFileSync(resolve(outFile), `${JSON.stringify(scan, null, 2)}\n`);
+    }
+    if (json) {
+      const { servers: _servers, ...summary } = scan;
+      process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+    } else process.stdout.write(renderRegistryScan(scan));
+    if (outFile !== undefined && !json)
+      process.stdout.write(`per-server results: ${resolve(outFile)}\n`);
     return 0;
   }
 

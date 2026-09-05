@@ -53,7 +53,8 @@ Deliverables
   The endpoint and its owner are decided later (ADR-0009, decision 3);
   until then the command writes the document locally and stops.
 - The linter runs over the full public registry (`sayagain lint --registry`
-  or a script) and produces the M16 distribution with the rule-set version.
+  or a script) and produces M16 and the grade distribution with the
+  rule-set version.
 - Baseline on our own agents: this repository's history, quantbot, the
   delivery flywheel; the three reports kept out of the repository.
 
@@ -61,7 +62,13 @@ Status, 2026-09-05 (0.10.0): `sayagain audit` and `sayagain contribute`
 shipped (Claude Code, Codex and Cursor readers; the HTML page; the shape
 document, consent flow and weekly setting; `docs/CONTRIBUTING-DATA.md`).
 The `scripts/baseline` script stays as the pre-registered instrument rather
-than being folded in. The registry scan and the three baselines are next.
+than being folded in. 0.11.0 added `sayagain lint --registry` (the M16
+scan; a seeded sample of the servers with a Streamable HTTP remote is the
+first published number, the full scan of about 15,000 remotes stays the
+target and runs as a background job) and `sayagain audit --project` for
+the per-agent baselines; the first scan and two baselines are in
+`docs/registry-scan.md`. The delivery flywheel has no transcripts on the
+build machine yet.
 
 Metric that proves it worked
 

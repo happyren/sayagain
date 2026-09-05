@@ -75,6 +75,8 @@ export interface TranscriptSession {
   maxTs: number;
   /** The file records tool results (Cursor files may not; their outcomes are then unrecorded). */
   resultsRecorded: boolean;
+  /** The session belongs to another project than the one asked for (or the file does not say). */
+  excluded?: boolean;
 }
 
 /** USD per million tokens (input, output) at list price. Cache reads cost 10% of input, cache creation 125%. */
@@ -527,10 +529,11 @@ function codexOutput(raw: string): { exit: number | undefined; text: string } {
 }
 
 /** Codex CLI rollouts: `response_item`, `event_msg` and `turn_context` lines under ~/.codex/sessions. */
-function readCodexSession(file: string, now: number): TranscriptSession {
+function readCodexSession(file: string, now: number, opts: ReadOptions): TranscriptSession {
   const r = startReading(file, "codex", now);
   const { s, pending, turns } = r;
   const schemas = new Map<string, string>();
+  let projectSeen = false;
   let model = "";
   let open: Turn = { tokens: 0, usd: 0, model, calls: [] };
   turns.push(open);
@@ -542,6 +545,14 @@ function readCodexSession(file: string, now: number): TranscriptSession {
     seen(r, ts);
     const type = str(e.type);
     if (type === "session_meta") {
+      if (opts.project !== undefined) {
+        projectSeen = true;
+        const base = str(p.cwd).split(/[/]/).filter(Boolean).pop() ?? "";
+        if (!segmentMatchesProject(base, opts.project)) {
+          r.s.excluded = true;
+          return finishSession(r); // another project: an empty session
+        }
+      }
       const tools = Array.isArray(p.dynamic_tools) ? p.dynamic_tools : [];
       for (const t of tools) {
         const tool = obj(t);
@@ -640,13 +651,44 @@ function readCodexSession(file: string, now: number): TranscriptSession {
       turns.push(open);
     }
   }
+  if (opts.project !== undefined && !projectSeen) {
+    r.s.excluded = true; // the file never said which project it was
+    r.s.calls.length = 0;
+  }
   return finishSession(r);
 }
 
 export interface ReadOptions {
   /** The clock for the in-flight grace window. Default now. */
   now?: number;
+  /**
+   * Keep only sessions of this project: the name of its directory (`quantbot` matches
+   * `~/quantbot` and its worktrees, not `~/quantbot-docs`). Claude Code and Cursor name their
+   * project directories after the path; Codex records the working directory in the session.
+   */
+  project?: string;
 }
+
+/** Does a directory name the project: the directory itself, or a worktree or variant of it. */
+export const segmentMatchesProject = (segment: string, project: string): boolean => {
+  const s = segment.toLowerCase();
+  const p = project.toLowerCase();
+  return s === p || s.startsWith(`${p}--`) || s.startsWith(`${p}.`);
+};
+
+/**
+ * Claude Code and Cursor name a project directory after the session's working directory with
+ * every character outside [A-Za-z0-9] turned into `-`: `/Users/k/my_app` becomes
+ * `-Users-k-my-app`. The project is the last directory, or a worktree of it (`--`).
+ */
+export const projectDirMatches = (dirName: string, project: string): boolean => {
+  const p = project.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase();
+  const name = dirName.toLowerCase();
+  if (!p) return false;
+  return (
+    name === p || name.endsWith(`-${p}`) || name.includes(`-${p}--`) || name.startsWith(`${p}--`)
+  );
+};
 
 export function readSession(
   file: string,
@@ -654,7 +696,9 @@ export function readSession(
   opts: ReadOptions = {},
 ): TranscriptSession {
   const now = opts.now ?? Date.now();
-  return source === "codex" ? readCodexSession(file, now) : readMessageSession(file, source, now);
+  return source === "codex"
+    ? readCodexSession(file, now, opts)
+    : readMessageSession(file, source, now);
 }
 
 /** Where each host keeps its transcripts, honouring the hosts' own environment variables. */
@@ -716,6 +760,14 @@ export function scanTranscripts(opts: ScanOptions = {}): Scan {
     if (!existsSync(dir)) continue;
     for (const file of walk(dir)) {
       if (!isSessionFile(file, source)) continue;
+      if (opts.project !== undefined && source !== "codex") {
+        // The project directory is the first path segment under the host's projects directory.
+        const rel =
+          resolve(file)
+            .slice(resolve(dir).length + 1)
+            .split(sep)[0] ?? "";
+        if (!projectDirMatches(rel, opts.project)) continue;
+      }
       if (opts.since) {
         try {
           if (statSync(file).mtimeMs < opts.since.getTime()) continue;
@@ -723,8 +775,12 @@ export function scanTranscripts(opts: ScanOptions = {}): Scan {
           continue;
         }
       }
+      const s = readSession(file, source, {
+        now,
+        ...(opts.project !== undefined ? { project: opts.project } : {}),
+      });
+      if (s.excluded) continue;
       files[source]++;
-      const s = readSession(file, source, { now });
       if (s.calls.length) sessions.push(s);
     }
   }

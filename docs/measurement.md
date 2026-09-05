@@ -86,7 +86,7 @@ own ledger (`sayagain report`, `tools`, `errors`; recovery cost in bytes on the 
 
 | Id | Metric | Definition | Source |
 | -- | ------ | ---------- | ------ |
-| M16 | Registry grade distribution | Letter grades from `@sayagain/lint` across the public registry, and the share of tools that document parameter constraints, output, and annotations. | X |
+| M16 | Registry constraint gap | Headline: the share of graded registry tools with a `params/constrained` finding (no documented parameter constraints), with the rule-set version. Beside it: the letter-grade distribution and the shares with `output/described` and `annotations/present` findings. Amended 2026-09-05 from "share of tools that document constraints, output and annotations": one negative headline, the rest diagnostic. | X |
 
 ## 4. North star
 
@@ -185,7 +185,34 @@ feed the logs to the same analyzer with `--tap`.
 
 Run `@sayagain/lint` over every server in the public registry that
 publishes a tool list. Report M16 with the exact rule set version so the
-scan is reproducible.
+scan is reproducible. Since 0.11, `sayagain lint --registry` does this:
+it lists the registry, asks each server with a Streamable HTTP remote for
+its tools without credentials, grades them, and prints the distribution
+with `RULE_SET_VERSION`; `--sample <n> --seed <n>` takes a reproducible
+random sample of those servers when the full list is too long for one
+sitting (the full scan of about 15,000 remotes takes hours and is the
+target; a sample is the first published number).
+
+Coverage, stated on the page: only servers publishing a Streamable HTTP
+remote are probed; package-only and SSE-only servers are listed but not
+probed. Probed servers that answer 401, 403 or 407 or declare a required
+secret header (`auth`), answer with a JSON-RPC error (`refused`), do not
+answer in time (`unreachable`), answer with something other than MCP
+(`not-mcp`) or list no tools (`no-tools`) contribute no tools; a remote at
+a private or loopback address is never probed (`skipped`). Deprecated
+registry entries are left out of the listing. M16's denominator is
+every tool listed by a server with outcome `ok`, tools without parameters
+included. The 95% interval treats tools as independent and ignores that
+they cluster by server, so the page also gives the number of servers with
+at least one such tool and the median share within a server.
+
+The `params/constrained` heuristic, which defines M16: a property is
+expected to carry a constraint when its type is number or integer, or when
+its name (snake or camel case) ends in an id, date, time, status, type,
+kind, mode, format, level, sort, order, role, unit, currency, locale or
+timezone word, or its description says "one of", "either", "allowed
+values", "must be", "in the form", "ISO 8601" or "format". A change to
+that list is a new `RULE_SET_VERSION`.
 
 ## 6. Reporting
 

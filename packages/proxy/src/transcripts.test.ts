@@ -12,8 +12,10 @@ import {
 } from "./test-fixtures/transcripts.js";
 import {
   modelFamily,
+  projectDirMatches,
   readSession,
   scanTranscripts,
+  segmentMatchesProject,
   sessionRows,
   type TranscriptCall,
   toolClassFor,
@@ -248,6 +250,27 @@ describe("transcripts", () => {
     });
     expect(scan.files["claude-code"]).toBe(2);
     expect(new Set(scan.sessions.map((s) => s.id)).size).toBe(1);
+  });
+
+  it("keeps one project's sessions with --project, by directory name or working directory", () => {
+    expect(projectDirMatches("-Users-k-quantbot", "quantbot")).toBe(true);
+    expect(projectDirMatches("-Users-k-quantbot--claude-worktrees-x-1234", "quantbot")).toBe(true);
+    expect(projectDirMatches("-Users-k-quantbot-release-v2", "quantbot")).toBe(false);
+    expect(projectDirMatches("-Users-k-projects-Docent", "projects")).toBe(false);
+    expect(projectDirMatches("-Users-k-projects", "projects")).toBe(true);
+    expect(projectDirMatches("-Users-k-QuantBot-AdversarialReview", "quantbot")).toBe(false);
+    expect(segmentMatchesProject("quantbot.release-v2", "quantbot")).toBe(true);
+    expect(segmentMatchesProject("quantbot-docs", "quantbot")).toBe(false);
+    const claude = join(root, "claude");
+    writeClaudeCodeFixture(claude); // under -Users-k-projects-SECRET-proj
+    const codex = join(root, "codex");
+    writeCodexFixture(codex); // cwd /Users/k/SECRET
+    const hit = scanTranscripts({ dirs: { "claude-code": claude, codex }, project: "SECRET-proj" });
+    expect(hit.sessions.map((s) => s.source)).toEqual(["claude-code"]);
+    const cwd = scanTranscripts({ dirs: { "claude-code": claude, codex }, project: "SECRET" });
+    expect(cwd.sessions.map((s) => s.source)).toEqual(["codex"]);
+    const none = scanTranscripts({ dirs: { "claude-code": claude, codex }, project: "elsewhere" });
+    expect(none.sessions).toEqual([]);
   });
 
   it("reads Cursor transcripts, and marks a file without tool results as unrecorded", () => {
