@@ -48,18 +48,15 @@ function sectionFor(version) {
 if (mode === "notes") {
   process.stdout.write(`${sectionFor(arg)}\n`);
 } else if (mode === "tag") {
-  const branch = sh("git branch --show-current");
-  if (branch !== "main") throw new Error("run from main");
   sh("git fetch -q origin main");
-  if (sh("git rev-parse HEAD") !== sh("git rev-parse origin/main"))
-    throw new Error("main is not up to date with origin");
-  const v = rootPkg.version;
-  const subject = sh("git log -1 --format=%s");
-  if (subject !== `chore(release): v${v}`)
-    throw new Error(`HEAD is not the release commit for v${v} (subject: ${subject})`);
-  sh(`git tag -a v${v} -m "Say Again v${v}"`);
+  const head = sh("git rev-parse origin/main");
+  const v = JSON.parse(sh(`git show ${head}:package.json`)).version;
+  if (sh(`git tag -l v${v}`)) throw new Error(`v${v} already exists`);
+  sh(`git tag -a v${v} ${head} -m "Say Again v${v}"`);
   sh(`git push origin v${v}`);
-  console.log(`tagged and pushed v${v}; the Release workflow takes it from here`);
+  console.log(
+    `tagged origin/main (${head.slice(0, 7)}) as v${v}; the Release workflow takes it from here`,
+  );
 } else if (mode) {
   if (sh("git status --porcelain")) throw new Error("working tree is not clean");
   if (sh("git branch --show-current") !== "main") throw new Error("run from main");

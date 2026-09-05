@@ -4,8 +4,8 @@
  * without processes.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { META, type Status } from "@sayagain/sdk";
-import type { JsonRpcId, JsonRpcMessage } from "./jsonrpc.js";
+import { META, type Status, type ToolClass } from "@sayagain/sdk";
+import type { JsonRpcId, JsonRpcMessage, JsonRpcRequest } from "./jsonrpc.js";
 import { isRequest, isResponse } from "./jsonrpc.js";
 import type { LedgerRow } from "./ledger.js";
 import { resultText, signatureOf } from "./signature.js";
@@ -16,17 +16,28 @@ export interface PendingCall {
   id: JsonRpcId;
   receipt: string;
   tool: string;
+  toolClass: ToolClass;
   argShape: string[];
   argsHash: string;
+  arguments: unknown;
   hasIntent: boolean;
+  intent?: string;
   task?: string;
+  idempotencyKey?: string;
   startedAt: number;
   requestBytes: number;
+  /** The original request line, kept so a held call can be forwarded later unchanged. */
+  rawLine: string;
+  held?: { reason: string; decision?: "approve" | "reject"; waitedMs?: number };
 }
 
 export interface BoundaryState {
   pending: Map<string, PendingCall>;
   initializeIds: Set<string>;
+  toolsListIds: Set<string>;
+  /** Request ids the boundary itself sent upstream; their replies never reach the client. */
+  ownIds: Set<string>;
+  ownCounter: number;
   upstreamName: string;
 }
 
@@ -35,12 +46,13 @@ export interface BoundaryOptions {
   ledgerKind: "jsonl" | "memory" | "sqlite" | "postgres";
   announce: boolean;
   shim: boolean;
+  hold?: string;
 }
 
 export const ANNOUNCEMENT =
   "Calls to this server pass through Say Again: every result carries sh.sayagain/receipt and sh.sayagain/status in _meta, and a held call returns a text block naming the receipt.";
 
-const keyOf = (id: JsonRpcId): string => `${typeof id}:${String(id)}`;
+export const keyOf = (id: JsonRpcId): string => `${typeof id}:${String(id)}`;
 
 export function newReceipt(now = Date.now()): string {
   return `rcpt_${now.toString(36)}${randomBytes(5).toString("hex")}`;
@@ -60,43 +72,114 @@ export const hashArgs = (input: unknown): string =>
     .slice(0, 16);
 
 export function createState(upstreamName = "upstream"): BoundaryState {
-  return { pending: new Map(), initializeIds: new Set(), upstreamName };
+  return {
+    pending: new Map(),
+    initializeIds: new Set(),
+    toolsListIds: new Set(),
+    ownIds: new Set(),
+    ownCounter: 0,
+    upstreamName,
+  };
 }
 
-/** Record what the boundary needs from a client-to-server message. Never mutates it. */
-export function observeClientMessage(
-  msg: JsonRpcMessage,
-  state: BoundaryState,
+/** A tools/list request the boundary sends on its own behalf, to warm the classifier. */
+export function ownToolsListRequest(state: BoundaryState): JsonRpcRequest {
+  const id = `sayagain:tools:${++state.ownCounter}`;
+  state.ownIds.add(keyOf(id));
+  state.toolsListIds.add(keyOf(id));
+  return { jsonrpc: "2.0", id, method: "tools/list", params: {} };
+}
+
+/** Build the boundary's record of a tools/call request. Does not register it. */
+export function describeCall(
+  msg: JsonRpcRequest,
+  rawLine: string,
+  toolClass: ToolClass,
   bytes: number,
   now = Date.now(),
-): void {
-  if (!isRequest(msg)) return;
-  if (msg.method === "initialize") {
-    state.initializeIds.add(keyOf(msg.id));
-    return;
-  }
-  if (msg.method !== "tools/call") return;
+): PendingCall {
   const params = msg.params ?? {};
   const meta = (params._meta ?? {}) as Record<string, unknown>;
-  const task = meta[META.task];
   const call: PendingCall = {
     id: msg.id,
     receipt: newReceipt(now),
     tool: typeof params.name === "string" ? params.name : "",
+    toolClass,
     argShape: shapeOf(params.arguments),
     argsHash: hashArgs(params.arguments),
+    arguments: params.arguments,
     hasIntent: typeof meta[META.intent] === "string",
     startedAt: now,
     requestBytes: bytes,
+    rawLine,
   };
-  if (typeof task === "string") call.task = task;
-  state.pending.set(keyOf(msg.id), call);
+  if (typeof meta[META.intent] === "string") call.intent = meta[META.intent] as string;
+  if (typeof meta[META.task] === "string") call.task = meta[META.task] as string;
+  if (typeof meta[META.idempotencyKey] === "string")
+    call.idempotencyKey = meta[META.idempotencyKey] as string;
+  return call;
+}
+
+/** Track initialize and tools/list request ids so their responses can be recognised. */
+export function observeClientMessage(
+  msg: JsonRpcMessage,
+  state: BoundaryState,
+): "initialize" | "tools/list" | "tools/call" | null {
+  if (!isRequest(msg)) return null;
+  if (msg.method === "initialize") {
+    state.initializeIds.add(keyOf(msg.id));
+    return "initialize";
+  }
+  if (msg.method === "tools/list") {
+    state.toolsListIds.add(keyOf(msg.id));
+    return "tools/list";
+  }
+  if (msg.method === "tools/call") return "tools/call";
+  return null;
+}
+
+export function registerPending(state: BoundaryState, call: PendingCall): void {
+  state.pending.set(keyOf(call.id), call);
+}
+
+export function baseRow(
+  call: PendingCall,
+  upstream: string,
+  status: Status,
+  responseBytes: number,
+  now: number,
+): LedgerRow {
+  const row: LedgerRow = {
+    receipt: call.receipt,
+    ts: new Date(call.startedAt).toISOString(),
+    upstream,
+    method: "tools/call",
+    tool: call.tool,
+    toolClass: call.toolClass,
+    argShape: call.argShape,
+    argsHash: call.argsHash,
+    hasIntent: call.hasIntent,
+    status,
+    isError: false,
+    latencyMs: Math.max(0, now - call.startedAt),
+    requestBytes: call.requestBytes,
+    responseBytes,
+  };
+  if (call.task !== undefined) row.task = call.task;
+  if (call.held) row.held = { ...call.held };
+  return row;
 }
 
 export interface Rewrite {
   message: JsonRpcMessage;
   changed: boolean;
+  /** True when the message answers a boundary-owned request and must not be forwarded. */
+  swallow?: boolean;
   row?: LedgerRow;
+  /** Set when a tools/list result was seen, so the caller can learn annotations. */
+  tools?: unknown;
+  /** Set when a tools/call succeeded, so the caller can remember it for dedupe. */
+  remember?: { call: PendingCall; result: unknown };
 }
 
 /**
@@ -114,6 +197,19 @@ export function rewriteServerMessage(
   if (!isResponse(msg) || msg.id === null) return { message: msg, changed: false };
   const key = keyOf(msg.id);
 
+  if (state.toolsListIds.has(key)) {
+    state.toolsListIds.delete(key);
+    const own = state.ownIds.delete(key);
+    const tools =
+      typeof msg.result === "object" && msg.result !== null
+        ? (msg.result as { tools?: unknown }).tools
+        : undefined;
+    const out: Rewrite = { message: msg, changed: false };
+    if (own) out.swallow = true;
+    if (tools !== undefined) out.tools = tools;
+    return out;
+  }
+
   if (state.initializeIds.has(key)) {
     state.initializeIds.delete(key);
     if (msg.error || typeof msg.result !== "object" || msg.result === null)
@@ -122,13 +218,15 @@ export function rewriteServerMessage(
     const serverInfo = result.serverInfo as { name?: unknown } | undefined;
     if (serverInfo && typeof serverInfo.name === "string") state.upstreamName = serverInfo.name;
     const meta = { ...((result._meta as Record<string, unknown> | undefined) ?? {}) };
-    meta[META.boundary] = {
+    const boundary: Record<string, unknown> = {
       name: BOUNDARY_NAME,
       version: opts.version,
       upstream: state.upstreamName,
       ledger: opts.ledgerKind,
       shim: opts.shim,
     };
+    if (opts.hold !== undefined) boundary.hold = opts.hold;
+    meta[META.boundary] = boundary;
     result._meta = meta;
     if (opts.announce) {
       const existing = typeof result.instructions === "string" ? result.instructions.trimEnd() : "";
@@ -141,28 +239,12 @@ export function rewriteServerMessage(
   if (!call) return { message: msg, changed: false };
   state.pending.delete(key);
 
-  const status: Status = "executed";
-  const row: LedgerRow = {
-    receipt: call.receipt,
-    ts: new Date(call.startedAt).toISOString(),
-    upstream: state.upstreamName,
-    method: "tools/call",
-    tool: call.tool,
-    argShape: call.argShape,
-    argsHash: call.argsHash,
-    hasIntent: call.hasIntent,
-    status,
-    isError: false,
-    latencyMs: Math.max(0, now - call.startedAt),
-    requestBytes: call.requestBytes,
-    responseBytes: bytes,
-  };
-  if (call.task !== undefined) row.task = call.task;
+  const row = baseRow(call, state.upstreamName, "executed", bytes, now);
 
   if (msg.error) {
     row.isError = true;
     row.errorCode = msg.error.code;
-    row.errorSignature = signatureOf(msg.error.message ?? "");
+    row.errorSignature = signatureOf(msg.error.message);
     // A JSON-RPC error has no result to carry _meta; the ledger keeps the receipt.
     return { message: msg, changed: false, row };
   }
@@ -176,7 +258,53 @@ export function rewriteServerMessage(
   }
   const meta = { ...((result._meta as Record<string, unknown> | undefined) ?? {}) };
   meta[META.receipt] = call.receipt;
-  meta[META.status] = status;
+  meta[META.status] = "executed";
+  if (call.held)
+    meta[META.held] = { reason: call.held.reason, decision: call.held.decision ?? null };
   result._meta = meta;
-  return { message: { ...msg, result }, changed: true, row };
+  const message = { ...msg, result };
+  return row.isError
+    ? { message, changed: true, row }
+    : { message, changed: true, row, remember: { call, result } };
+}
+
+/** The response for a duplicate: the first result again, marked so the agent can tell. */
+export function duplicateResponse(
+  call: PendingCall,
+  firstReceipt: string,
+  firstResult: unknown,
+): JsonRpcMessage {
+  const result =
+    typeof firstResult === "object" && firstResult !== null
+      ? { ...(firstResult as Record<string, unknown>) }
+      : {};
+  const meta = { ...((result._meta as Record<string, unknown> | undefined) ?? {}) };
+  meta[META.receipt] = call.receipt;
+  meta[META.status] = "deduplicated";
+  meta[META.duplicateOf] = firstReceipt;
+  result._meta = meta;
+  return { jsonrpc: "2.0", id: call.id, result };
+}
+
+/** The response for a call that is still held after the wait, or was rejected. */
+export function heldResponse(
+  call: PendingCall,
+  reason: string,
+  expiresAt: number,
+  rejected: boolean,
+): JsonRpcMessage {
+  const text = rejected
+    ? `UNABLE: an operator rejected this call. Receipt ${call.receipt}. Do not retry it; tell the user.`
+    : `STANDBY: this call is held for approval and has not been executed. Receipt ${call.receipt}. Reason: ${reason}. It expires at ${new Date(expiresAt).toISOString()} unless an operator approves it (sayagain approve ${call.receipt}). Continue with other work or tell the user.`;
+  const held: Record<string, unknown> = { reason, expiresAt: new Date(expiresAt).toISOString() };
+  if (rejected) held.decision = "reject";
+  return {
+    jsonrpc: "2.0",
+    id: call.id,
+    result: {
+      content: [{ type: "text", text }],
+      isError: rejected,
+      _meta: { [META.receipt]: call.receipt, [META.status]: "held", [META.held]: held },
+    },
+  };
 }

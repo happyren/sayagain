@@ -1,8 +1,9 @@
-// A minimal stdio MCP server for tests: initialize, tools/list, tools/call (echo; fails when args.fail is set).
+// A minimal stdio MCP server for tests: initialize, tools/list with annotations, tools/call.
 import { createInterface } from "node:readline";
 
 const rl = createInterface({ input: process.stdin });
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
+let calls = 0;
 
 rl.on("line", (line) => {
   let msg;
@@ -26,9 +27,20 @@ rl.on("line", (line) => {
     send({
       jsonrpc: "2.0",
       id: msg.id,
-      result: { tools: [{ name: "echo", inputSchema: { type: "object" } }] },
+      result: {
+        tools: [
+          { name: "echo", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+          { name: "create_page", inputSchema: { type: "object" } },
+          {
+            name: "delete_page",
+            inputSchema: { type: "object" },
+            annotations: { destructiveHint: true },
+          },
+        ],
+      },
     });
   } else if (msg.method === "tools/call") {
+    calls++;
     const args = msg.params?.arguments ?? {};
     if (args.rpcError) {
       send({
@@ -50,7 +62,9 @@ rl.on("line", (line) => {
         jsonrpc: "2.0",
         id: msg.id,
         result: {
-          content: [{ type: "text", text: JSON.stringify(args) }],
+          content: [
+            { type: "text", text: JSON.stringify({ call: calls, tool: msg.params.name, args }) },
+          ],
           _meta: { "example/upstream": true },
         },
       });

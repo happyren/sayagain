@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Status } from "@sayagain/sdk";
+import type { Status, ToolClass } from "@sayagain/sdk";
 
 export interface LedgerRow {
   receipt: string;
@@ -9,6 +9,7 @@ export interface LedgerRow {
   upstream: string;
   method: "tools/call";
   tool: string;
+  toolClass: ToolClass;
   /** Sorted key:type entries of the arguments, never values. */
   argShape: string[];
   argsHash: string;
@@ -21,6 +22,8 @@ export interface LedgerRow {
   latencyMs: number;
   requestBytes: number;
   responseBytes: number;
+  held?: { reason: string; decision?: "approve" | "reject"; waitedMs?: number };
+  duplicateOf?: string;
 }
 
 export interface Ledger {
