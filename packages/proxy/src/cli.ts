@@ -1313,7 +1313,8 @@ export async function main(argv: string[]): Promise<number> {
     const from = takeOption(opts, "--from");
     const contributionsDir = takeOption(opts, "--contributions") ?? homePath("contributions");
     const outDir = takeOption(opts, "--out") ?? homePath("index");
-    const baseUrl = (takeOption(opts, "--base-url") ?? "").replace(/\/+$/, "");
+    let baseUrl = takeOption(opts, "--base-url") ?? "";
+    while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1); // no regex: registry-fed input
     const target = sub === "fixes" ? opts.shift() : undefined;
     if (opts.length) throw new UsageError(`index: unknown option ${opts[0]}`);
     if (!from)
