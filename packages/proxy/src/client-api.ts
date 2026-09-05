@@ -121,8 +121,14 @@ export async function daemonToolsList(name: string): Promise<unknown[] | null> {
 
 /** The daemon's learning-loop state, or null when no daemon is live. */
 export async function daemonLearn(
-  action?: { update: true; minEvidence?: number } | { id: string; state: "disable" | "enable" },
-): Promise<{ updatedAt: string; interventions: unknown[] } | { id: string; state: string } | null> {
+  action?:
+    | { update: true; minEvidence?: number }
+    | { id: string; state: "disable" | "enable" | "apply" | "advise" },
+): Promise<
+  | { updatedAt: string; interventions: unknown[] }
+  | { id: string; state?: string; mode?: string }
+  | null
+> {
   const d = await liveDaemon();
   if (!d) return null;
   const parse = async (res: Response): Promise<unknown> => {
@@ -149,7 +155,7 @@ export async function daemonLearn(
     await daemonFetch(d, `/api/learn/${encodeURIComponent(action.id)}/${action.state}`, {
       method: "POST",
     }),
-  )) as { id: string; state: string };
+  )) as { id: string; state?: string; mode?: string };
 }
 
 /** The daemon's tool definition report for a server, or null when no daemon is live. */

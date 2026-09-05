@@ -505,6 +505,7 @@ describe("lifecycle", () => {
     const intervention = {
       id: "coerce:fake/strict/limit:string-number",
       kind: "coerce",
+      mode: "apply",
       server: "upstream",
       tool: "strict",
       signature: "x",

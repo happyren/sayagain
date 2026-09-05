@@ -87,6 +87,7 @@ describe("cli analysis", () => {
     expect(out).toContain("Say Again report:");
     expect(out).toContain("15 calls, 2 writes");
     expect(out).toContain("What moved vs the previous 7 days: calls 2 -> 15");
+    expect(out.indexOf("unacknowledged")).toBeLessThan(out.indexOf("failure tax")); // risk leads
     expect(out).toContain("fake-notion/create_page x1 coercible");
     out = "";
     expect(
@@ -180,7 +181,15 @@ describe("cli analysis", () => {
     out = "";
     expect(await main(["learn", "--update"])).toBe(0);
     expect(out).toContain("active   coerce:fake-notion/strict/limit:string-number");
-    expect(out).toContain("string-to-number on /limit");
+    expect(out).toContain("string-to-number on /limit (advised");
+    out = "";
+    expect(await main(["learn", "--apply", "coerce:fake-notion/strict/limit:string-number"])).toBe(
+      0,
+    );
+    expect(out.trim()).toBe("coerce:fake-notion/strict/limit:string-number: apply");
+    out = "";
+    expect(await main(["learn"])).toBe(0);
+    expect(out).toContain("(applied before a call leaves)");
     out = "";
     expect(await main(["learn", "--revert", "coerce:fake-notion/strict/limit:string-number"])).toBe(
       0,

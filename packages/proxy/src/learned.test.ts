@@ -87,6 +87,7 @@ describe("learned", () => {
     });
     expect(coerce.fact).toBe("`limit` is a number, not a string.");
     expect(coerce.signatures).toEqual(["Invalid params: limit must be a number"]);
+    expect(coerce.mode).toBe("advise"); // applying before a call leaves is the operator's switch
     expect(coerce.errorHint).toContain("passing `limit` as a number");
     const hint = out.find((i) => i.kind === "hint") as Intervention;
     expect(hint.fact).toContain("Call `get_page` first");
@@ -149,6 +150,12 @@ describe("learned", () => {
       const again = new LearnedStore(join(dir, "learned.json"));
       expect(again.list()).toHaveLength(2);
       expect(again.coercionsFor("fake", "strict", "fake-notion")).toHaveLength(1);
+      expect(again.coercionsFor("fake", "strict", "fake-notion", true)).toEqual([]);
+      expect(again.setMode(coerce.id, "apply")).toBe(true);
+      expect(again.coercionsFor("fake", "strict", "fake-notion", true)).toHaveLength(1);
+      expect(again.setMode(coerce.id, "advise")).toBe(true);
+      expect(again.setMode("nope", "apply")).toBe(false);
+      expect(again.list().find((i) => i.kind === "hint")?.mode).toBeUndefined(); // hints have no mode
       expect(again.factsFor("fake-notion", "update_page")).toEqual([
         expect.stringContaining("Call `get_page` first"),
       ]);

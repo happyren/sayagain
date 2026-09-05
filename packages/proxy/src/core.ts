@@ -732,13 +732,14 @@ export class Boundary extends EventEmitter {
     await this.untilWarm();
     if (!this.classifier.warm) this.warmClassifier();
     const toolClass = this.classifier.classOf(tool);
-    // A learned coercion changes the arguments before a read-only call leaves. Any other class keeps
-    // the 0.3 rule: arguments change only after a failure, and a write's then wait behind a hold.
+    // A learned coercion the operator switched to "apply" changes the arguments before a read-only
+    // call leaves (ADR-0009: the loop advises by default). Everything else keeps the 0.3 rule:
+    // arguments change only after a failure, and a write's then wait behind a hold.
     let outgoing = msg;
     let learned: ReturnType<typeof applyLearnedCoercions> = null;
     if (this.opts.learned && toolClass === "read-only") {
       this.opts.learned.maybeReload();
-      const rules = this.opts.learned.coercionsFor(this.name, tool, this.state.upstreamName);
+      const rules = this.opts.learned.coercionsFor(this.name, tool, this.state.upstreamName, true);
       if (rules.length) learned = applyLearnedCoercions(msg.params?.arguments, rules);
       if (learned)
         outgoing = { ...msg, params: { ...(msg.params ?? {}), arguments: learned.arguments } };

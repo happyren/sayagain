@@ -107,10 +107,12 @@ const USAGE = `sayagain ${PROXY_VERSION}
       The weekly page from docs/measurement.md section 6, from the ledger alone, with the previous window for comparison.
       --server takes the registry name or the upstream's own name. Rows come from the running daemon, else the store.
   sayagain learn [--update] [--min-evidence 3] [--json]
-      What the loop has learned from your own ledger: coercions applied before a call leaves, facts appended to
-      tool descriptions and errors; each with its before and after numbers, reverted by itself when it does not help.
-  sayagain learn --disable <id> | --enable <id> | --report <server>
-      Switch one intervention off or on (a wrap picks the change up within seconds); or print a tool definition report.
+      What the loop has learned from your own ledger: coercions offered as repairs, facts appended to tool
+      descriptions and errors; each with its before and after numbers, reverted by itself when it does not help.
+  sayagain learn --disable <id> | --enable <id> | --apply <id> | --advise <id> | --report <server>
+      Switch one intervention off or on; let a coercion change read-only calls before they leave (--apply: the
+      operator's call, the loop only advises by default); or print a tool definition report. A wrap picks changes
+      up within seconds.
   sayagain lint <name>|--all [--file <tools.json>] [--fail-below A|B|C|D] [--json]
       Grade a server's tool definitions with @sayagain/lint (starts the upstream through the daemon if needed).
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
@@ -219,12 +221,12 @@ function renderReport(r: Report): string {
     `Say Again report: ${when(r.window.since)} to ${when(r.window.until)} UTC (${span}), ${r.calls} calls, ${r.writes} writes`,
   );
   out.push("");
-  out.push("North star");
-  out.push(
-    `  failure tax        ${kib(r.northStar.failureTaxBytesPer1kCalls)} of recovery traffic per 1K calls${was(r.previous === undefined ? undefined : kib(r.previous.failureTaxBytesPer1kCalls))}`,
-  );
+  out.push("North star (risk, then cost)");
   out.push(
     `  unacknowledged     ${r.northStar.unacknowledgedWritesPer1kWrites} writes per 1K writes without a known outcome (${r.unacknowledged.count})`,
+  );
+  out.push(
+    `  failure tax        ${kib(r.northStar.failureTaxBytesPer1kCalls)} of recovery traffic per 1K calls${was(r.previous === undefined ? undefined : kib(r.previous.failureTaxBytesPer1kCalls))}`,
   );
   out.push("");
   out.push("Failures by server (M1 rate, M7 addressable share)");
@@ -879,6 +881,8 @@ export async function main(argv: string[]): Promise<number> {
     const update = takeFlag(opts, "--update");
     const revert = takeOption(opts, "--disable") ?? takeOption(opts, "--revert");
     const enable = takeOption(opts, "--enable");
+    const apply = takeOption(opts, "--apply");
+    const advise = takeOption(opts, "--advise");
     const reportFor = takeOption(opts, "--report");
     const minEvidence = takeNumber(opts, "--min-evidence");
     if (opts.length) throw new UsageError(`learn: unknown option ${opts[0]}`);
@@ -888,6 +892,20 @@ export async function main(argv: string[]): Promise<number> {
         viaDaemon ??
           upstreamReport(reportFor, await loadRowsSince(new Date(0)), new LearnedStore()),
       );
+      return 0;
+    }
+    if (apply || advise) {
+      const id = (apply ?? advise) as string;
+      const mode = apply ? "apply" : "advise";
+      const viaDaemon = await daemonLearn({ id, state: mode });
+      if (viaDaemon) {
+        process.stdout.write(`${id}: ${(viaDaemon as { mode?: string }).mode ?? mode}\n`);
+        return 0;
+      }
+      const store = new LearnedStore();
+      if (!store.setMode(id, mode)) throw new UsageError(`learn: no coercion ${id}`);
+      store.save();
+      process.stdout.write(`${id}: ${mode}\n`);
       return 0;
     }
     if (revert || enable) {
@@ -949,7 +967,10 @@ export async function main(argv: string[]): Promise<number> {
     }
     process.stdout.write(`learned as of ${updatedAt.slice(0, 19).replace("T", " ")} UTC\n`);
     for (const i of interventions) {
-      const what = i.kind === "coerce" ? `${i.rule} on ${i.path}` : (i.fact ?? "");
+      const what =
+        i.kind === "coerce"
+          ? `${i.rule} on ${i.path} (${i.mode === "apply" ? "applied before a call leaves" : "advised: the hint, and the repair after a failure"})`
+          : (i.fact ?? "");
       const lift = i.after
         ? `before ${i.before?.failureRatePct ?? "?"}% fail (${i.before?.calls ?? 0} calls, median ${i.before?.medianCallsToRecover ?? 0} to recover) -> after ${i.after.failureRatePct}% (${i.after.calls} calls, median ${i.after.medianCallsToRecover})`
         : "";
@@ -958,7 +979,7 @@ export async function main(argv: string[]): Promise<number> {
       );
     }
     process.stdout.write(
-      "\nsayagain learn --disable <id> turns one off; --enable <id> turns it back on; --report <server> writes the upstream report\n",
+      "\nsayagain learn --disable <id> turns one off; --enable <id> turns it back on; --apply <id> lets a coercion change read-only calls before they leave; --report <server> writes the upstream report\n",
     );
     return 0;
   }

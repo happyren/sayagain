@@ -574,6 +574,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       relearn(minEvidence);
       return json(res, 200, { updatedAt: learned.updatedAt, interventions: learned.list() });
     }
+    const learnMode = path.match(/^\/api\/learn\/([^/]+)\/(apply|advise)$/);
+    if (req.method === "POST" && learnMode) {
+      const id = decodeURIComponent(learnMode[1] ?? "");
+      const ok = learned.setMode(id, learnMode[2] === "apply" ? "apply" : "advise");
+      if (ok) {
+        learned.save();
+        emitEvent("learned", { changed: [id] });
+      }
+      return json(
+        res,
+        ok ? 200 : 404,
+        ok ? { id, mode: learned.get(id)?.mode } : { error: `no coercion ${id}` },
+      );
+    }
     const learnState = path.match(/^\/api\/learn\/([^/]+)\/(disable|revert|enable)$/);
     if (req.method === "POST" && learnState) {
       const id = decodeURIComponent(learnState[1] ?? "");
