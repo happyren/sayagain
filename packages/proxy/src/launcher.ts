@@ -65,6 +65,6 @@ export function ensureLauncher(): string {
 /** Why the launcher's target might not survive: the npx cache is evicted, and nvm paths move on upgrade. */
 export function launcherCaveat(): string | undefined {
   if (/[\\/]_npx[\\/]/.test(CLI_PATH))
-    return "sayagain is running from the npx cache, which npm evicts; install it (npm install -g sayagain) and run this command again so the launcher points somewhere durable";
+    return "sayagain is running from the npx cache, which npm evicts; install it (npm install -g @sayagain/proxy) and run this command again so the launcher points somewhere durable";
   return undefined;
 }
