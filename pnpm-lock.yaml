@@ -29,6 +29,12 @@ importers:
         specifier: workspace:*
         version: link:../sdk
 
+  packages/sayagain:
+    dependencies:
+      '@sayagain/proxy':
+        specifier: workspace:*
+        version: link:../proxy
+
   packages/sdk: {}
 
 packages:

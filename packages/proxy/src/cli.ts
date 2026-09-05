@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   allDeadLetters,
   allHolds,
@@ -511,10 +513,9 @@ export async function main(argv: string[]): Promise<number> {
   throw new UsageError(`unknown command: ${command}\n${USAGE}`);
 }
 
-const invokedDirectly =
-  process.argv[1]?.endsWith("cli.js") || process.argv[1]?.endsWith("sayagain");
-if (invokedDirectly) {
-  main(process.argv.slice(2)).then(
+/** Run the command line and exit with its code. The `sayagain` wrapper package calls this. */
+export function runCli(argv: string[] = process.argv.slice(2)): void {
+  main(argv).then(
     (code) => process.exit(code),
     (err: unknown) => {
       process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
@@ -522,3 +523,15 @@ if (invokedDirectly) {
     },
   );
 }
+
+// Self-run only when this file is the entry point (directly, or through npm's bin symlink).
+const entry = process.argv[1];
+let invokedDirectly = false;
+if (entry) {
+  try {
+    invokedDirectly = realpathSync(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    invokedDirectly = false;
+  }
+}
+if (invokedDirectly) runCli();
