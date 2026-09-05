@@ -566,14 +566,25 @@ export async function main(argv: string[]): Promise<number> {
     });
     if (!info)
       throw new UsageError("ui: no daemon is running and none could be started (sayagain serve)");
-    const url = `${daemonBaseUrl(info)}/ui?token=${encodeURIComponent(info.token)}`;
+    // daemon.json is the user's own 0600 file, but the URL still goes to another program: only a
+    // plain host, a port and a token of the shape this tool writes are accepted into it.
+    if (
+      !/^[A-Za-z0-9.:-]+$/.test(info.host) ||
+      !Number.isInteger(info.port) ||
+      !/^[A-Za-z0-9_-]{16,}$/.test(info.token)
+    )
+      throw new UsageError(
+        "ui: daemon.json holds an unexpected host, port or token; stop the daemon and start it again",
+      );
+    const url = `${daemonBaseUrl(info)}/ui?token=${info.token}`;
     process.stdout.write(`${url}\n`);
     if (noOpen) return 0;
+    // Each opener takes the URL as an argument; none of them is a shell.
     const opener =
       process.platform === "darwin"
         ? ["open", url]
         : process.platform === "win32"
-          ? ["cmd", "/c", "start", "", url]
+          ? ["rundll32", "url.dll,FileProtocolHandler", url]
           : ["xdg-open", url];
     const child = spawn(opener[0] as string, opener.slice(1), { stdio: "ignore", detached: true });
     // spawn reports failure on the next tick; wait for either outcome so the message is not lost to process.exit.
