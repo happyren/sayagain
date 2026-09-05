@@ -21,8 +21,17 @@ export const isTranscriptSource = (s: string): s is TranscriptSource =>
   (TRANSCRIPT_SOURCES as readonly string[]).includes(s);
 
 export type ModelFamily = "claude" | "gpt" | "gemini" | "open-weight" | "unknown";
-export type Outcome = "ok" | "error" | "interrupt" | "no-result" | "unrecorded";
+/**
+ * ok/error: the tool answered. interrupt: the user stopped a running call (outcome unknown).
+ * rejected: the user refused the call before it ran (it never executed). no-result: the file
+ * records results but has none for this call. unrecorded: the file records no results, or the
+ * call was still in flight when the file was read.
+ */
+export type Outcome = "ok" | "error" | "interrupt" | "rejected" | "no-result" | "unrecorded";
 export type ClassSource = "builtin" | "verb" | "default";
+
+/** A call whose result has not arrived within this long of the file's last line is in flight, not lost. */
+export const IN_FLIGHT_GRACE_MS = 3_600_000;
 
 export interface TranscriptCall {
   /** When the call was issued, ms since the epoch. */
@@ -49,8 +58,13 @@ export interface TranscriptCall {
 }
 
 export interface TranscriptSession {
-  /** A local key: SHA-256 of the file path, first 12 hex. The path itself is not kept. */
+  /**
+   * The session key: SHA-256 of the session's path, first 12 hex. A subagent file shares its
+   * parent's key, so one conversation is one stream. The path itself is not kept.
+   */
   id: string;
+  /** This file's own key, for receipts (a session can span several files). */
+  fileKey: string;
   source: TranscriptSource;
   calls: TranscriptCall[];
   tokens: { input: number; cacheRead: number; cacheCreate: number; output: number };
@@ -176,15 +190,20 @@ export function toolClassFor(
   return { toolClass: "write", classSource: "default" };
 }
 
+/** The user refused the call before it ran: the tool never executed, and the outcome is known. */
+const REJECTED =
+  /user doesn't want|user does not want|tool use was rejected|wait for the user|user cancel|user declined|denied by the user/i;
+/** The user stopped a running call: the tool may have run, and nobody knows how far. */
 const INTERRUPT =
-  /interrupted by user|request interrupted|user cancel|user doesn't want|tool use was rejected|wait for the user|aborted by user|cancelled by user/i;
+  /interrupted by user|request interrupted|aborted by user|cancelled by user|canceled by user/i;
 
-/** Outcome of a recorded result: the interrupt check comes first, as in the baseline analyzer. */
+/** Outcome of a recorded result: the user's own decisions come first, as in the baseline analyzer. */
 function outcomeOf(
   isError: boolean,
   text: string,
 ): { outcome: Outcome; errorClass?: ErrorClass; signature?: string } {
   if (!isError) return { outcome: "ok" };
+  if (REJECTED.test(text)) return { outcome: "rejected" };
   if (INTERRUPT.test(text)) return { outcome: "interrupt" };
   return { outcome: "error", errorClass: classifyError(text), signature: signatureOf(text) };
 }
@@ -225,8 +244,30 @@ export const schemaHashOf = (schema: unknown): string =>
     .digest("hex")
     .slice(0, 16);
 
-const sessionId = (file: string): string =>
-  createHash("sha256").update(resolve(file)).digest("hex").slice(0, 12);
+const hash12 = (text: string): string =>
+  createHash("sha256").update(text).digest("hex").slice(0, 12);
+
+/**
+ * The session a file belongs to. Claude Code writes subagent transcripts under
+ * `<project>/<session>/subagents/`; Cursor nests them under the parent's transcript folder.
+ * Both share the parent's key, so a conversation is one stream in the analysis.
+ */
+export function sessionKeys(
+  file: string,
+  source: TranscriptSource,
+): { id: string; fileKey: string } {
+  const abs = resolve(file);
+  const parts = abs.split(sep);
+  let base = abs.replace(/\.jsonl$/, "");
+  if (source === "claude-code") {
+    const i = parts.lastIndexOf("subagents");
+    if (i > 0) base = parts.slice(0, i).join(sep);
+  } else if (source === "cursor") {
+    const i = parts.lastIndexOf("agent-transcripts");
+    if (i >= 0 && parts[i + 1]) base = parts.slice(0, i + 2).join(sep);
+  }
+  return { id: hash12(base), fileKey: hash12(abs) };
+}
 
 const parseTs = (v: unknown): number => (typeof v === "string" ? Date.parse(v) : Number.NaN);
 
@@ -265,12 +306,21 @@ function attributeTurns(turns: Turn[], calls: TranscriptCall[]): void {
   }
 }
 
-function finishSession(
-  s: TranscriptSession,
-  pending: Map<string, TranscriptCall>,
-  turns: Turn[],
-): TranscriptSession {
-  for (const c of pending.values()) c.outcome = s.resultsRecorded ? "no-result" : "unrecorded";
+interface Reading {
+  s: TranscriptSession;
+  pending: Map<string, TranscriptCall>;
+  turns: Turn[];
+  /** The latest timestamp on any line: how far the file goes. */
+  lastTs: number;
+  now: number;
+}
+
+function finishSession(r: Reading): TranscriptSession {
+  const { s, pending, turns } = r;
+  // A call still without a result within the grace window of the file's last line is in flight.
+  const inFlight = Number.isFinite(r.lastTs) && r.now - r.lastTs < IN_FLIGHT_GRACE_MS;
+  for (const c of pending.values())
+    c.outcome = s.resultsRecorded && !inFlight ? "no-result" : "unrecorded";
   attributeTurns(turns, s.calls);
   for (const c of s.calls) {
     if (Number.isFinite(c.ts)) {
@@ -283,17 +333,27 @@ function finishSession(
   return s;
 }
 
-const newSession = (file: string, source: TranscriptSource): TranscriptSession => ({
-  id: sessionId(file),
-  source,
-  calls: [],
-  tokens: { input: 0, cacheRead: 0, cacheCreate: 0, output: 0 },
-  usd: 0,
-  families: {},
-  minTs: Number.POSITIVE_INFINITY,
-  maxTs: 0,
-  resultsRecorded: false,
+const startReading = (file: string, source: TranscriptSource, now: number): Reading => ({
+  s: {
+    ...sessionKeys(file, source),
+    source,
+    calls: [],
+    tokens: { input: 0, cacheRead: 0, cacheCreate: 0, output: 0 },
+    usd: 0,
+    families: {},
+    minTs: Number.POSITIVE_INFINITY,
+    maxTs: 0,
+    resultsRecorded: false,
+  },
+  pending: new Map(),
+  turns: [],
+  lastTs: Number.NaN,
+  now,
 });
+
+const seen = (r: Reading, ts: number): void => {
+  if (Number.isFinite(ts) && !(r.lastTs >= ts)) r.lastTs = ts;
+};
 
 const newCall = (
   ts: number,
@@ -362,16 +422,19 @@ function blockText(block: Obj, top: Obj | undefined): string {
  * Anthropic-style message lines: Claude Code (`type`, `message`, `requestId`, `timestamp`,
  * `toolUseResult`) and Cursor (`role`, `message`, no usage). One reader serves both.
  */
-function readMessageSession(file: string, source: "claude-code" | "cursor"): TranscriptSession {
-  const s = newSession(file, source);
-  const pending = new Map<string, TranscriptCall>();
-  const turns: Turn[] = [];
+function readMessageSession(
+  file: string,
+  source: "claude-code" | "cursor",
+  now: number,
+): TranscriptSession {
+  const r = startReading(file, source, now);
+  const { s, pending, turns } = r;
   const turnByRequest = new Map<string, Turn>();
   let fallbackTs = (() => {
     try {
       return statSync(file).mtimeMs;
     } catch {
-      return Date.now();
+      return now;
     }
   })();
   for (const raw of readLines(file)) {
@@ -381,8 +444,11 @@ function readMessageSession(file: string, source: "claude-code" | "cursor"): Tra
     if (!m) continue;
     const role = str(e.type) || str(e.role) || str(m.role);
     let ts = parseTs(e.timestamp);
+    seen(r, ts);
     if (!Number.isFinite(ts)) ts = fallbackTs++;
     if (role === "assistant") {
+      // One API response is written as several lines (thinking, text, tool_use) sharing a
+      // requestId and the same usage; count the usage once.
       const requestId = str(e.requestId);
       let turn = requestId ? turnByRequest.get(requestId) : undefined;
       if (!turn) {
@@ -431,17 +497,39 @@ function readMessageSession(file: string, source: "claude-code" | "cursor"): Tra
       }
     }
   }
-  return finishSession(s, pending, turns);
+  return finishSession(r);
 }
 
-const CODEX_FAILED =
-  /Process exited with code [1-9]\d*|^Exit code: [1-9]\d*|^[\w-]+ failed:|verification failed|^Error\b|^error:/im;
+/** When no exit code is recorded, the command's own first line decides; "verification failed" anywhere. */
+const CODEX_FAILED = /^(?:[\w-]+ failed:|Error\b|error:)|verification failed/i;
+
+/** A Codex tool output: the exit code when the wrapper recorded one, and the command's own text. */
+function codexOutput(raw: string): { exit: number | undefined; text: string } {
+  let text = raw;
+  let exit: number | undefined;
+  if (text.startsWith("{")) {
+    try {
+      const o = obj(JSON.parse(text));
+      const meta = obj(o?.metadata);
+      if (meta && typeof meta.exit_code === "number") exit = meta.exit_code;
+      if (o && typeof o.output === "string") text = o.output;
+    } catch {
+      // plain text after all
+    }
+  }
+  const code =
+    text.match(/(?:^|\n)Process exited with code (\d+)/) ?? text.match(/^Exit code: (\d+)/);
+  if (code?.[1] !== undefined) exit = Number(code[1]);
+  // exec_command wraps the command's output in a header (chunk id, wall time, exit code).
+  const body = text.match(/(?:^|\n)Output:\n([\s\S]*)$/);
+  if (body?.[1] !== undefined) text = body[1];
+  return { exit, text: text.slice(0, 4000) };
+}
 
 /** Codex CLI rollouts: `response_item`, `event_msg` and `turn_context` lines under ~/.codex/sessions. */
-function readCodexSession(file: string): TranscriptSession {
-  const s = newSession(file, "codex");
-  const pending = new Map<string, TranscriptCall>();
-  const turns: Turn[] = [];
+function readCodexSession(file: string, now: number): TranscriptSession {
+  const r = startReading(file, "codex", now);
+  const { s, pending, turns } = r;
   const schemas = new Map<string, string>();
   let model = "";
   let open: Turn = { tokens: 0, usd: 0, model, calls: [] };
@@ -451,6 +539,7 @@ function readCodexSession(file: string): TranscriptSession {
     const p = obj(e?.payload);
     if (!e || !p) continue;
     const ts = parseTs(e.timestamp);
+    seen(r, ts);
     const type = str(e.type);
     if (type === "session_meta") {
       const tools = Array.isArray(p.dynamic_tools) ? p.dynamic_tools : [];
@@ -488,21 +577,11 @@ function readCodexSession(file: string): TranscriptSession {
       const call = typeof p.call_id === "string" ? pending.get(p.call_id) : undefined;
       if (!call) continue;
       pending.delete(str(p.call_id));
-      let text = str(p.output).slice(0, 4000);
-      let failed = CODEX_FAILED.test(text) || INTERRUPT.test(text);
-      // exec_command wraps the command's output in a header (chunk id, wall time, exit code).
-      const body = text.match(/(?:^|\n)Output:\n([\s\S]*)$/);
-      if (body?.[1] !== undefined) text = body[1].slice(0, 4000);
-      if (text.startsWith("{")) {
-        try {
-          const o = obj(JSON.parse(text));
-          const meta = obj(o?.metadata);
-          if (meta && num(meta.exit_code) !== 0) failed = true;
-          if (o && typeof o.output === "string") text = o.output.slice(0, 4000);
-        } catch {
-          // plain text after all
-        }
-      }
+      const { exit, text } = codexOutput(str(p.output).slice(0, 8000));
+      const failed =
+        exit !== undefined
+          ? exit !== 0
+          : CODEX_FAILED.test(text) || INTERRUPT.test(text) || REJECTED.test(text);
       Object.assign(call, outcomeOf(failed, text));
       call.latencyMs =
         Number.isFinite(ts) && Number.isFinite(call.ts) ? Math.max(0, ts - call.ts) : Number.NaN;
@@ -512,11 +591,19 @@ function readCodexSession(file: string): TranscriptSession {
       if (!inv) continue;
       const server = publicServerName(str(inv.server) || "mcp");
       const tool = str(inv.tool);
-      const call = newCall(ts, tool, inv.arguments, "codex", model);
+      // The same call was usually issued as a function_call with this call_id; it is one call.
+      const twin = typeof p.call_id === "string" ? pending.get(p.call_id) : undefined;
+      const call = twin ?? newCall(ts, tool, inv.arguments, "codex", model);
+      if (twin) pending.delete(str(p.call_id));
       call.server = server;
+      call.tool = tool;
       call.isMcp = true;
       Object.assign(call, toolClassFor(tool, true));
-      const schema = schemas.get(`${server}/${tool}`);
+      if (!twin || !call.argShape.length) {
+        call.argShape = shapeOf(inv.arguments);
+        call.argsHash = hashArgs(inv.arguments);
+      }
+      const schema = schemas.get(`${server}/${tool}`) ?? schemas.get(`${str(inv.server)}/${tool}`);
       if (schema) call.schemaHash = schema;
       const d = obj(p.duration);
       if (d) call.latencyMs = num(d.secs) * 1000 + num(d.nanos) / 1e6;
@@ -526,8 +613,10 @@ function readCodexSession(file: string): TranscriptSession {
         ? blockText(ok, undefined)
         : str(result?.Err) || JSON.stringify(result?.Err ?? "");
       Object.assign(call, outcomeOf(!ok || ok.isError === true, text));
-      s.calls.push(call);
-      open.calls.push(call);
+      if (!twin) {
+        s.calls.push(call);
+        open.calls.push(call);
+      }
     } else if (type === "event_msg" && p.type === "token_count") {
       const info = obj(p.info);
       const last = obj(info?.last_token_usage);
@@ -551,11 +640,21 @@ function readCodexSession(file: string): TranscriptSession {
       turns.push(open);
     }
   }
-  return finishSession(s, pending, turns);
+  return finishSession(r);
 }
 
-export function readSession(file: string, source: TranscriptSource): TranscriptSession {
-  return source === "codex" ? readCodexSession(file) : readMessageSession(file, source);
+export interface ReadOptions {
+  /** The clock for the in-flight grace window. Default now. */
+  now?: number;
+}
+
+export function readSession(
+  file: string,
+  source: TranscriptSource,
+  opts: ReadOptions = {},
+): TranscriptSession {
+  const now = opts.now ?? Date.now();
+  return source === "codex" ? readCodexSession(file, now) : readMessageSession(file, source, now);
 }
 
 /** Where each host keeps its transcripts, honouring the hosts' own environment variables. */
@@ -592,7 +691,7 @@ function* walk(dir: string, depth = 0): Generator<string> {
 const isSessionFile = (file: string, source: TranscriptSource): boolean =>
   source !== "cursor" || file.split(sep).includes("agent-transcripts");
 
-export interface ScanOptions {
+export interface ScanOptions extends ReadOptions {
   sources?: TranscriptSource[];
   /** Overrides per source; a missing directory is skipped, not an error. */
   dirs?: Partial<Record<TranscriptSource, string>>;
@@ -611,6 +710,7 @@ export function scanTranscripts(opts: ScanOptions = {}): Scan {
   const sources = opts.sources ?? [...TRANSCRIPT_SOURCES];
   const files: Record<TranscriptSource, number> = { "claude-code": 0, codex: 0, cursor: 0 };
   const sessions: TranscriptSession[] = [];
+  const now = opts.now ?? Date.now();
   for (const source of sources) {
     const dir = dirs[source];
     if (!existsSync(dir)) continue;
@@ -624,7 +724,7 @@ export function scanTranscripts(opts: ScanOptions = {}): Scan {
         }
       }
       files[source]++;
-      const s = readSession(file, source);
+      const s = readSession(file, source, { now });
       if (s.calls.length) sessions.push(s);
     }
   }
@@ -647,7 +747,8 @@ export interface RowExtra {
 /**
  * Ledger rows for the analysis. `responseBytes` carries the call's tokens, so the analysis'
  * "bytes" are tokens for transcript rows; an interrupt or a missing result is an error row of
- * class `interrupt` or `no-result` (unknown outcome, not a failure of the tool).
+ * class `interrupt` or `no-result` (unknown outcome, not a failure of the tool). A call the user
+ * rejected never ran and gets no row.
  */
 export function sessionRows(s: TranscriptSession): {
   rows: LedgerRow[];
@@ -657,7 +758,8 @@ export function sessionRows(s: TranscriptSession): {
   const extras = new Map<string, RowExtra>();
   const sorted = [...s.calls].sort((a, b) => a.ts - b.ts);
   sorted.forEach((c, i) => {
-    const receipt = `${s.id}:${i}`;
+    if (c.outcome === "rejected") return;
+    const receipt = `${s.fileKey}:${i}`;
     const row: LedgerRow = {
       receipt,
       ts: new Date(Number.isFinite(c.ts) ? c.ts : s.minTs).toISOString(),

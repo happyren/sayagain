@@ -42,9 +42,15 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - The analysis knows two error classes only transcript rows carry:
-  `interrupt` (the user stopped the call) and `no-result` (the file has no
-  result). Both count as unknown outcomes for a write (M9) and not as
-  failures (M1). Recovery windows now list their rows.
+  `interrupt` (the user stopped a running call) and `no-result` (the file
+  has no result for it). Both count as unknown outcomes for a write (M9)
+  and not as failures (M1). A call the user rejected before it ran gets no
+  row: the tool never executed. A call still in flight within an hour of
+  the file's last line is not a missing result. A subagent transcript
+  belongs to its parent's session. Recovery windows now list their rows.
+- Masked error signatures also hide email addresses, hostnames, Windows
+  paths and single-slash `owner/repo` names, so the audit page and the
+  `errors` listing carry less that identifies a machine.
 
 ## [0.9.0] - 2026-09-05
 

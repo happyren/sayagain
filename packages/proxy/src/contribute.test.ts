@@ -15,6 +15,7 @@ import {
   weeklyContribution,
   writeContribution,
 } from "./contribute.js";
+import type { LedgerRow } from "./ledger.js";
 import { loadRegistry, saveRegistry } from "./registry.js";
 import { SECRETS, T0, writeClaudeCodeFixture } from "./test-fixtures/transcripts.js";
 import { readSession, sessionRows } from "./transcripts.js";
@@ -197,6 +198,103 @@ describe("contribute", () => {
         }),
       ),
     ).toThrow(/opaque id/);
+  });
+
+  it("keeps namespaced server names and odd keys, and drops names that read as paths", () => {
+    const row = (over: Partial<LedgerRow>): LedgerRow => ({
+      receipt: `r${Math.random().toString(36).slice(2)}`,
+      ts: new Date(T0).toISOString(),
+      upstream: "example-servers/everything",
+      method: "tools/call",
+      tool: "echo",
+      toolClass: "read-only",
+      argShape: ["xml:lang:string", "some key:number", "a/b:object"],
+      argsHash: "h",
+      hasIntent: false,
+      session: "s1",
+      status: "executed",
+      isError: false,
+      latencyMs: 1,
+      requestBytes: 1,
+      responseBytes: 1,
+      ...over,
+    });
+    const rows = [
+      row({ isError: true, errorClass: "coercible", errorSignature: "Invalid params: x" }),
+      row({ argShape: ["xml:lang:number"], argsHash: "h2" }),
+      row({ upstream: "/Users/k/SECRET/server", tool: "x" }),
+      row({ upstream: "My Server", tool: "run thing" }),
+    ];
+    const doc = buildShapeDocument(rows, {
+      source: "ledger",
+      contributor,
+      consent,
+      since: new Date(T0 - 1000),
+      until: new Date(T0 + 1000),
+      version: "t",
+    });
+    expect(doc.shapes.map((s) => [s.server, s.tool])).toEqual([
+      ["example-servers/everything", "echo"],
+      ["my-server", "run-thing"],
+    ]);
+    expect(doc.shapes[0]?.errors[0]?.argShape).toEqual([
+      "a-b:object",
+      "some-key:number",
+      "xml:lang:string",
+    ]);
+    expect(doc.sessions).toBe(1);
+    expect(JSON.stringify(doc)).not.toContain("SECRET");
+  });
+
+  it("attributes an error to the failing call's model family even when the fix ran under another", () => {
+    const base = (over: Partial<LedgerRow>): LedgerRow => ({
+      receipt: `r${Math.random().toString(36).slice(2)}`,
+      ts: new Date(T0).toISOString(),
+      upstream: "notion",
+      method: "tools/call",
+      tool: "create_page",
+      toolClass: "write",
+      argShape: ["limit:string"],
+      argsHash: "h",
+      hasIntent: false,
+      session: "s1",
+      status: "executed",
+      isError: false,
+      latencyMs: 1,
+      requestBytes: 1,
+      responseBytes: 1,
+      ...over,
+    });
+    const failed = base({
+      isError: true,
+      errorClass: "coercible",
+      errorSignature: "Invalid params: limit",
+    });
+    const fixed = base({
+      ts: new Date(T0 + 1000).toISOString(),
+      argShape: ["limit:number"],
+      argsHash: "h2",
+    });
+    const family = new Map([
+      [failed.receipt, "claude"],
+      [fixed.receipt, "gpt"],
+    ]);
+    const doc = buildShapeDocument([failed, fixed], {
+      source: "ledger",
+      contributor,
+      consent,
+      since: new Date(T0 - 1000),
+      until: new Date(T0 + 2000),
+      version: "t",
+      familyOf: (r) => family.get(r.receipt) ?? "unknown",
+    });
+    const claude = doc.shapes.find((s) => s.modelFamily === "claude");
+    expect(claude?.errors[0]).toMatchObject({
+      resolution: "type-change",
+      shapeChange: "changed limit:string->number",
+      callsToRecover: { median: 0, unrecovered: 0 },
+    });
+    expect(doc.shapes.find((s) => s.modelFamily === "gpt")?.errors).toEqual([]);
   });
 
   it("writes the document under the home directory with owner-only permissions", () => {

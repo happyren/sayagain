@@ -39,8 +39,12 @@ Argument values, tool results, prompts, intent text, task text, file paths,
 URLs, error message text, session ids, hostnames, user names, project
 names, API keys. A server whose name is an opaque id (a UUID, a long hex
 string: a private connector rather than a public server) is left out of
-the document altogether. The builder never reads argument values (rows carry shapes
-and hashes only), and `assertShapeDocumentSafe` refuses any document with a
+the document altogether. Server and tool names are cleaned (whitespace and
+backslashes become `-`; one slash is allowed as a namespace, as in
+`example-servers/everything`; a name that reads as a path is dropped with
+its shape), and so are argument keys. The builder never reads argument
+values (rows carry shapes and hashes only), and `assertShapeDocumentSafe`
+refuses any document with a
 field outside the list above, a name containing a path or whitespace, a hash
 that is not hex, or a shape entry that is not `key:type`. If a future change
 to the builder adds a field, that check fails until this document changes.

@@ -10,7 +10,11 @@ export function signatureOf(text: unknown): string {
   const line = cleaned.split("\n").find((l) => l.trim()) ?? "";
   return line
     .replace(/https?:\/\/\S+/g, "<url>")
+    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>")
+    .replace(/\b[A-Za-z]:\\[^\s"'`]+/g, "<path>")
     .replace(/(?:\/[\w.@-]+){2,}/g, "<path>")
+    .replace(/\b[\w.-]+\/[\w.-]+\b/g, "<path>")
+    .replace(/\b(?:[\w-]+\.){1,}[a-z]{2,}\b(?=[^\w.]|$)/gi, "<host>")
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "<id>")
     .replace(/\b[0-9a-f]{12,}\b/gi, "<id>")
     .replace(/"[^"]*"|'[^']*'|`[^`]*`/g, "<str>")

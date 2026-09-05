@@ -44,20 +44,20 @@ describe("audit", () => {
     );
     expect(a.sources.map((s) => [s.source, s.sessions, s.calls, s.mcpCalls])).toEqual([
       ["claude-code", 1, 9, 6],
-      ["codex", 1, 4, 1],
+      ["codex", 1, 8, 2],
       ["cursor", 2, 4, 1],
     ]);
-    expect(a.report.calls).toBe(17);
-    expect(a.tokens).toBe(7320 + 1100 + 550 + 210);
+    expect(a.report.calls).toBe(21);
+    expect(a.tokens).toBe(7320 + 1100 + 550 + 210 + 120);
     expect(a.usd).toBeGreaterThan(0);
-    expect(a.families).toMatchObject({ claude: 9, gpt: 4, unknown: 4 });
-    // Failures: notion create_page (coercible), codex exec_command, apply_patch, cursor create_issue.
-    expect(a.recoveryCost.failures).toBe(4);
+    expect(a.families).toMatchObject({ claude: 9, gpt: 8, unknown: 4 });
+    // Failures: notion create_page; codex exec_command, apply_patch, shell, get_pr; cursor create_issue.
+    expect(a.recoveryCost.failures).toBe(6);
     expect(a.failureTax.usd).toBeGreaterThan(0);
     // usd is rounded to cents; the per-1K figure is not, so bound it rather than match it.
-    expect(a.failureTax.usdPer1kCalls).toBeGreaterThan((1000 * (a.failureTax.usd - 0.005)) / 17);
+    expect(a.failureTax.usdPer1kCalls).toBeGreaterThan((1000 * (a.failureTax.usd - 0.005)) / 21);
     expect(a.failureTax.usdPer1kCalls).toBeLessThanOrEqual(
-      (1000 * (a.failureTax.usd + 0.005)) / 17,
+      (1000 * (a.failureTax.usd + 0.005)) / 21,
     );
     expect(a.failureTax.shareOfSpendPct).toBeGreaterThan(0);
     expect(Number.isInteger(a.failureTax.annualisedUsd)).toBe(true); // whole dollars; the fixture's tax rounds to 0 a year

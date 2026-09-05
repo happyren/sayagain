@@ -157,6 +157,13 @@ export function writeCodexFixture(root: string): string {
         output:
           "Chunk ID: abc12\nWall time: 1.0 seconds\nProcess exited with code 1\nOriginal token count: 12\nOutput:\nerror: unknown command 'SECRET-OUT'",
       }),
+      // Codex records an MCP call twice: a function_call with the call id, then the event.
+      item(4, "response_item", {
+        type: "function_call",
+        name: "_list_pull_requests",
+        arguments: JSON.stringify({ state: "open", repo: "SECRET/repo" }),
+        call_id: "m1",
+      }),
       tokens(4, 1000, 600, 100),
       item(5, "event_msg", {
         type: "mcp_tool_call_end",
@@ -195,6 +202,53 @@ export function writeCodexFixture(root: string): string {
         output: "aborted by user after 3.0s",
       }),
       tokens(11, 200, 0, 10),
+      // The exit code decides when the wrapper recorded one; stdout starting with "Error" does not.
+      item(12, "response_item", {
+        type: "function_call",
+        name: "shell",
+        arguments: JSON.stringify({ command: ["grep", "SECRET"] }),
+        call_id: "c4",
+      }),
+      item(13, "response_item", {
+        type: "function_call_output",
+        call_id: "c4",
+        output: JSON.stringify({
+          output: "Error: harmless SECRET line\n",
+          metadata: { exit_code: 0 },
+        }),
+      }),
+      item(14, "response_item", {
+        type: "function_call",
+        name: "exec_command",
+        arguments: JSON.stringify({ cmd: "cat SECRET" }),
+        call_id: "c5",
+      }),
+      item(15, "response_item", {
+        type: "function_call_output",
+        call_id: "c5",
+        output:
+          "Chunk ID: def34\nWall time: 0.1 seconds\nProcess exited with code 0\nOutput:\nError: this is only stdout SECRET",
+      }),
+      item(16, "response_item", {
+        type: "function_call",
+        name: "shell",
+        arguments: JSON.stringify({ command: ["make", "SECRET"] }),
+        call_id: "c6",
+      }),
+      item(17, "response_item", {
+        type: "function_call_output",
+        call_id: "c6",
+        output: JSON.stringify({ output: "boom: 'SECRET'\n", metadata: { exit_code: 2 } }),
+      }),
+      // An MCP event without a function_call twin, and a transport error.
+      item(18, "event_msg", {
+        type: "mcp_tool_call_end",
+        call_id: "m2",
+        invocation: { server: "github", tool: "get_pr", arguments: { id: 7 } },
+        duration: { secs: 0, nanos: 5_000_000 },
+        result: { Err: "transport closed: 'SECRET'" },
+      }),
+      tokens(19, 100, 0, 20),
     ].join(""),
   );
   return file;

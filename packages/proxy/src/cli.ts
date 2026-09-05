@@ -1135,19 +1135,36 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     if (forget) {
+      // Stop sending and rotate first, so a dead index cannot keep the old id alive.
       const old = contributor;
-      if (endpoint) {
-        const code = await forgetContributor(old, endpoint, PROXY_VERSION);
-        process.stdout.write(`the index answered ${code} to the deletion of ${old}\n`);
-      }
+      const toDelete = [...(settings.pendingForget ?? []), old];
       delete settings.contributor;
       delete settings.lastSentAt;
       settings.weekly = false;
+      settings.pendingForget = endpoint ? toDelete : [];
       contributeSettings(registry);
       process.stdout.write(
-        `contributor id rotated: ${old} -> ${settings.contributor}; weekly contribution off${endpoint ? "" : " (no endpoint: nothing to delete remotely)"}\n`,
+        `contributor id rotated: ${old} -> ${settings.contributor}; weekly contribution off\n`,
       );
-      return 0;
+      if (!endpoint) {
+        process.stdout.write("no endpoint: nothing to delete remotely\n");
+        return 0;
+      }
+      let failed = 0;
+      for (const id of toDelete) {
+        try {
+          const code = await forgetContributor(id, endpoint, PROXY_VERSION);
+          process.stdout.write(`the index answered ${code} to the deletion of ${id}\n`);
+          settings.pendingForget = (settings.pendingForget ?? []).filter((x) => x !== id);
+        } catch (err) {
+          failed++;
+          process.stdout.write(
+            `the deletion of ${id} at ${endpoint} failed: ${err instanceof Error ? err.message : String(err)}; run --forget again to retry it\n`,
+          );
+        }
+      }
+      saveRegistry(registry);
+      return failed ? 1 : 0;
     }
     if (status) {
       const s = {
@@ -1157,12 +1174,13 @@ export async function main(argv: string[]): Promise<number> {
         endpoint: endpoint ?? null,
         weekly: settings.weekly ?? false,
         lastSentAt: settings.lastSentAt ?? null,
+        pendingForget: settings.pendingForget ?? [],
         contributions: homePath("contributions"),
       };
       process.stdout.write(
         json
           ? `${JSON.stringify(s, null, 2)}\n`
-          : `contributor  ${s.contributor}\nterms        ${s.consent ? `${s.consent.termsVersion} accepted ${s.consent.acceptedAt}` : `not accepted (current: ${TERMS_VERSION})`}\nendpoint     ${s.endpoint ?? "none (ADR-0009 decision 3 pending)"}\nweekly       ${s.weekly ? "on" : "off"}\nlast sent    ${s.lastSentAt ?? "never"}\ndocuments    ${s.contributions}\n`,
+          : `contributor  ${s.contributor}\nterms        ${s.consent ? `${s.consent.termsVersion} accepted ${s.consent.acceptedAt}` : `not accepted (current: ${TERMS_VERSION})`}\nendpoint     ${s.endpoint ?? "none (ADR-0009 decision 3 pending)"}\nweekly       ${s.weekly ? "on" : "off"}\nlast sent    ${s.lastSentAt ?? "never"}\n${s.pendingForget.length ? `to delete    ${s.pendingForget.join(", ")} (run --forget to retry)\n` : ""}documents    ${s.contributions}\n`,
       );
       return 0;
     }

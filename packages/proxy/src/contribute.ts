@@ -8,12 +8,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  BOUNDARY_SIGNATURE,
   duplicateWrites,
   finalRows,
   isFailure,
   isUnacknowledged,
+  recoveries,
   selectRows,
-  signatureStats,
 } from "./analysis.js";
 import { homePath } from "./home.js";
 import type { LedgerRow } from "./ledger.js";
@@ -135,17 +136,6 @@ export interface BuildOptions {
   maxErrors?: number;
 }
 
-const modeOf = <T>(xs: T[], key: (x: T) => string): T | undefined => {
-  const counts = new Map<string, { n: number; x: T }>();
-  for (const x of xs) {
-    const k = key(x);
-    const c = counts.get(k);
-    if (c) c.n++;
-    else counts.set(k, { n: 1, x });
-  }
-  return [...counts.values()].sort((a, b) => b.n - a.n)[0]?.x;
-};
-
 const resolutionOf = (
   shapeChange: string | undefined,
   recoveryPath: string | undefined,
@@ -170,6 +160,57 @@ interface Group {
   schemaHash?: string;
 }
 
+/** Names the index can key on: no whitespace or backslashes, at most one slash, never a path. */
+export function cleanName(name: string): string | undefined {
+  const n = name.trim().replace(/[\s\\]+/g, "-");
+  if (
+    !n ||
+    n.length > 200 ||
+    n.startsWith("/") ||
+    n.endsWith("/") ||
+    (n.match(/\//g) ?? []).length > 1
+  )
+    return undefined;
+  return n;
+}
+const cleanKey = (k: string): string => k.replace(/[\s/\\]+/g, "-");
+/** `key:type` entries with the key cleaned; an entry without a type is dropped. */
+const cleanShape = (shape: string[]): string[] =>
+  shape
+    .flatMap((e) => {
+      const i = e.lastIndexOf(":");
+      return i <= 0 ? [] : [`${cleanKey(e.slice(0, i))}:${e.slice(i + 1)}`];
+    })
+    .sort();
+
+const quantile = (xs: number[], q: number): number => {
+  if (!xs.length) return 0;
+  const sorted = [...xs].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0;
+};
+const bump = (o: Record<string, number>, k: string): void => {
+  o[k] = (o[k] ?? 0) + 1;
+};
+const top = (o: Record<string, number>): string | undefined =>
+  Object.entries(o).sort((a, b) => b[1] - a[1])[0]?.[0];
+const streamKey = (r: LedgerRow): string =>
+  r.session !== undefined
+    ? `session:${r.session}`
+    : r.task !== undefined
+      ? `task:${r.task}`
+      : `upstream:${r.upstream}`;
+
+interface ErrAcc {
+  cls: string;
+  count: number;
+  turns: number[];
+  unrecovered: number;
+  paths: Record<string, number>;
+  shapes: Record<string, number>;
+  argShapes: string[][];
+  boundary: ShapeError["boundary"];
+}
+
 /** The document, from rows alone. Argument values never enter: rows carry shapes and hashes only. */
 export function buildShapeDocument(allRows: LedgerRow[], opts: BuildOptions): ShapeDocument {
   const until = opts.until ?? new Date();
@@ -183,7 +224,7 @@ export function buildShapeDocument(allRows: LedgerRow[], opts: BuildOptions): Sh
     if (list) list.push(r);
     else byReceipt.set(r.receipt, [r]);
   }
-  const keyOf = (r: LedgerRow) => `${r.upstream} ${r.tool} ${familyOf(r)}`;
+  const keyOf = (r: LedgerRow) => `${r.upstream}\u0000${r.tool}\u0000${familyOf(r)}`;
   const groups = new Map<string, Group>();
   const groupFor = (r: LedgerRow): Group => {
     const k = keyOf(r);
@@ -216,55 +257,119 @@ export function buildShapeDocument(allRows: LedgerRow[], opts: BuildOptions): Sh
   }
   for (const r of duplicateWrites(rows, { since: opts.since })) groupFor(r).dup++;
 
-  const errorsByGroup = new Map<string, ShapeError[]>();
-  const families = new Set([...groups.values()].map((g) => g.family));
-  for (const family of families) {
-    const partition = rows.filter((r) => familyOf(r) === family);
-    for (const s of signatureStats(partition, { since: opts.since })) {
-      const failing = partition.filter(
-        (r) =>
-          r.upstream === s.server &&
-          r.tool === s.tool &&
-          r.errorSignature === s.signature &&
-          inWindow(r),
-      );
-      const boundary = { repaired: 0, held: 0, deadLettered: 0 };
-      for (const receipt of new Set(failing.map((r) => r.receipt))) {
-        const rowsOf = byReceipt.get(receipt) ?? [];
-        const last = rowsOf[rowsOf.length - 1];
-        if (!last) continue;
-        if (last.status === "repaired") boundary.repaired++;
-        if (last.held) boundary.held++;
-        if (last.status === "dead-lettered") boundary.deadLettered++;
-      }
-      const argShape = modeOf(failing, (r) => r.argShape.join("\n"))?.argShape ?? [];
-      const recoveryPath =
-        s.topRecoveryPath && s.topRecoveryPath !== "(retry only)"
-          ? s.topRecoveryPath.split(" > ").filter((x) => x && !x.startsWith("…"))
-          : undefined;
-      const entry: ShapeError = {
-        class: s.errorClass,
-        signatureHash: signatureHash(s.signature),
-        count: s.count,
-        argShape,
-        resolution: resolutionOf(s.topShapeChange, s.topRecoveryPath, s.count > s.unrecovered),
-        ...(s.topShapeChange ? { shapeChange: s.topShapeChange } : {}),
-        ...(recoveryPath?.length ? { recoveryPath } : {}),
-        callsToRecover: { median: s.medianCallsToRecover, unrecovered: s.unrecovered },
-        boundary,
+  // Errors: recovery windows over every row (a session may change model between the failure and
+  // the fix), attributed to the failing row's family; boundary-side failures are not the tool's.
+  const errors = new Map<string, Map<string, ErrAcc>>();
+  const accFor = (r: LedgerRow): ErrAcc => {
+    const k = keyOf(r);
+    let byKey = errors.get(k);
+    if (!byKey) {
+      byKey = new Map();
+      errors.set(k, byKey);
+    }
+    const sig = r.errorSignature ?? "(no message)";
+    let acc = byKey.get(sig);
+    if (!acc) {
+      acc = {
+        cls: r.errorClass ?? "other",
+        count: 0,
+        turns: [],
+        unrecovered: 0,
+        paths: {},
+        shapes: {},
+        argShapes: [],
+        boundary: { repaired: 0, held: 0, deadLettered: 0 },
       };
-      const k = `${s.server} ${s.tool} ${family}`;
-      const list = errorsByGroup.get(k);
-      if (list) list.push(entry);
-      else errorsByGroup.set(k, [entry]);
+      byKey.set(sig, acc);
+    }
+    return acc;
+  };
+  for (const rec of recoveries(rows, { since: opts.since })) {
+    const r = rec.row;
+    if (BOUNDARY_SIGNATURE.test(r.errorSignature ?? "")) continue;
+    const acc = accFor(r);
+    acc.count++;
+    acc.turns.push(rec.calls);
+    acc.argShapes.push(r.argShape);
+    if (!rec.recovered) acc.unrecovered++;
+    else {
+      bump(acc.paths, rec.path.length ? rec.path.slice(0, 5).join(" > ") : "(retry only)");
+      if (rec.shapeChange) bump(acc.shapes, rec.shapeChange);
     }
   }
+  // Failed attempts the boundary itself resolved or parked: the attempt row is not final, so the
+  // recovery windows above never see it. Count it against its signature with the boundary's verdict.
+  for (const rowsOf of byReceipt.values()) {
+    const last = rowsOf[rowsOf.length - 1];
+    if (!last || rowsOf.length < 2 || !inWindow(last)) continue;
+    const attempt = rowsOf.find(
+      (r) => r !== last && isFailure(r) && !BOUNDARY_SIGNATURE.test(r.errorSignature ?? ""),
+    );
+    if (!attempt) continue;
+    const verdict =
+      last.status === "repaired"
+        ? "repaired"
+        : last.status === "dead-lettered"
+          ? "deadLettered"
+          : last.held
+            ? "held"
+            : undefined;
+    if (!verdict) continue;
+    const acc = accFor(attempt);
+    acc.count++;
+    acc.turns.push(0);
+    acc.argShapes.push(attempt.argShape);
+    acc.boundary[verdict]++;
+  }
+
   const maxErrors = opts.maxErrors ?? 10;
-  const shapes: Shape[] = [...groups.entries()]
-    .filter(([, g]) => g.calls > 0 && !OPAQUE_NAME.test(g.server) && g.server !== PRIVATE_CONNECTOR)
-    .map(([k, g]) => ({
-      server: g.server.toLowerCase(),
-      tool: g.tool,
+  const entriesFor = (k: string): ShapeError[] =>
+    [...(errors.get(k) ?? new Map<string, ErrAcc>()).entries()]
+      .map(([signature, acc]) => {
+        const shapeChange = top(acc.shapes);
+        const pathText = top(acc.paths);
+        const recoveryPath =
+          pathText && pathText !== "(retry only)"
+            ? pathText
+                .split(" > ")
+                .map((x) => cleanName(x))
+                .filter((x): x is string => x !== undefined)
+            : undefined;
+        const argShape =
+          acc.argShapes
+            .map((shape) => cleanShape(shape))
+            .map((shape) => ({ key: shape.join("\n"), shape }))
+            .sort((a, b) => a.key.localeCompare(b.key))
+            .reduce<{ key: string; shape: string[]; n: number }[]>((acc2, x) => {
+              const hit = acc2.find((y) => y.key === x.key);
+              if (hit) hit.n++;
+              else acc2.push({ ...x, n: 1 });
+              return acc2;
+            }, [])
+            .sort((a, b) => b.n - a.n)[0]?.shape ?? [];
+        return {
+          class: acc.cls,
+          signatureHash: signatureHash(signature),
+          count: acc.count,
+          argShape,
+          resolution: resolutionOf(shapeChange, pathText, acc.count > acc.unrecovered),
+          ...(shapeChange && SHAPE_CHANGE.test(shapeChange) ? { shapeChange } : {}),
+          ...(recoveryPath?.length ? { recoveryPath } : {}),
+          callsToRecover: { median: quantile(acc.turns, 0.5), unrecovered: acc.unrecovered },
+          boundary: acc.boundary,
+        };
+      })
+      .sort((a, b) => b.count - a.count)
+      .slice(0, maxErrors);
+  const shapes: Shape[] = [];
+  for (const [k, g] of groups) {
+    if (!g.calls || OPAQUE_NAME.test(g.server) || g.server === PRIVATE_CONNECTOR) continue;
+    const server = cleanName(g.server.toLowerCase());
+    const tool = cleanName(g.tool);
+    if (!server || !tool) continue; // a name that reads as a path stays home
+    shapes.push({
+      server,
+      tool,
       ...(g.schemaHash ? { schemaHash: g.schemaHash } : {}),
       toolClass: g.toolClass,
       modelFamily: g.family,
@@ -273,10 +378,11 @@ export function buildShapeDocument(allRows: LedgerRow[], opts: BuildOptions): Sh
       failures: g.failures,
       unacknowledgedWrites: g.unack,
       duplicateWrites: g.dup,
-      errors: (errorsByGroup.get(k) ?? []).sort((a, b) => b.count - a.count).slice(0, maxErrors),
-    }))
-    .sort((a, b) => b.calls - a.calls);
-  const sessions = opts.sessions ?? new Set(finals.map((r) => r.session ?? r.receipt)).size;
+      errors: entriesFor(k),
+    });
+  }
+  shapes.sort((a, b) => b.calls - a.calls);
+  const sessions = opts.sessions ?? new Set(finals.map(streamKey)).size;
   const doc: ShapeDocument = {
     schema: SHAPE_SCHEMA,
     contributor: opts.contributor,
@@ -324,7 +430,7 @@ const KEYS = {
   boundary: ["repaired", "held", "deadLettered"],
 };
 const ARG_SHAPE =
-  /^[^:\s/\\]{1,120}:(string|number|boolean|object|array|null|undefined|bigint|symbol|function)$/;
+  /^[^\s/\\]{1,120}:(string|number|boolean|object|array|null|undefined|bigint|symbol|function)$/;
 const SHAPE_CHANGE =
   /^(added|removed|changed) [^\s/\\]{1,400}(; (added|removed|changed) [^\s/\\]{1,400})*$/;
 const ENUM_WORD = /^[a-z-]{1,24}$/;
@@ -340,7 +446,8 @@ function onlyKeys(o: unknown, allowed: string[], where: string): Record<string, 
 const shortName = (v: unknown, where: string, max = 200): void => {
   if (typeof v !== "string" || !v || v.length > max)
     throw new Error(`contribution: ${where} must be a short name`);
-  if (/\s|\\|\//.test(v))
+  // One slash is a namespace (`example-servers/everything`); more, or a leading one, is a path.
+  if (/\s|\\/.test(v) || v.startsWith("/") || (v.match(/\//g) ?? []).length > 1)
     throw new Error(`contribution: ${where} must not contain spaces or paths`);
 };
 const count = (v: unknown, where: string): void => {

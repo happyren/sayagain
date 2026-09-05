@@ -121,9 +121,9 @@ describe("cli audit and contribute", () => {
     ).toBe(0);
     const a = JSON.parse(out) as Audit;
     expect(a.sources).toEqual([
-      expect.objectContaining({ source: "codex", sessions: 1, calls: 4, mcpCalls: 1 }),
+      expect.objectContaining({ source: "codex", sessions: 1, calls: 8, mcpCalls: 2 }),
     ]);
-    expect(a.report.calls).toBe(4);
+    expect(a.report.calls).toBe(8);
     expect(readdirSync(join(dir, "home")).includes("audit")).toBe(false); // --no-html wrote nothing
     out = "";
     expect(
@@ -258,6 +258,33 @@ describe("cli audit and contribute", () => {
     } finally {
       await idx.close();
     }
+  });
+
+  it("contribute --forget stops sending even when the index is unreachable, and remembers the deletion", async () => {
+    const idx = await index();
+    await idx.close(); // the port is now dead
+    expect(await main(["contribute", "--endpoint", idx.url, "--accept-terms", "2026-09-05"])).toBe(
+      0,
+    );
+    expect(await main(["contribute", "--weekly", "on"])).toBe(0);
+    out = "";
+    expect(await main(["contribute", "--status", "--json"])).toBe(0);
+    const before = JSON.parse(out) as { contributor: string };
+    out = "";
+    expect(await main(["contribute", "--forget"])).toBe(1);
+    expect(out).toContain(`contributor id rotated: ${before.contributor} ->`);
+    expect(out).toContain("weekly contribution off");
+    expect(out).toContain(`the deletion of ${before.contributor} at ${idx.url} failed`);
+    out = "";
+    expect(await main(["contribute", "--status", "--json"])).toBe(0);
+    const after = JSON.parse(out) as {
+      contributor: string;
+      weekly: boolean;
+      pendingForget: string[];
+    };
+    expect(after.contributor).not.toBe(before.contributor);
+    expect(after.weekly).toBe(false);
+    expect(after.pendingForget).toEqual([before.contributor]);
   });
 
   it("contribute reads the ledger by default and says so when it is empty", async () => {

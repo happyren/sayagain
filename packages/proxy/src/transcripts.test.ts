@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, utimesSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -98,14 +98,19 @@ describe("transcripts", () => {
     const s = readSession(file, "codex");
     expect(s.calls.map((c) => [c.tool, c.outcome])).toEqual([
       ["exec_command", "error"],
-      ["list_pull_requests", "ok"],
+      ["list_pull_requests", "ok"], // one call, although the file records it twice
       ["apply_patch", "error"],
       ["exec_command", "interrupt"],
+      ["shell", "ok"], // exit code 0 beats a stdout line starting with Error
+      ["exec_command", "ok"],
+      ["shell", "error"], // exit code 2 in the JSON wrapper
+      ["get_pr", "error"], // an Err result
     ]);
     const [shell, mcp, patch] = s.calls;
     expect(shell).toMatchObject({ server: "codex", toolClass: "write", model: "gpt-5.5" });
     expect(shell?.errorClass).toBeDefined();
-    expect(shell?.tokens).toBe(1100);
+    expect(shell?.signature).toBe("error: unknown command <str>"); // the wrapper's header is not the error
+    expect(shell?.tokens).toBe(550); // the turn's 1100 tokens, shared with the MCP call it issued
     expect(mcp).toMatchObject({
       server: "github",
       isMcp: true,
@@ -117,10 +122,132 @@ describe("transcripts", () => {
     expect(patch?.signature).toBe(
       "apply_patch verification failed: Failed to find expected lines in <path>",
     );
-    expect([mcp?.tokens, patch?.tokens]).toEqual([275, 275]);
-    expect(s.families).toEqual({ gpt: 4 });
+    expect([mcp?.tokens, patch?.tokens]).toEqual([550, 550]);
+    expect(s.calls[6]?.signature).toBe("boom: <str>");
+    expect(s.calls[7]).toMatchObject({ server: "github", isMcp: true, errorClass: "other" });
+    expect(s.calls[7]?.latencyMs).toBe(5);
+    expect(s.families).toEqual({ gpt: 8 });
     expect(s.usd).toBeGreaterThan(0);
     expect(JSON.stringify(s)).not.toMatch(/SECRET|\/Users\/k\//);
+  });
+
+  it("handles split responses, rejections, in-flight calls and subagent files", () => {
+    const project = join(root, "-Users-k-projects-SECRET");
+    mkdirSync(join(project, "sess-1", "subagents"), { recursive: true });
+    const at = (s: number) => new Date(T0 + s * 1000).toISOString();
+    const usage = {
+      input_tokens: 100,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      output_tokens: 10,
+    };
+    const line = (o: unknown) => `${JSON.stringify(o)}\n`;
+    const parent = join(project, "sess-1.jsonl");
+    writeFileSync(
+      parent,
+      [
+        // One API response written as three lines with the same requestId and usage: counted once.
+        line({
+          type: "assistant",
+          timestamp: at(0),
+          requestId: "r1",
+          message: {
+            model: "claude-sonnet-5",
+            usage,
+            content: [{ type: "thinking", thinking: "SECRET" }],
+          },
+        }),
+        line({
+          type: "assistant",
+          timestamp: at(0),
+          requestId: "r1",
+          message: { model: "claude-sonnet-5", usage, content: [{ type: "text", text: "SECRET" }] },
+        }),
+        line({
+          type: "assistant",
+          timestamp: at(0),
+          requestId: "r1",
+          message: {
+            model: "claude-sonnet-5",
+            usage,
+            content: [
+              { type: "tool_use", id: "u1", name: "Bash", input: { command: "rm SECRET" } },
+            ],
+          },
+        }),
+        // The user refused: the tool never ran.
+        line({
+          type: "user",
+          timestamp: at(1),
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "u1",
+                is_error: true,
+                content:
+                  "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a Bash command).",
+              },
+            ],
+          },
+        }),
+        line({
+          type: "assistant",
+          timestamp: at(2),
+          requestId: "r2",
+          message: {
+            model: "claude-sonnet-5",
+            usage,
+            content: [{ type: "tool_use", id: "u2", name: "Edit", input: { file_path: "SECRET" } }],
+          },
+        }),
+        // No result yet, and the file's last line is recent: in flight, not lost.
+      ].join(""),
+    );
+    const sub = join(project, "sess-1", "subagents", "agent-a.jsonl");
+    writeFileSync(
+      sub,
+      [
+        line({
+          type: "assistant",
+          timestamp: at(3),
+          requestId: "r3",
+          isSidechain: true,
+          message: {
+            model: "claude-sonnet-5",
+            usage,
+            content: [{ type: "tool_use", id: "u3", name: "Read", input: { file_path: "SECRET" } }],
+          },
+        }),
+        line({
+          type: "user",
+          timestamp: at(4),
+          message: { content: [{ type: "tool_result", tool_use_id: "u3", content: "ok" }] },
+        }),
+      ].join(""),
+    );
+    const live = readSession(parent, "claude-code", { now: T0 + 60_000 });
+    expect(live.tokens).toEqual({ input: 200, cacheRead: 0, cacheCreate: 0, output: 20 });
+    expect(live.calls.map((c) => [c.tool, c.outcome])).toEqual([
+      ["Bash", "rejected"],
+      ["Edit", "unrecorded"],
+    ]);
+    const later = readSession(parent, "claude-code", { now: T0 + 2 * 3_600_000 });
+    expect(later.calls[1]?.outcome).toBe("no-result");
+    expect(sessionRows(live).rows.map((r) => r.tool)).toEqual(["Edit"]); // the rejected call gets no row
+    const child = readSession(sub, "claude-code");
+    expect(child.id).toBe(live.id); // one conversation, one stream
+    expect(child.fileKey).not.toBe(live.fileKey);
+    const rows = [...sessionRows(later).rows, ...sessionRows(child).rows];
+    expect(new Set(rows.map((r) => r.receipt)).size).toBe(2);
+    expect(new Set(rows.map((r) => r.session)).size).toBe(1);
+    const scan = scanTranscripts({
+      sources: ["claude-code"],
+      dirs: { "claude-code": root },
+      now: T0 + 60_000,
+    });
+    expect(scan.files["claude-code"]).toBe(2);
+    expect(new Set(scan.sessions.map((s) => s.id)).size).toBe(1);
   });
 
   it("reads Cursor transcripts, and marks a file without tool results as unrecorded", () => {
@@ -198,6 +325,7 @@ describe("transcripts", () => {
       since: new Date(T0 - 86_400_000),
     });
     expect(recent.files["claude-code"]).toBe(0);
+    expect(scan.sessions.find((s) => s.source === "codex")?.calls).toHaveLength(8);
     expect(recent.sessions.some((s) => s.source === "claude-code")).toBe(false);
     const none = scanTranscripts({ sources: ["codex"], dirs: { codex: join(root, "missing") } });
     expect(none.sessions).toEqual([]);

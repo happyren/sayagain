@@ -194,6 +194,14 @@ export function runAudit(
       `${unrecorded} session file${unrecorded === 1 ? "" : "s"} (${from}) carr${unrecorded === 1 ? "ies" : "y"} tool calls but no tool results; those calls count as calls with no outcome: neither failures nor unacknowledged writes.`,
     );
   }
+  const rejected = sessions.reduce(
+    (a, s) => a + s.calls.filter((c) => c.outcome === "rejected").length,
+    0,
+  );
+  if (rejected)
+    caveats.push(
+      `${rejected} call${rejected === 1 ? "" : "s"} the user rejected before ${rejected === 1 ? "it" : "they"} ran ${rejected === 1 ? "is" : "are"} not counted: the tool never executed.`,
+    );
   const cursor = bySource.get("cursor");
   if (cursor?.calls && !cursor.tokens)
     caveats.push("Cursor transcripts carry no token usage, so the cost numbers exclude them.");

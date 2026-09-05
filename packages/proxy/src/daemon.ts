@@ -789,6 +789,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // accepted terms; the function checks all three every time, so a CLI change is honoured.
   const contributeEvery = options.contributeEveryMs ?? 3_600_000;
   const contribute = (): void => {
+    if (!loadRegistry().contribute?.weekly) return; // the ledger read is not free
     weeklyContribution({ rows: options.stores.readLedger(), version: options.version, log })
       .then((r) => {
         if (r.sent) log(`weekly contribution sent (${r.path})`);

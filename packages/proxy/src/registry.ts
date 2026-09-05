@@ -42,6 +42,8 @@ export interface Registry {
     endpoint?: string;
     weekly?: boolean;
     lastSentAt?: string;
+    /** Ids whose deletion the index has not confirmed yet; retried by the next --forget. */
+    pendingForget?: string[];
   };
 }
 
