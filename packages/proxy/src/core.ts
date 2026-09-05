@@ -28,6 +28,7 @@ import {
   registerPending,
   rewriteServerMessage,
   shapeOf,
+  unansweredResponse,
   withArguments,
 } from "./boundary.js";
 import type { ReplayOutcome } from "./control.js";
@@ -421,7 +422,11 @@ export class Boundary extends EventEmitter {
       if (session.bidirectional !== false) this.safeSend(session, msg);
   }
 
-  private initializeResponse(clientId: JsonRpcId, base: Record<string, unknown>): JsonRpcMessage {
+  private initializeResponse(
+    clientId: JsonRpcId,
+    base: Record<string, unknown>,
+    announce: boolean,
+  ): JsonRpcMessage {
     const result = { ...base };
     const boundary: Record<string, unknown> = {
       name: BOUNDARY_NAME,
@@ -435,7 +440,7 @@ export class Boundary extends EventEmitter {
       ...((result._meta as Record<string, unknown> | undefined) ?? {}),
       [META.boundary]: boundary,
     };
-    if (this.opts.announce) {
+    if (this.opts.announce && announce) {
       const existing = typeof result.instructions === "string" ? result.instructions.trimEnd() : "";
       result.instructions = existing ? `${existing}\n\n${ANNOUNCEMENT}` : ANNOUNCEMENT;
     }
@@ -476,7 +481,11 @@ export class Boundary extends EventEmitter {
         });
         return;
       }
-      this.safeSend(session, this.initializeResponse(msg.id, this.initResult));
+      // The control arm's model reads nothing from the boundary, not even the announcement.
+      this.safeSend(
+        session,
+        this.initializeResponse(msg.id, this.initResult, session.arm !== "control"),
+      );
       return;
     }
     if ("method" in msg && msg.method === "notifications/initialized") return;
@@ -612,6 +621,14 @@ export class Boundary extends EventEmitter {
       text: reason,
     };
     const row = failedAttemptRow(call, this.state.upstreamName, failure, 0, Date.now());
+    if (call.arm === "control") {
+      // Observe only: the row records the unanswered call; no dead letter, no replay sentence for the model.
+      this.record(row);
+      this.settle(call, null);
+      if (!this.state.ownIds.delete(keyOf(call.id))) this.deliver(unansweredResponse(call, reason));
+      this.resolveWaiter(call, { isError: true, text: reason });
+      return;
+    }
     row.status = "dead-lettered";
     this.record(row);
     this.recordDeadLetter(call, row.errorClass ?? "retryable", reason);
@@ -650,6 +667,7 @@ export class Boundary extends EventEmitter {
       mode,
     };
     if (call.intent !== undefined) hold.intent = call.intent;
+    if (call.arm !== undefined) hold.arm = call.arm;
     this.holds.create(hold);
     this.emit("hold", hold);
     call.held = { reason, mode };
@@ -949,6 +967,7 @@ export class Boundary extends EventEmitter {
     const call = describeCall(req, rawLine, hold.toolClass, Buffer.byteLength(rawLine));
     call.receipt = hold.receipt;
     if (hold.intent !== undefined) call.intent = hold.intent;
+    if (hold.arm !== undefined) call.arm = hold.arm;
     call.held = {
       reason: hold.reason,
       mode: (hold.mode as HoldMode | undefined) ?? "pre",
@@ -1089,7 +1108,8 @@ export class Boundary extends EventEmitter {
     if (row && call && row.status === "dead-lettered")
       this.recordDeadLetter(call, row.errorClass ?? "other", row.errorSignature ?? "");
     if (call) {
-      if (remember) {
+      // Control results are not remembered: a control write must not answer a treatment duplicate.
+      if (remember && call.arm !== "control") {
         const key = DedupeCache.keyFor(call);
         const remembered: Remembered = {
           receipt: call.receipt,

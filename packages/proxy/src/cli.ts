@@ -113,12 +113,14 @@ const USAGE = `sayagain ${PROXY_VERSION}
       --no-rewrite-errors      do not append guidance to failures
       --otlp <url>|off         export one span per call (default: $OTEL_EXPORTER_OTLP_ENDPOINT, else a local collector on :4318; serve remembers it in config.json; SAYAGAIN_OTLP=off disables machine-wide)
       --no-learn               ignore ~/.sayagain/learned.json (the loop's coercions and hints)
-  sayagain serve [--listen 127.0.0.1:7777] [--store jsonl|sqlite] [--db <path>] [--otlp <url>|off] [--detach]
+      --arm control|treatment|coinflip|daily   the A/B arm for this process (docs/measurement.md 5.4; daily follows the calendar)
+  sayagain serve [--listen 127.0.0.1:7777] [--store jsonl|sqlite] [--db <path>] [--otlp <url>|off] [--arm <mode>] [--detach]
       Run the daemon: one virtual server per registered upstream at /mcp/<name>, plus the control API.
       The bearer token is in ~/.sayagain/token. SAYAGAIN_HOME moves every file elsewhere.
-      --arm control|treatment|coinflip|daily runs the A/B protocol: control forwards and records only (no
-      hold, dedupe, retry, repair, hint or guidance); coinflip assigns each host session; daily assigns every
-      session of a UTC day the same arm. Persists until --arm treatment.
+      --arm control|treatment|coinflip|daily|off runs the A/B protocol: control forwards and records only (no
+      hold, dedupe, retry, repair, learned coercion, hint, guidance, augmented descriptions or announcement);
+      treatment is the boundary as shipped; coinflip assigns each host session; daily gives every session of a
+      UTC day the same arm and follows the calendar. Persists in config.json until --arm off.
   sayagain add <name> [--url <url>] [--header k=v]... [--env K[=V]]... [--cwd <dir>] [--class t=c]... [--hold m] [-- <command> [args...]]
       Register an upstream (stdio command, or --url for Streamable HTTP). --env K alone stores "\${K}",
       resolved from the daemon's environment at spawn; so does a \${VAR} inside --header or --env values.
@@ -300,9 +302,14 @@ function renderAbReport(r: AbReport): string {
   out.push(
     `Say Again A/B: ${when(r.window.since)} to ${when(r.window.until)} UTC (${r.window.days} days); target ${r.targetCallsPerArm} calls per arm (docs/measurement.md 5.4)`,
   );
+  if (r.experiment.first && r.experiment.last)
+    out.push(
+      `Armed rows from ${when(r.experiment.first)} to ${when(r.experiment.last)} UTC (${r.experiment.days} days; minimum ${r.minimumDays} days or ${r.targetCallsPerArm} calls per arm, whichever is later)`,
+    );
   out.push("");
   line("", "control", "treatment");
   line("calls", c.calls, t.calls);
+  line("sessions (clusters)", c.sessions, t.sessions);
   line("writes", c.writes, t.writes);
   line(
     "failures (M1)",
@@ -314,7 +321,7 @@ function renderAbReport(r: AbReport): string {
     `${c.unacknowledged} (${c.unacknowledgedPer1kWrites}/1K)`,
     `${t.unacknowledged} (${t.unacknowledgedPer1kWrites}/1K)`,
   );
-  line("recovery bytes per call (M5)", c.recoveryBytesPerCall, t.recoveryBytesPerCall);
+  line("failure tax, bytes per call", c.recoveryBytesPerCall, t.recoveryBytesPerCall);
   line(
     "retried / identical (M2, M3)",
     `${c.recovery.retryRatePct}% / ${c.recovery.identicalRetryPct}%`,
@@ -339,12 +346,15 @@ function renderAbReport(r: AbReport): string {
   out.push("");
   out.push("Differences, control minus treatment (95% interval; positive favours the boundary)");
   const d = r.differences;
-  const show = (label: string, x: AbDiff, unit: string) =>
+  const show = (label: string, x: AbDiff, unit: string) => {
+    const interval = x.low === null || x.high === null ? "not estimable" : `${x.low} to ${x.high}`;
     out.push(
-      `  ${label.padEnd(30)} ${String(x.delta).padStart(8)} ${unit.padEnd(14)} ${String(x.low).padStart(8)} to ${String(x.high).padEnd(8)} ${x.distinguishable ? "distinguishable from zero" : "not yet distinguishable"}`,
+      `  ${label.padEnd(30)} ${String(x.delta).padStart(8)} ${unit.padEnd(14)} ${interval.padEnd(20)} ${x.distinguishable ? "distinguishable from zero" : "not distinguishable"}`,
     );
-  show("failure tax (primary, cost)", d.recoveryBytesPerCall, "bytes/call");
+  };
+  // Risk first, then cost (ADR-0009 decision 2).
   show("unacknowledged (primary, risk)", d.unacknowledgedPer1kWrites, "per 1K writes");
+  show("failure tax (primary, cost)", d.recoveryBytesPerCall, "bytes/call");
   show("failure rate (secondary)", d.failureRatePct, "points");
   out.push("");
   out.push(`Verdict: ${r.verdict}`);
@@ -486,7 +496,7 @@ export async function main(argv: string[]): Promise<number> {
       });
       process.stderr.write(`sayagain: exporting spans to ${wrapOtlpEndpoint}\n`);
     }
-    if (armOption && armOption !== "treatment") wrapOptions.arm = armOption as ArmMode;
+    if (armOption) wrapOptions.arm = armOption as ArmMode;
     const { done } = wrap(wrapOptions);
     return done;
   }
@@ -498,8 +508,8 @@ export async function main(argv: string[]): Promise<number> {
     const db = takeOption(opts, "--db");
     const otlpOption = takeOption(opts, "--otlp");
     const armOption = takeOption(opts, "--arm");
-    if (armOption !== undefined && !isArmMode(armOption))
-      throw new UsageError("serve: --arm must be control, treatment, coinflip or daily");
+    if (armOption !== undefined && armOption !== "off" && !isArmMode(armOption))
+      throw new UsageError("serve: --arm must be control, treatment, coinflip, daily or off");
     const detach = takeFlag(opts, "--detach");
     if (opts.length) throw new UsageError(`serve: unknown option ${opts[0]}`);
     if (store !== undefined && store !== "jsonl" && store !== "sqlite")
@@ -557,12 +567,14 @@ export async function main(argv: string[]): Promise<number> {
       registry.daemon = { ...(registry.daemon ?? {}), otlp: otlpOption };
       saveRegistry(registry);
     }
-    // The experiment's arm mode persists like the collector: `--arm treatment` ends it.
+    // The experiment's arm mode persists like the collector, so a daemon the shim restarts keeps it; `--arm off` ends it.
     if (armOption !== undefined && registry.daemon?.arm !== armOption) {
-      registry.daemon = { ...(registry.daemon ?? {}), arm: armOption as ArmMode };
+      registry.daemon = { ...(registry.daemon ?? {}), arm: armOption as ArmMode | "off" };
       saveRegistry(registry);
     }
-    const armMode = (armOption as ArmMode | undefined) ?? registry.daemon?.arm;
+    const persistedArm = armOption ?? registry.daemon?.arm;
+    const armMode: ArmMode | undefined =
+      persistedArm && persistedArm !== "off" ? (persistedArm as ArmMode) : undefined;
     const otlpEndpoint = await resolveOtlpEndpoint(otlpOption ?? registry.daemon?.otlp);
     if (otlpEndpoint) {
       daemonOptions.otlp = new OtlpExporter({
@@ -574,7 +586,7 @@ export async function main(argv: string[]): Promise<number> {
       process.stderr.write(`sayagain: exporting spans to ${otlpEndpoint}\n`);
     }
     if (listen !== undefined) daemonOptions.listen = listen;
-    if (armMode && armMode !== "treatment") daemonOptions.arm = armMode;
+    if (armMode) daemonOptions.arm = armMode;
     const daemon = await startDaemon(daemonOptions);
     process.stderr.write(
       `sayagain ${PROXY_VERSION} serving ${Object.keys(registry.servers).length} upstream(s) at ${daemon.url} (store: ${stores.kind}; token in ${tokenPath()})\n`,
@@ -957,7 +969,8 @@ export async function main(argv: string[]): Promise<number> {
     const opts = [...rest];
     const ab = command === "report" && takeFlag(opts, "--ab");
     const weekly = takeFlag(opts, "--weekly");
-    const sinceOption = takeOption(opts, "--since") ?? "7d";
+    // The A/B page defaults to the experiment's scale, a month, so a four-week proof is not read as its last week.
+    const sinceOption = takeOption(opts, "--since") ?? (ab ? "30d" : "7d");
     const server = takeOption(opts, "--server");
     const ledgerOption = takeOption(opts, "--ledger");
     const minCallsRaw = command === "tools" ? takeNumber(opts, "--min-calls") : undefined;

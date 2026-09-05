@@ -143,8 +143,18 @@ class HostSession implements Session {
   readonly waiters = new Map<string, { settle: (msg: JsonRpcMessage) => void }>();
   stream: ServerResponse | undefined;
   lastSeen = Date.now();
-  arm: Arm | undefined;
+  /** Fixed at creation for coinflip, control and treatment; daily follows the calendar, so a session that crosses midnight changes arm with the day. */
+  private armMode: ArmMode | undefined;
+  private fixedArm: Arm | undefined;
   constructor(readonly id: string) {}
+  get arm(): Arm | undefined {
+    return this.armMode === "daily" ? pickArm("daily") : this.fixedArm;
+  }
+  assignArm(mode: ArmMode | undefined): Arm | undefined {
+    this.armMode = mode;
+    this.fixedArm = mode ? pickArm(mode) : undefined;
+    return this.arm;
+  }
   get bidirectional(): boolean {
     return this.stream !== undefined;
   }
@@ -326,16 +336,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return h === "" || LOOPBACK_HOSTS.has(h);
   };
 
-  // Every session that can originate a call gets an arm when an experiment is running,
-  // including the sessionless POSTs some hosts send: a call with no arm would leak into treatment.
-  const armFor = (): Arm | undefined => (options.arm ? pickArm(options.arm) : undefined);
+  // Every session that can originate a call gets an arm when an experiment is running, including the
+  // sessionless POSTs some hosts send: a call with no arm would leak into treatment. A sessionless host has
+  // nothing to randomise per session, so under coinflip it keeps one arm for this daemon's lifetime.
+  const sessionlessArm = options.arm === "coinflip" ? pickArm("coinflip") : undefined;
+  if (sessionlessArm)
+    log(
+      `sayagain: calls without a session id run in the ${sessionlessArm} arm for this daemon's lifetime (coinflip)`,
+    );
+  const armFor = (sessionless: boolean): Arm | undefined => {
+    if (!options.arm) return undefined;
+    if (sessionless && sessionlessArm) return sessionlessArm;
+    return pickArm(options.arm);
+  };
   const sessionFor = (id: string | undefined, create: boolean): HostSession | undefined => {
     if (!id) return undefined;
     let s = hostSessions.get(id);
     if (!s && create) {
       s = new HostSession(id);
-      s.arm = armFor();
-      if (s.arm) log(`sayagain: session ${id} in the ${s.arm} arm (${options.arm})`);
+      const arm = s.assignArm(options.arm);
+      if (arm) log(`sayagain: session ${id} in the ${arm} arm (${options.arm})`);
       hostSessions.set(id, s);
     }
     if (s) s.lastSeen = Date.now();
@@ -418,7 +438,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         send: () => undefined,
         bidirectional: false,
         ephemeral: true,
-        arm: armFor(),
+        arm: armFor(true),
       };
       boundary.attach(session);
       try {
@@ -446,7 +466,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         id: `http-${++sessionSeq}`,
         bidirectional: false,
         ephemeral: true,
-        arm: armFor(),
+        arm: armFor(true),
         send: (m: JsonRpcMessage) => {
           if (isResponse(m) && m.id !== null && m.id !== undefined && keyOfId(m.id) === wanted)
             settle(m);

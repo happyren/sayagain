@@ -85,6 +85,10 @@ describe("cli analysis", () => {
     expect(out).toContain("Say Again A/B:");
     expect(out).toContain("control      treatment");
     expect(out).toContain("failure tax (primary, cost)");
+    expect(out).toContain("sessions (clusters)");
+    expect(out.indexOf("unacknowledged (primary, risk)")).toBeLessThan(
+      out.indexOf("failure tax (primary, cost)"),
+    ); // risk first
     expect(out).toContain("Verdict:");
     expect(out).toContain("Rows outside the experiment (no arm): 1");
     out = "";
@@ -111,7 +115,7 @@ describe("cli analysis", () => {
     expect(ab.arms.treatment.boundary.repaired).toBe(1);
     expect(ab.outside).toBe(1);
     await expect(main(["serve", "--arm", "sometimes"])).rejects.toThrow(
-      /--arm must be control, treatment, coinflip or daily/,
+      /--arm must be control, treatment, coinflip, daily or off/,
     );
     await expect(main(["wrap", "--arm", "sometimes", "--", "node", "-e", "0"])).rejects.toThrow(
       /--arm must be/,

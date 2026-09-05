@@ -349,22 +349,75 @@ describe("analysis", () => {
     expect(d.unacknowledgedPer1kWrites).toMatchObject({ control: 83.3, treatment: 0 });
     expect(d.recoveryBytesPerCall.delta).toBeGreaterThan(0);
     expect(d.recoveryBytesPerCall.distinguishable).toBe(true);
-    expect(r.verdict).toContain("Both arms passed the pre-registered 30 calls");
+    // The rows span seconds, so the calls are in but the two weeks are not.
+    expect(r.experiment.days).toBe(0);
+    expect(r.verdict).toContain(
+      "14 more days before the pre-registered minimum (14 days or 30 calls per arm, whichever is later)",
+    );
     expect(r.verdict).toContain("Failure tax per call: treatment lowers it by");
+    expect(r.verdict.indexOf("Unacknowledged writes")).toBeLessThan(
+      r.verdict.indexOf("Failure tax"),
+    ); // risk first
+    expect(r.arms.control.sessions).toBeGreaterThan(0);
+    // Move the last treatment row two weeks out: the span passes and so does the verdict.
+    let lastTreatment = -1;
+    rows.forEach((x, i) => {
+      if (x.arm === "treatment") lastTreatment = i;
+    });
+    const spread = rows.map((x, i) =>
+      i === lastTreatment ? { ...x, ts: new Date(t0 + 15 * 86_400_000).toISOString() } : x,
+    );
+    const passed = abReport(spread, {
+      since: new Date(t0 - 1000),
+      until: new Date(t0 + 16 * 86_400_000),
+      targetCallsPerArm: 30,
+    });
+    expect(passed.experiment.days).toBeCloseTo(15, 0);
+    expect(passed.verdict).toContain(
+      "Both arms passed the pre-registered minimum (14 days and 30 calls per arm)",
+    );
     const early = abReport(rows.slice(0, 10), {
       since: new Date(t0 - 1000),
       until: new Date(t0 + 1_000_000),
     });
     expect(early.verdict).toMatch(
-      /^\d+ more calls in the smaller arm before the pre-registered 2000 per arm/,
+      /^\d+ more calls in the smaller arm and 14 more days before the pre-registered minimum \(14 days or 2000 calls per arm/,
     );
     expect(early.differences.recoveryBytesPerCall.distinguishable).toBe(false);
     const empty = abReport([], { since: new Date(t0 - 1000), until: new Date(t0 + 1000) });
     expect(empty.arms.control.calls).toBe(0);
+    expect(empty.experiment).toEqual({ first: null, last: null, days: 0 });
+    expect(empty.differences.recoveryBytesPerCall).toMatchObject({ low: null, high: null });
+    expect(empty.verdict).toContain("not estimable");
     expect(empty.differences.unacknowledgedPer1kWrites).toMatchObject({
       delta: 0,
       distinguishable: false,
     });
+  });
+
+  it("computes Newcombe's interval for the failure-rate difference (10 of 100 against 5 of 100)", () => {
+    const rows: LedgerRow[] = [];
+    for (const [arm, failures] of [
+      ["control", 10],
+      ["treatment", 5],
+    ] as const)
+      for (let i = 0; i < 100; i++)
+        rows.push(
+          row({
+            tool: "echo",
+            at: i,
+            arm,
+            session: arm,
+            ...(i < failures ? { isError: true, errorClass: "semantic" as const } : {}),
+          }),
+        );
+    const d = abReport(rows, { since: new Date(t0 - 1000), until: new Date(t0 + 1_000_000) })
+      .differences.failureRatePct;
+    // By hand: Wilson 10/100 is 0.0552 to 0.1744, 5/100 is 0.0215 to 0.1118; Newcombe's limits
+    // are 0.05 - sqrt(0.0448^2 + 0.0618^2) and 0.05 + sqrt(0.0744^2 + 0.0285^2).
+    expect(d).toMatchObject({ control: 10, treatment: 5, delta: 5, distinguishable: false });
+    expect(d.low).toBeCloseTo(-2.63, 1);
+    expect(d.high).toBeCloseTo(12.96, 1);
   });
 
   it("parses durations and dates, and diffs shapes", () => {

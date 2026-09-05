@@ -181,20 +181,50 @@ feed the logs to the same analyzer with `--tap`.
 - Report the confidence interval, not only the point estimate. With the
   variance seen in run-to-run token totals, expect to need the full sample.
 
-Amendment, 2026-09-06 (0.13.0, ADR-0011): the arms are inside the
-boundary. `sayagain serve --arm coinflip` assigns each host session to
-control or treatment by coin (`--arm daily` assigns every session of a
-UTC day the same arm, so a day can be joined to a transcript audit); the
-control arm forwards every call as it came and records it, with no hold,
-dedupe, retry, repair, learned hint, description augmentation or guidance
-text. Every ledger row carries its arm. `sayagain report --ab` prints both
-arms with the definitions of section 3 and the differences with 95%
-intervals (Newcombe for rates, Welch for the per-call tax). The ledger
-measures bytes, not tokens, so the primary cost outcome in this
-implementation is recovery bytes per call (the wire's failure tax), with
-M9 unacknowledged writes per 1,000 writes as the primary risk outcome;
-M15b in tokens comes from `sayagain audit` per arm-day when `--arm daily`
-is used. The pre-registered minimum stays at 2,000 calls per arm.
+Amendment, 2026-09-06 (0.13.0, ADR-0011). Changed by this amendment, and
+why:
+
+- The arms are inside the boundary. `sayagain serve --arm coinflip`
+  assigns each host session (one MCP connection; the ledger has no task
+  boundary unless the host sends one) to control or treatment by coin;
+  `--arm daily` hashes the UTC date so every session of a day lands in
+  the same arm and a day can be joined to a transcript audit. The control
+  arm forwards every call as it came and records it: no hold, dedupe,
+  retry, repair, learned coercion, hint, description augmentation,
+  guidance text or announcement. Every ledger row carries its arm.
+- The primary cost outcome is the section-4 failure tax as a between-arm
+  difference, recovery bytes per call, control minus treatment (positive
+  favours the boundary), instead of M15b: a difference between arms needs
+  no counterfactual, and the ledger sees bytes, not tokens. M15b in
+  tokens comes from `sayagain audit` per arm-day when `--arm daily` is
+  used.
+- M9 unacknowledged writes per 1,000 writes is the primary risk outcome
+  (ADR-0009 decision 2) and is read first.
+- The failure rate (M1) replaces M15c and M15f as the secondary outcome:
+  M15c is printed per arm, and M15f is degenerate because the control arm
+  never dead-letters. M15e (overhead) is not measurable by this design,
+  since both arms pass through the proxy; it stays with
+  `scripts/bench/overhead.mjs`.
+- Intervals: Newcombe's hybrid score interval for the rates, a normal
+  interval on Welch's standard error for the per-call tax. Both treat
+  calls as independent; `report --ab` prints the number of sessions
+  (clusters) per arm so a borderline result is read with that in mind.
+  "Distinguishable" means the 95% interval excludes zero; it is not a
+  test at a stated alpha, and the three intervals are not corrected for
+  one another.
+- Decision rule, read once at the minimum: the proof passes if the risk
+  interval excludes zero in the boundary's favour and the cost interval
+  does not exclude zero against it. The report may be printed earlier;
+  interim readings neither stop nor extend the experiment.
+- The minimum is unchanged: two weeks or 2,000 calls per arm, whichever
+  is later; the verdict checks both.
+- Known weaknesses, stated: there is no blinding (the operator, who is
+  also the agents' user, can see the arm); the operator's hold decisions
+  are part of the treatment; the measured effect is the whole
+  intervention, mechanical actions and model-facing text together; the
+  treatment keeps learning during the experiment, from treatment rows
+  only; `daily` is predictable and confounded with day-of-week and
+  workload, so `coinflip` is the default.
 
 ### 5.5 Registry scan (whitepaper launch)
 

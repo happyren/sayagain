@@ -650,6 +650,8 @@ export function report(
 export interface ArmStats {
   arm: "control" | "treatment";
   calls: number;
+  /** Distinct sessions (else tasks, else the upstream as a whole) among the counted calls: the clusters behind the per-call intervals. */
+  sessions: number;
   writes: number;
   failures: number;
   failureRatePct: number;
@@ -678,9 +680,10 @@ export interface ArmDiff {
   control: number;
   treatment: number;
   delta: number;
-  low: number;
-  high: number;
-  /** The interval excludes zero. */
+  /** 95% interval; null when an arm is too small to estimate one (no calls for a rate, fewer than two for a mean). */
+  low: number | null;
+  high: number | null;
+  /** The interval excludes zero: not a test at a stated alpha, and the three differences are not corrected for one another. */
   distinguishable: boolean;
 }
 
@@ -689,7 +692,11 @@ export interface AbReport {
   window: { since: string; until: string; days: number };
   /** The pre-registered minimum per arm before the numbers are read (docs/measurement.md 5.4). */
   targetCallsPerArm: number;
-  /** Rows in the window that carry no arm: calls made outside the experiment. */
+  /** The pre-registered minimum span: the experiment ends two weeks or the target calls per arm in, whichever is later. */
+  minimumDays: number;
+  /** The span of the armed rows in the window: the experiment as the ledger saw it. */
+  experiment: { first: string | null; last: string | null; days: number };
+  /** Rows in the window that carry no arm: calls made outside the experiment, on the same definition as `calls`. */
   outside: number;
   arms: { control: ArmStats; treatment: ArmStats };
   differences: {
@@ -717,23 +724,27 @@ const wilsonFrac = (k: number, n: number): { p: number; low: number; high: numbe
 
 /** Newcombe's hybrid score interval for a difference of proportions (control minus treatment). */
 function proportionDiff(k1: number, n1: number, k2: number, n2: number, scale: number): ArmDiff {
-  const a = wilsonFrac(k1, n1);
-  const b = wilsonFrac(k2, n2);
+  const a = wilsonFrac(Math.min(k1, n1), n1);
+  const b = wilsonFrac(Math.min(k2, n2), n2);
   const delta = a.p - b.p;
   const low = delta - Math.sqrt((a.p - a.low) ** 2 + (b.high - b.p) ** 2);
   const high = delta + Math.sqrt((a.high - a.p) ** 2 + (b.p - b.low) ** 2);
   const r = (x: number) => +(scale * x).toFixed(scale >= 1000 ? 1 : 2);
+  const estimable = n1 > 0 && n2 > 0;
   return {
     control: r(a.p),
     treatment: r(b.p),
     delta: r(delta),
-    low: r(low),
-    high: r(high),
-    distinguishable: n1 > 0 && n2 > 0 && (low > 0 || high < 0),
+    low: estimable ? r(low) : null,
+    high: estimable ? r(high) : null,
+    distinguishable: estimable && (low > 0 || high < 0),
   };
 }
 
-/** Welch interval for a difference of means over per-call series (control minus treatment). */
+/**
+ * Difference of means over per-call series (control minus treatment): a normal interval on Welch's
+ * standard error. Fine at the pre-registered sample; anticonservative for a handful of calls.
+ */
 function meanDiff(a: number[], b: number[]): ArmDiff {
   const stats = (xs: number[]) => {
     const n = xs.length;
@@ -744,19 +755,23 @@ function meanDiff(a: number[], b: number[]): ArmDiff {
   const x = stats(a);
   const y = stats(b);
   const delta = x.mean - y.mean;
-  const se = x.n && y.n ? Math.sqrt(x.variance / x.n + y.variance / y.n) : Number.POSITIVE_INFINITY;
+  const estimable = x.n > 1 && y.n > 1;
+  const se = estimable ? Math.sqrt(x.variance / x.n + y.variance / y.n) : 0;
+  const low = delta - Z * se;
+  const high = delta + Z * se;
   const r = (v: number) => Math.round(v);
-  const low = Number.isFinite(se) ? delta - Z * se : Number.NEGATIVE_INFINITY;
-  const high = Number.isFinite(se) ? delta + Z * se : Number.POSITIVE_INFINITY;
   return {
     control: r(x.mean),
     treatment: r(y.mean),
     delta: r(delta),
-    low: Number.isFinite(low) ? r(low) : 0,
-    high: Number.isFinite(high) ? r(high) : 0,
-    distinguishable: Number.isFinite(se) && x.n > 1 && y.n > 1 && (low > 0 || high < 0),
+    low: estimable ? r(low) : null,
+    high: estimable ? r(high) : null,
+    distinguishable: estimable && (low > 0 || high < 0),
   };
 }
+
+/** The pre-registered minimum span of the experiment, in days (docs/measurement.md 5.4). */
+export const AB_MINIMUM_DAYS = 14;
 
 /** The A/B protocol's page: both arms with the report's definitions, and the differences with intervals. */
 export function abReport(
@@ -767,7 +782,28 @@ export function abReport(
   const target = opts.targetCallsPerArm ?? 2000;
   const rows = selectRows(allRows, { ...opts, until });
   const inWin = (r: LedgerRow) => inWindow(r, opts.since);
-  const outside = finalRows(rows).filter((r) => inWin(r) && r.arm === undefined).length;
+  // One definition of a counted call for the arms, the outside count and the span: a final row in the window
+  // that was neither answered from the cache nor left waiting.
+  const counted = (r: LedgerRow) => inWin(r) && r.status !== "deduplicated" && r.status !== "held";
+  const countedRows = finalRows(rows).filter(counted);
+  const outside = countedRows.filter((r) => r.arm === undefined).length;
+  let first = Number.POSITIVE_INFINITY;
+  let last = Number.NEGATIVE_INFINITY;
+  for (const r of countedRows) {
+    if (r.arm === undefined) continue;
+    const at = Date.parse(r.ts);
+    if (!Number.isFinite(at)) continue;
+    if (at < first) first = at;
+    if (at > last) last = at;
+  }
+  const experiment =
+    first <= last
+      ? {
+          first: new Date(first).toISOString(),
+          last: new Date(last).toISOString(),
+          days: +((last - first) / 86_400_000).toFixed(1),
+        }
+      : { first: null, last: null, days: 0 };
   const series: Record<"control" | "treatment", number[]> = { control: [], treatment: [] };
   const arm = (which: "control" | "treatment"): ArmStats => {
     const own = rows.filter((r) => r.arm === which);
@@ -779,16 +815,19 @@ export function abReport(
     );
     series[which] = outcomes.map((r) => byReceipt.get(r.receipt) ?? 0);
     const failures = rep.byServer.reduce((a, s) => a + s.failures, 0);
+    const bytes = series[which];
     return {
       arm: which,
       calls: rep.calls,
+      sessions: streams(outcomes).length,
       writes: rep.writes,
       failures,
       failureRatePct: pct(failures, rep.calls),
       unacknowledged: rep.unacknowledged.count,
       unacknowledgedPer1kWrites: rep.northStar.unacknowledgedWritesPer1kWrites,
-      recoveryBytesPerCall: rep.calls
-        ? Math.round(rep.northStar.failureTaxBytesPer1kCalls / 1000)
+      // The mean of the same series the interval is computed on, so the table and the difference agree.
+      recoveryBytesPerCall: bytes.length
+        ? Math.round(bytes.reduce((a, b) => a + b, 0) / bytes.length)
         : 0,
       recovery: {
         recovered: rep.recovery.recovered,
@@ -825,16 +864,27 @@ export function abReport(
       100,
     ),
   };
-  const short = Math.max(0, target - Math.min(control.calls, treatment.calls));
+  const shortCalls = Math.max(0, target - Math.min(control.calls, treatment.calls));
+  const shortDays = Math.max(0, +(AB_MINIMUM_DAYS - experiment.days).toFixed(1));
   const cost = differences.recoveryBytesPerCall;
   const risk = differences.unacknowledgedPer1kWrites;
-  const say = (d: ArmDiff, unit: string) =>
-    d.distinguishable
-      ? d.delta > 0
-        ? `treatment lowers it by ${Math.abs(d.delta)} ${unit} (95% ${d.low} to ${d.high})`
-        : `treatment raises it by ${Math.abs(d.delta)} ${unit} (95% ${d.low} to ${d.high})`
-      : `not distinguishable from zero yet (${d.delta} ${unit}, 95% ${d.low} to ${d.high})`;
-  const verdict = `${short ? `${short} more calls in the smaller arm before the pre-registered ${target} per arm. ` : `Both arms passed the pre-registered ${target} calls. `}Failure tax per call: ${say(cost, "bytes")}. Unacknowledged writes: ${say(risk, "per 1K writes")}.`;
+  const say = (d: ArmDiff, unit: string) => {
+    if (d.low === null || d.high === null) return `not estimable (${d.delta} ${unit})`;
+    if (!d.distinguishable)
+      return `not distinguishable from zero (${d.delta} ${unit}, 95% ${d.low} to ${d.high})`;
+    return d.low > 0
+      ? `treatment lowers it by ${Math.abs(d.delta)} ${unit} (95% ${d.low} to ${d.high})`
+      : `treatment raises it by ${Math.abs(d.delta)} ${unit} (95% ${d.low} to ${d.high})`;
+  };
+  const needs = [
+    shortCalls ? `${shortCalls} more calls in the smaller arm` : "",
+    shortDays ? `${shortDays} more days` : "",
+  ].filter(Boolean);
+  const minimum = needs.length
+    ? `${needs.join(" and ")} before the pre-registered minimum (${AB_MINIMUM_DAYS} days or ${target} calls per arm, whichever is later). `
+    : `Both arms passed the pre-registered minimum (${AB_MINIMUM_DAYS} days and ${target} calls per arm). `;
+  // Risk first, then cost (ADR-0009 decision 2).
+  const verdict = `${minimum}Unacknowledged writes: ${say(risk, "per 1K writes")}. Failure tax per call: ${say(cost, "bytes")}.`;
   const windowMs = until.getTime() - opts.since.getTime();
   return {
     generatedAt: new Date().toISOString(),
@@ -844,6 +894,8 @@ export function abReport(
       days: +(windowMs / 86_400_000).toFixed(1),
     },
     targetCallsPerArm: target,
+    minimumDays: AB_MINIMUM_DAYS,
+    experiment,
     outside,
     arms: { control, treatment },
     differences,

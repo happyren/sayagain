@@ -26,7 +26,7 @@ export interface HeldInfo {
 
 /** An A/B arm: control observes and records only; treatment is the boundary as shipped. */
 export type Arm = "control" | "treatment";
-/** How a daemon or wrap assigns arms: one arm for every session, a coin per session, or a coin per UTC day. */
+/** How a daemon or wrap assigns arms: one arm for every session, a coin per session, or a hash of the UTC date, so every session of a day, on every server, lands in the same arm. */
 export type ArmMode = Arm | "coinflip" | "daily";
 export const ARM_MODES: readonly ArmMode[] = ["control", "treatment", "coinflip", "daily"];
 export const isArmMode = (s: string): s is ArmMode => (ARM_MODES as readonly string[]).includes(s);
@@ -572,6 +572,19 @@ export function abandonedResponse(call: PendingCall, reason: string): JsonRpcRes
       code: -32000,
       message: `Say Again: ${reason}. Receipt ${call.receipt}; the call is dead-lettered for an operator to replay.`,
       data: { [META.receipt]: call.receipt, [META.status]: "dead-lettered" },
+    },
+  };
+}
+
+/** The control arm's answer to a call the upstream never answered: the reason, nothing more. */
+export function unansweredResponse(call: PendingCall, reason: string): JsonRpcResponse {
+  return {
+    jsonrpc: "2.0",
+    id: call.id,
+    error: {
+      code: -32000,
+      message: reason,
+      data: { [META.receipt]: call.receipt, [META.status]: "executed" },
     },
   };
 }

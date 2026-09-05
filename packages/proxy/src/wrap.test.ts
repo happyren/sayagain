@@ -68,10 +68,11 @@ function harness(
         clientInfo: { name: "t", version: "0" },
       },
     });
-    await waitFor("init");
+    const init = await waitFor("init");
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
     send({ jsonrpc: "2.0", id: "list", method: "tools/list", params: {} });
     await waitFor("list");
+    return init;
   };
   const finish = async () => {
     input.end();
@@ -556,7 +557,8 @@ describe("lifecycle", () => {
   it("in the control arm forwards, records and does nothing else", async () => {
     const h = harness({ hold: "destructive" }, { arm: "control" });
     try {
-      await h.handshake();
+      // The control arm's model reads nothing from the boundary: no announcement in instructions.
+      expect(JSON.stringify(await h.handshake())).not.toContain("Say Again");
       // A coercible failure is not repaired: the upstream's error reaches the host as it was.
       h.call(1, "strict", { limit: "10" });
       const failed = await h.waitFor(1);
@@ -600,7 +602,7 @@ describe("lifecycle", () => {
   it("in the treatment arm behaves as shipped and stamps the arm on every row", async () => {
     const h = harness({ hold: "destructive" }, { arm: "treatment" });
     try {
-      await h.handshake();
+      expect(JSON.stringify(await h.handshake())).toContain("Say Again"); // the announcement, as shipped
       h.call(1, "strict", { limit: "10" });
       expect(meta(await h.waitFor(1))["sh.sayagain/status"]).toBe("repaired");
       await h.finish();

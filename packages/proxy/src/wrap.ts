@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
  * with the host on this process's own stdin and stdout.
  */
 import type { Readable, Writable } from "node:stream";
-import { type ArmMode, pickArm } from "./boundary.js";
+import { type Arm, type ArmMode, pickArm } from "./boundary.js";
 import { type DeadLetterSummary, startControlServer, summarizeDeadLetter } from "./control.js";
 import { Boundary } from "./core.js";
 import { DeadLetterStore } from "./deadletter.js";
@@ -96,12 +96,15 @@ export function wrap(options: WrapOptions): Wrapped {
   if (options.replayTimeoutMs !== undefined) coreOptions.replayTimeoutMs = options.replayTimeoutMs;
   const boundary = new Boundary(coreOptions);
 
-  const arm = options.arm ? pickArm(options.arm) : undefined;
-  if (arm) log(`sayagain: this wrap runs in the ${arm} arm (${options.arm})`);
+  const fixedArm = options.arm ? pickArm(options.arm) : undefined;
+  if (fixedArm) log(`sayagain: this wrap runs in the ${fixedArm} arm (${options.arm})`);
   const session = {
     id: `stdio-${process.pid}`,
     send: (msg: unknown) => output.write(`${JSON.stringify(msg)}\n`),
-    ...(arm ? { arm } : {}),
+    // daily follows the calendar: a wrap that crosses midnight changes arm with the day.
+    get arm(): Arm | undefined {
+      return options.arm === "daily" ? pickArm("daily") : fixedArm;
+    },
   };
   boundary.attach(session);
 

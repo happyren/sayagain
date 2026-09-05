@@ -581,6 +581,41 @@ describe("daemon", () => {
     expect(await api(plain, "/api/health")).toMatchObject({ arm: null });
   });
 
+  it("pins the treatment arm, keeps one arm per session under coinflip, and gives sessionless calls one arm for the daemon's lifetime", {
+    timeout: 15_000,
+  }, async () => {
+    const call = (id: number) => ({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: "echo", arguments: { id } },
+    });
+    const pinned = await boot("memory", { arm: "treatment" });
+    expect(await api(pinned, "/api/health")).toMatchObject({ arm: "treatment" });
+    const pinnedSession = (await rpc(pinned, "fake", initMsg)).session ?? "";
+    expect((await rpc(pinned, "fake", call(2), { session: pinnedSession })).status).toBe(200);
+    const [pinnedRow] = (await api(pinned, "/api/ledger?tail=1")) as { arm?: string }[];
+    expect(pinnedRow?.arm).toBe("treatment"); // a pinned treatment run is inside the experiment
+    await pinned.close();
+
+    const flip = await boot("memory", { arm: "coinflip" });
+    const session = (await rpc(flip, "fake", initMsg)).session ?? "";
+    for (const id of [2, 3, 4])
+      expect((await rpc(flip, "fake", call(id), { session })).status).toBe(200);
+    for (const id of [5, 6, 7]) expect((await rpc(flip, "fake", call(id))).status).toBe(200);
+    const rows = (await api(flip, "/api/ledger?tail=6")) as { arm?: string; session?: string }[];
+    expect(rows).toHaveLength(6);
+    const inSession = rows.filter((r) => r.session === session);
+    const sessionless = rows.filter((r) => r.session !== session);
+    expect(inSession).toHaveLength(3);
+    expect(sessionless).toHaveLength(3);
+    expect(new Set(inSession.map((r) => r.arm)).size).toBe(1); // one coin per session
+    expect(new Set(sessionless.map((r) => r.arm)).size).toBe(1); // one coin per daemon for sessionless calls
+    expect(rows.every((r) => r.arm === "control" || r.arm === "treatment")).toBe(true);
+    expect(logs.some((l) => l.includes("calls without a session id run in the"))).toBe(true);
+    await flip.close();
+  });
+
   it("applies a learned coercion before a safe call leaves, augments tools/list, hints on a known failure, and obeys revert", async () => {
     const seeded = {
       version: 1,

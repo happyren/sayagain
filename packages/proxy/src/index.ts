@@ -5,6 +5,7 @@
  */
 export { classify, META, PROWORD, REPAIR_BUDGET } from "@sayagain/sdk";
 export {
+  AB_MINIMUM_DAYS,
   type AbReport,
   type AnalysisOptions,
   type ArmDiff,
