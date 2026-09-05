@@ -35,6 +35,14 @@ export interface ServerConfig {
 export interface Registry {
   servers: Record<string, ServerConfig>;
   daemon?: { listen?: string; store?: Exclude<StoreKind, "memory">; db?: string; otlp?: string };
+  /** `sayagain contribute` settings (ADR-0009): contributor id, consent, endpoint, weekly. */
+  contribute?: {
+    contributor?: string;
+    consent?: { termsVersion: string; acceptedAt: string };
+    endpoint?: string;
+    weekly?: boolean;
+    lastSentAt?: string;
+  };
 }
 
 export interface DaemonInfo {
@@ -55,7 +63,11 @@ export function loadRegistry(): Registry {
   if (!existsSync(p)) return { servers: {} };
   try {
     const parsed = JSON.parse(readFileSync(p, "utf8")) as Partial<Registry>;
-    return { servers: parsed.servers ?? {}, ...(parsed.daemon ? { daemon: parsed.daemon } : {}) };
+    return {
+      servers: parsed.servers ?? {},
+      ...(parsed.daemon ? { daemon: parsed.daemon } : {}),
+      ...(parsed.contribute ? { contribute: parsed.contribute } : {}),
+    };
   } catch (err) {
     throw new Error(`${p} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
   }

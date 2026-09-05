@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-05
+
+### Added
+
+- `sayagain audit`: the one page from `docs/measurement.md` section 6 over
+  your own Claude Code, Codex and Cursor transcripts (Phase 0 of the
+  roadmap). The 0.6 analysis runs over transcript rows: unacknowledged
+  writes first, then the failure tax in dollars (tokens priced at list),
+  failures by server, duplicates, recovery cost, sessions that ended on a
+  failure, what moved against the previous window, and the tools most prone
+  to mis-calls with their masked signatures. Writes a static HTML page to
+  `~/.sayagain/audit/` (or `--html <file>`) that carries names, counts and
+  masked signatures and nothing else. `--source`, `--dir`, `--since`,
+  `--min-calls`, `--top`, `--json`, `--no-html`. The `scripts/baseline`
+  analyzer stays as the pre-registered instrument.
+- `sayagain contribute`: the opt-in shape contribution of ADR-0009. Builds
+  the `sayagain.shape/1` document from the ledger or a host's transcripts,
+  writes it to `~/.sayagain/contributions/` first, prints it in full, and
+  sends it only after a `y` (or `--yes`) to the endpoint you name, once
+  `--accept-terms 2026-09-05` has been given. No endpoint exists yet
+  (decision 3): without one the command stops after writing. `--status`,
+  `--weekly on|off` (the daemon then sends one document a week from the
+  ledger; `SAYAGAIN_CONTRIBUTE=0` stops it), `--forget` (deletes on the
+  index and rotates the contributor id). `docs/CONTRIBUTING-DATA.md` is the
+  terms document. A structural check refuses any document with a field
+  outside the schema, a name with a path in it, or a value where a shape
+  belongs.
+- Transcript readers for Claude Code (`~/.claude/projects`), Codex
+  (`~/.codex/sessions`) and Cursor (`~/.cursor/projects/*/agent-transcripts`)
+  turn sessions into ledger rows: tool names, argument shapes and hashes,
+  masked signatures, tokens and timestamps; argument values, results and
+  prompts are dropped in memory.
+
+### Changed
+
+- The analysis knows two error classes only transcript rows carry:
+  `interrupt` (the user stopped the call) and `no-result` (the file has no
+  result). Both count as unknown outcomes for a write (M9) and not as
+  failures (M1). Recovery windows now list their rows.
+
 ## [0.9.0] - 2026-09-05
 
 ### Changed

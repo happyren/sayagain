@@ -22,6 +22,8 @@ export interface AnalysisOptions {
 
 export interface Recovery {
   row: LedgerRow;
+  /** The window's rows: the failure first, the recovering call last when there was one. */
+  rows: LedgerRow[];
   recovered: boolean;
   /** Rows between the failure and the next success of the same tool (capped). */
   calls: number;
@@ -143,6 +145,16 @@ export interface Report {
 /** Signatures the boundary writes itself when it abandons a call. */
 export const BOUNDARY_SIGNATURE = /^sayagain: /;
 
+/**
+ * Error classes only transcript rows carry (`sayagain audit`): the user stopped the call, or the
+ * file has no result for it. Neither is a failure of the tool; both leave a write's outcome
+ * unknown (M9). The boundary never writes them.
+ */
+export const UNKNOWN_OUTCOME_CLASSES: ReadonlySet<string> = new Set(["interrupt", "no-result"]);
+/** An error row that counts as a failure (M1): everything but an unknown outcome. */
+export const isFailure = (r: LedgerRow): boolean =>
+  r.isError && !UNKNOWN_OUTCOME_CLASSES.has(r.errorClass ?? "");
+
 const quantile = (xs: number[], q: number): number => {
   if (!xs.length) return 0;
   const s = [...xs].sort((a, b) => a - b);
@@ -231,10 +243,11 @@ export function recoveries(rows: LedgerRow[], opts: AnalysisOptions = {}): Recov
   for (const stream of streams(rows)) {
     for (let i = 0; i < stream.length; i++) {
       const r = stream[i] as LedgerRow;
-      if (!r.isError || r.status === "deduplicated" || !inWindow(r, opts.since)) continue;
+      if (!isFailure(r) || r.status === "deduplicated" || !inWindow(r, opts.since)) continue;
       let recovered = false;
       let calls = 0;
       let bytes = bytesOf(r);
+      const window: LedgerRow[] = [r];
       const path: string[] = [];
       let shapeChange: string | undefined;
       let retried = false;
@@ -242,6 +255,7 @@ export function recoveries(rows: LedgerRow[], opts: AnalysisOptions = {}): Recov
       for (let j = i + 1; j < stream.length && calls < cap; j++) {
         const n = stream[j] as LedgerRow;
         bytes += bytesOf(n);
+        window.push(n);
         if (sameTool(n, r) && j - i <= 3) {
           retried = true;
           if (n.argsHash === r.argsHash) identicalRetry = true;
@@ -256,6 +270,7 @@ export function recoveries(rows: LedgerRow[], opts: AnalysisOptions = {}): Recov
       }
       out.push({
         row: r,
+        rows: window,
         recovered,
         calls: recovered ? calls : cap,
         bytes,
@@ -388,7 +403,7 @@ export function toolStats(rows: LedgerRow[], opts: AnalysisOptions = {}): ToolSt
     if (r.status === "repaired") a.boundary.repaired++;
     if (r.held?.decision === "approve") a.boundary.held++;
     if (r.status === "dead-lettered") a.boundary.deadLettered++;
-    if (!r.isError) continue;
+    if (!isFailure(r)) continue;
     a.failures++;
     const boundaryMade = BOUNDARY_SIGNATURE.test(r.errorSignature ?? "");
     if (!boundaryMade && (r.errorClass === "coercible" || r.errorClass === "semantic"))
@@ -478,11 +493,13 @@ export function signatureStats(rows: LedgerRow[], opts: AnalysisOptions = {}): S
 }
 
 /** A write whose outcome nobody acknowledged: dead-lettered, failed with an unknown outcome, or held for that reason and never approved. */
-const unacknowledged = (r: LedgerRow): boolean =>
+export const isUnacknowledged = (r: LedgerRow): boolean =>
   isWrite(r) &&
   (r.status === "dead-lettered" ||
     (r.status === "held" && r.held?.mode === "unknown-outcome" && r.held.decision !== "approve") ||
-    (r.status !== "held" && r.isError && r.errorClass === "retryable"));
+    (r.status !== "held" &&
+      r.isError &&
+      (r.errorClass === "retryable" || UNKNOWN_OUTCOME_CLASSES.has(r.errorClass ?? ""))));
 
 function windowNumbers(
   allRows: LedgerRow[],
@@ -507,8 +524,8 @@ export function report(
   const rows = selectRows(allRows, { ...opts, until });
   const { outcomes, finals, recs, wasteBytes } = windowNumbers(allRows, opts, opts.since, until);
   const writes = outcomes.filter(isWrite);
-  const failures = outcomes.filter((r) => r.isError);
-  const unack = finals.filter(unacknowledged);
+  const failures = outcomes.filter(isFailure);
+  const unack = finals.filter(isUnacknowledged);
   const dup = duplicateWrites(rows, { ...opts, since: opts.since });
   const dedup = rows.filter((r) => r.status === "deduplicated" && inWindow(r, opts.since));
   const countBy = (xs: LedgerRow[]) => {
@@ -530,7 +547,7 @@ export function report(
       byServer.set(r.upstream, s);
     }
     s.calls++;
-    if (r.isError) {
+    if (isFailure(r)) {
       s.failures++;
       bump(s.classes, r.errorClass ?? "other");
     }
@@ -620,10 +637,7 @@ export function report(
   if (previous.outcomes.length)
     out.previous = {
       calls: previous.outcomes.length,
-      failureRatePct: pct(
-        previous.outcomes.filter((r) => r.isError).length,
-        previous.outcomes.length,
-      ),
+      failureRatePct: pct(previous.outcomes.filter(isFailure).length, previous.outcomes.length),
       deadLettered: previous.outcomes.filter((r) => r.status === "dead-lettered").length,
       failureTaxBytesPer1kCalls: Math.round(
         (1000 * previous.wasteBytes) / previous.outcomes.length,

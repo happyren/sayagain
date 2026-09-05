@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { grade, lintTool, type ToolDefinition } from "@sayagain/lint";
 import {
@@ -12,6 +13,7 @@ import {
   signatureStats,
   toolStats,
 } from "./analysis.js";
+import { renderAuditHtml, renderAuditText, runAudit } from "./audit.js";
 import {
   allDeadLetters,
   allHolds,
@@ -26,8 +28,19 @@ import {
   replayAnywhere,
   stopDaemon,
 } from "./client-api.js";
+import {
+  buildShapeDocument,
+  checkEndpoint,
+  contributeSettings,
+  forgetContributor,
+  sendContribution,
+  summarizeDocument,
+  TERMS_VERSION,
+  writeContribution,
+} from "./contribute.js";
 import { startDaemon } from "./daemon.js";
 import { defaultDeadLetterPath, readDeadLetters } from "./deadletter.js";
+import { homePath } from "./home.js";
 import {
   HOST_IDS,
   HOSTS,
@@ -58,6 +71,14 @@ import {
 } from "./registry.js";
 import { daemonHealthy, ensureDaemon, runStdioShim, serveArgv, waitForDaemon } from "./shim.js";
 import { defaultSqlitePath, openStores, type StoreKind } from "./stores.js";
+import {
+  isTranscriptSource,
+  type RowExtra,
+  scanTranscripts,
+  sessionRows,
+  TRANSCRIPT_SOURCES,
+  type TranscriptSource,
+} from "./transcripts.js";
 import { PROXY_VERSION } from "./version.js";
 import { wrap } from "./wrap.js";
 
@@ -113,6 +134,19 @@ const USAGE = `sayagain ${PROXY_VERSION}
       Switch one intervention off or on. --apply <id> lets a coercion change read-only calls before they leave
       (by default the loop only advises: the hint, and the repair after a failure); --advise <id> switches it back.
       --report <server> prints a tool definition report. A wrap picks changes up within seconds.
+  sayagain audit [--source claude-code|codex|cursor|all] [--dir <path>] [--since 30d] [--min-calls 10] [--top 15]
+                 [--html <file>|--no-html] [--json]
+      The one page from docs/measurement.md over your own transcripts (Claude Code, Codex, Cursor), risk first:
+      unacknowledged writes, the failure tax in dollars, failures by server, duplicates, recovery, the tools most
+      prone to mis-calls. Writes a shareable HTML page (names, counts and masked signatures; never arguments).
+  sayagain contribute [--source ledger|claude-code|codex|cursor] [--dir <path>] [--since 30d] [--yes]
+                      [--accept-terms <version>] [--endpoint <url>] [--json]
+      Build the contributed-shape document of ADR-0009 (tool names, counts, error classes, argument shapes,
+      hashed signatures; nothing else), write it to ~/.sayagain/contributions, print it, and send it only after
+      a y to the endpoint you name. No endpoint is configured yet: without one the command stops after writing.
+  sayagain contribute --status | --weekly on|off | --forget
+      Show the contributor id and settings; let the daemon send weekly (endpoint and accepted terms required);
+      rotate the id and ask the index to delete the old one's data.
   sayagain lint <name>|--all [--file <tools.json>] [--fail-below A|B|C|D] [--json]
       Grade a server's tool definitions with @sayagain/lint (starts the upstream through the daemon if needed).
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
@@ -153,6 +187,20 @@ function takeAll(args: string[], name: string): string[] {
     v = takeOption(args, name);
   }
   return out;
+}
+
+function parseTranscriptSource(s: string): TranscriptSource {
+  if (!isTranscriptSource(s))
+    throw new UsageError(`--source expects claude-code, codex or cursor; got ${JSON.stringify(s)}`);
+  return s;
+}
+
+function checkEndpointOrUsage(endpoint: string): void {
+  try {
+    checkEndpoint(endpoint);
+  } catch (err) {
+    throw new UsageError(err instanceof Error ? err.message : String(err));
+  }
 }
 
 function takeFlag(args: string[], name: string): boolean {
@@ -978,6 +1026,236 @@ export async function main(argv: string[]): Promise<number> {
     }
     process.stdout.write(
       "\nMode advise offers a coercion as a repair after a failure; mode apply also changes read-only calls before they leave.\nsayagain learn --disable <id> turns one off; --enable <id> turns it back on; --apply <id> and --advise <id> switch a coercion's mode; --report <server> writes the upstream report\n",
+    );
+    return 0;
+  }
+
+  if (command === "audit") {
+    const opts = [...rest];
+    const json = takeFlag(opts, "--json");
+    const noHtml = takeFlag(opts, "--no-html");
+    const htmlOut = takeOption(opts, "--html");
+    const sourceOption = takeOption(opts, "--source") ?? "all";
+    const dir = takeOption(opts, "--dir");
+    const sinceOption = takeOption(opts, "--since") ?? "30d";
+    const minCalls = takeNumber(opts, "--min-calls");
+    const top = takeNumber(opts, "--top");
+    if (opts.length) throw new UsageError(`audit: unknown option ${opts[0]}`);
+    const sources: TranscriptSource[] =
+      sourceOption === "all" ? [...TRANSCRIPT_SOURCES] : [parseTranscriptSource(sourceOption)];
+    if (dir && sources.length !== 1)
+      throw new UsageError("audit: --dir needs --source to say which host wrote the files");
+    let since: Date;
+    try {
+      since = parseSince(sinceOption);
+    } catch (err) {
+      throw new UsageError(err instanceof Error ? err.message : String(err));
+    }
+    if (since.getTime() >= Date.now()) throw new UsageError("audit: --since must be in the past");
+    // The page compares with the window before this one, so read twice as far back.
+    const loadFrom = new Date(since.getTime() - (Date.now() - since.getTime()));
+    const scan = scanTranscripts({
+      sources,
+      since: loadFrom,
+      ...(dir && sources[0] ? { dirs: { [sources[0]]: resolve(dir) } } : {}),
+    });
+    const audit = runAudit(
+      scan.sessions,
+      {
+        since,
+        version: PROXY_VERSION,
+        ...(minCalls !== undefined ? { minCalls: Math.max(1, minCalls) } : {}),
+        ...(top !== undefined ? { top: Math.max(1, top) } : {}),
+      },
+      scan.files,
+    );
+    if (json) process.stdout.write(`${JSON.stringify(audit, null, 2)}\n`);
+    else process.stdout.write(renderAuditText(audit));
+    if (!noHtml) {
+      const path =
+        htmlOut !== undefined
+          ? resolve(htmlOut)
+          : homePath("audit", `${audit.generatedAt.replace(/[:.]/g, "-")}.html`);
+      mkdirSync(resolve(path, ".."), { recursive: true, mode: 0o700 });
+      writeFileSync(path, renderAuditHtml(audit), { mode: 0o600 });
+      if (!json) process.stdout.write(`HTML page: ${path}\n`);
+    }
+    if (!scan.sessions.length && !json) {
+      const looked = sources.map((s) => `${s}: ${scan.dirs[s]}`).join(", ");
+      process.stdout.write(
+        `No transcripts found since ${loadFrom.toISOString().slice(0, 10)} (${looked}).\n`,
+      );
+    }
+    return 0;
+  }
+
+  if (command === "contribute") {
+    const opts = [...rest];
+    const json = takeFlag(opts, "--json");
+    const yes = takeFlag(opts, "--yes");
+    const status = takeFlag(opts, "--status");
+    const forget = takeFlag(opts, "--forget");
+    const weekly = takeOption(opts, "--weekly");
+    const acceptTerms = takeOption(opts, "--accept-terms");
+    const endpointOption = takeOption(opts, "--endpoint");
+    const sourceOption = takeOption(opts, "--source") ?? "ledger";
+    const dir = takeOption(opts, "--dir");
+    const sinceOption = takeOption(opts, "--since") ?? "30d";
+    const ledgerOption = takeOption(opts, "--ledger");
+    if (opts.length) throw new UsageError(`contribute: unknown option ${opts[0]}`);
+    const registry = loadRegistry();
+    const settings = contributeSettings(registry);
+    const contributor = settings.contributor as string;
+    if (acceptTerms !== undefined) {
+      if (acceptTerms !== TERMS_VERSION)
+        throw new UsageError(
+          `contribute: the current terms are version ${TERMS_VERSION} (docs/CONTRIBUTING-DATA.md); got ${JSON.stringify(acceptTerms)}`,
+        );
+      settings.consent = { termsVersion: TERMS_VERSION, acceptedAt: new Date().toISOString() };
+      saveRegistry(registry);
+    }
+    if (endpointOption !== undefined) {
+      checkEndpointOrUsage(endpointOption);
+      settings.endpoint = endpointOption;
+      saveRegistry(registry);
+    }
+    const endpoint = settings.endpoint;
+    const consented = settings.consent?.termsVersion === TERMS_VERSION;
+    if (weekly !== undefined) {
+      if (weekly !== "on" && weekly !== "off")
+        throw new UsageError("contribute: --weekly takes on or off");
+      if (weekly === "on" && !endpoint)
+        throw new UsageError("contribute: --weekly on needs an endpoint (--endpoint <url>)");
+      if (weekly === "on" && !consented)
+        throw new UsageError(`contribute: --weekly on needs --accept-terms ${TERMS_VERSION} first`);
+      settings.weekly = weekly === "on";
+      saveRegistry(registry);
+      process.stdout.write(`weekly contribution: ${weekly}\n`);
+      return 0;
+    }
+    if (forget) {
+      const old = contributor;
+      if (endpoint) {
+        const code = await forgetContributor(old, endpoint, PROXY_VERSION);
+        process.stdout.write(`the index answered ${code} to the deletion of ${old}\n`);
+      }
+      delete settings.contributor;
+      delete settings.lastSentAt;
+      settings.weekly = false;
+      contributeSettings(registry);
+      process.stdout.write(
+        `contributor id rotated: ${old} -> ${settings.contributor}; weekly contribution off${endpoint ? "" : " (no endpoint: nothing to delete remotely)"}\n`,
+      );
+      return 0;
+    }
+    if (status) {
+      const s = {
+        contributor,
+        consent: settings.consent ?? null,
+        termsVersion: TERMS_VERSION,
+        endpoint: endpoint ?? null,
+        weekly: settings.weekly ?? false,
+        lastSentAt: settings.lastSentAt ?? null,
+        contributions: homePath("contributions"),
+      };
+      process.stdout.write(
+        json
+          ? `${JSON.stringify(s, null, 2)}\n`
+          : `contributor  ${s.contributor}\nterms        ${s.consent ? `${s.consent.termsVersion} accepted ${s.consent.acceptedAt}` : `not accepted (current: ${TERMS_VERSION})`}\nendpoint     ${s.endpoint ?? "none (ADR-0009 decision 3 pending)"}\nweekly       ${s.weekly ? "on" : "off"}\nlast sent    ${s.lastSentAt ?? "never"}\ndocuments    ${s.contributions}\n`,
+      );
+      return 0;
+    }
+    let since: Date;
+    try {
+      since = parseSince(sinceOption);
+    } catch (err) {
+      throw new UsageError(err instanceof Error ? err.message : String(err));
+    }
+    if (since.getTime() >= Date.now())
+      throw new UsageError("contribute: --since must be in the past");
+    const consent = settings.consent ?? { termsVersion: "none", acceptedAt: "" };
+    let rows: LedgerRow[];
+    let extras = new Map<string, RowExtra>();
+    let sessions: number | undefined;
+    let source: Parameters<typeof buildShapeDocument>[1]["source"];
+    if (sourceOption === "ledger") {
+      if (dir) throw new UsageError("contribute: --dir goes with a transcript --source");
+      rows = await loadRowsSince(since, ledgerOption);
+      source = "ledger";
+    } else {
+      const host = parseTranscriptSource(sourceOption);
+      const scan = scanTranscripts({
+        sources: [host],
+        since,
+        ...(dir ? { dirs: { [host]: resolve(dir) } } : {}),
+      });
+      rows = [];
+      for (const s of scan.sessions) {
+        const out = sessionRows(s);
+        rows.push(...out.rows);
+        extras = new Map([...extras, ...out.extras]);
+      }
+      sessions = scan.sessions.length;
+      source = `${host}-transcripts`;
+    }
+    const doc = buildShapeDocument(rows, {
+      source,
+      contributor,
+      consent,
+      since,
+      version: PROXY_VERSION,
+      ...(sessions !== undefined ? { sessions } : {}),
+      familyOf: (r) => extras.get(r.receipt)?.family ?? "unknown",
+      schemaHashOf: (r) => extras.get(r.receipt)?.schemaHash,
+    });
+    if (!doc.shapes.length) {
+      process.stdout.write(
+        `nothing to contribute: no tool calls from ${source} since ${since.toISOString().slice(0, 10)}${source === "ledger" ? " (try --source claude-code, codex or cursor)" : ""}\n`,
+      );
+      return 0;
+    }
+    const path = writeContribution(doc);
+    const text = `${JSON.stringify(doc, null, 2)}\n`;
+    process.stdout.write(text);
+    if (json) return 0;
+    process.stdout.write(`\n${summarizeDocument(doc)}\nwritten to ${path}\n`);
+    if (!endpoint) {
+      process.stdout.write(
+        "No index endpoint is configured yet (ADR-0009, decision 3): nothing was sent. Pass --endpoint <https url> to send to one.\n",
+      );
+      return 0;
+    }
+    if (!consented) {
+      process.stdout.write(
+        `Nothing was sent: the first contribution needs --accept-terms ${TERMS_VERSION} (docs/CONTRIBUTING-DATA.md).\n`,
+      );
+      return 1;
+    }
+    let send = yes;
+    if (!send) {
+      if (!process.stdin.isTTY) {
+        process.stdout.write("Nothing was sent: not a terminal, and no --yes.\n");
+        return 1;
+      }
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const answer = await rl.question(
+          `Send this to the Tool Reliability Index at ${endpoint}? [y/N] `,
+        );
+        send = /^y(es)?$/i.test(answer.trim());
+      } finally {
+        rl.close();
+      }
+    }
+    if (!send) {
+      process.stdout.write("Nothing was sent.\n");
+      return 1;
+    }
+    const receipt = await sendContribution(doc, endpoint, PROXY_VERSION);
+    settings.lastSentAt = new Date().toISOString();
+    saveRegistry(registry);
+    process.stdout.write(
+      `sent: the index answered ${receipt.status}${receipt.receipt ? `, receipt ${receipt.receipt}` : ""}${receipt.url ? `\nyour servers on the index: ${receipt.url}` : ""}\n`,
     );
     return 0;
   }

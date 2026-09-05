@@ -82,6 +82,10 @@ sayagain report                      # the weekly page from docs/measurement.md
 sayagain lint --all                  # grade every registered server's tool definitions
 sayagain serve --otlp http://127.0.0.1:4318/v1/traces   # or OTEL_EXPORTER_OTLP_ENDPOINT; a local collector on :4318 is found by itself (SAYAGAIN_OTLP=off never exports)
 sayagain ui                          # the same in a browser tab: a live holds inbox, servers, dead letters, ledger, tools, errors, report
+sayagain audit                       # the one page over your own Claude Code, Codex and Cursor transcripts, risk first,
+                                     # with the failure tax in dollars; writes a shareable HTML page (names and counts, never values)
+sayagain contribute                  # build the ADR-0009 shape document from your history, write and show it, send only after a y
+                                     # (no index endpoint exists yet: without --endpoint the command stops after writing)
 sayagain learn                       # what the loop learned from your ledger: coercions and hints, each with before and after numbers
                                      # (it advises; `learn --apply <id>` lets one coercion change read-only calls before they leave)
 ```

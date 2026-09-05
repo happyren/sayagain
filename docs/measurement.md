@@ -112,7 +112,13 @@ node scripts/baseline/claude-code-baseline.mjs --since 2026-08-01 --json baselin
 ```
 
 Reads every session under `~/.claude/projects`, computes M1 to M11 and
-prints a summary. It never outputs argument values, file contents, tool
+prints a summary. Since 0.10, `sayagain audit` runs the 0.6 analysis over
+the same transcripts (and Codex and Cursor ones) with the definitions in
+section 3, prints the section 6 page risk first, and writes a shareable
+HTML page; the script stays as the pre-registered instrument behind the
+baseline numbers quoted in the build brief. One difference: `audit`
+classes an MCP tool without a read verb as a write, as the boundary would
+without annotations, and says how many calls that affected. It never outputs argument values, file contents, tool
 results or prompts; only tool names, counts, token totals and timestamps.
 Keep `baseline.json` out of the repository.
 

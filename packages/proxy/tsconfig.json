@@ -6,7 +6,7 @@
     "outDir": "dist"
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts", "src/ui-browser"],
+  "exclude": ["src/**/*.test.ts", "src/ui-browser", "src/test-fixtures"],
   "references": [
     {
       "path": "../sdk"
