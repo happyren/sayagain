@@ -165,6 +165,10 @@ export function loadOrCreateToken(): string {
   return token;
 }
 
+/** The daemon's base URL, with an IPv6 host bracketed. */
+export const daemonBaseUrl = (info: Pick<DaemonInfo, "host" | "port">): string =>
+  `http://${info.host.includes(":") ? `[${info.host}]` : info.host}:${info.port}`;
+
 export function readDaemonInfo(): DaemonInfo | null {
   const p = daemonInfoPath();
   if (!existsSync(p)) return null;

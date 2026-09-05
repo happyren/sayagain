@@ -19,7 +19,7 @@ import {
   LineSplitter,
   parseMessage,
 } from "./jsonrpc.js";
-import { type DaemonInfo, readDaemonInfo } from "./registry.js";
+import { type DaemonInfo, daemonBaseUrl, readDaemonInfo } from "./registry.js";
 
 export interface ShimOptions {
   name: string;
@@ -33,7 +33,7 @@ export interface ShimOptions {
 
 export async function daemonHealthy(info: DaemonInfo, timeoutMs = 1500): Promise<boolean> {
   try {
-    const res = await fetch(`http://${info.host}:${info.port}/api/health`, {
+    const res = await fetch(`${daemonBaseUrl(info)}/api/health`, {
       headers: { authorization: `Bearer ${info.token}` },
       signal: AbortSignal.timeout(timeoutMs),
     });

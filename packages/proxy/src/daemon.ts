@@ -276,12 +276,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const header = req.headers.authorization ?? "";
     if (header.slice(0, 7).toLowerCase() === "bearer " && tokenMatches(header.slice(7).trim()))
       return true;
-    // EventSource cannot set headers, and the browser's first visit carries the token in the URL:
-    // the query form is accepted for streams and for the page itself, never for the API.
+    // EventSource cannot set headers: the query form is accepted for streams only, never for the API.
     const wantsStream =
       req.method === "GET" && (req.headers.accept ?? "").includes("text/event-stream");
-    const isPage = req.method === "GET" && url.pathname === "/ui";
-    return (wantsStream || isPage) && tokenMatches(url.searchParams.get("token"));
+    return wantsStream && tokenMatches(url.searchParams.get("token"));
   };
   const hostAllowed = (req: IncomingMessage): boolean => {
     if (!LOOPBACK_HOSTS.has(host)) return true;
@@ -445,7 +443,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   const CSP =
-    "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'";
+    "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
   // Next to this file when built (dist/ui/app.js); under dist when this file runs from source (tests).
   const appJs = (): string | undefined => {
     for (const rel of ["./ui/app.js", "../dist/ui/app.js"]) {
@@ -466,10 +464,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         "content-security-policy": CSP,
         "cache-control": "no-store",
         "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
       });
       res.end(body);
     };
-    if (url.pathname === "/ui") return send("text/html; charset=utf-8", indexHtml(options.version));
+    if (url.pathname === "/ui" || url.pathname === "/ui/")
+      return send("text/html; charset=utf-8", indexHtml(options.version));
     if (url.pathname === "/ui/app.css") return send("text/css; charset=utf-8", APP_CSS);
     if (url.pathname === "/ui/app.js") {
       const js = appJs();
@@ -481,13 +481,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   /** The 0.6 analysis over the daemon's own ledger, for the page. */
-  const analysisRows = (url: URL) => {
+  const analysisRows = (url: URL, withPrevious: boolean) => {
     const sinceRaw = url.searchParams.get("since") ?? "7d";
     const since = parseSince(sinceRaw);
+    if (since.getTime() >= Date.now()) throw new Error("since must be in the past");
     const server = url.searchParams.get("server") ?? undefined;
     const minRaw = Number(url.searchParams.get("minCalls") ?? "10");
     const minCalls = Number.isFinite(minRaw) ? Math.max(1, Math.floor(minRaw)) : 10;
-    const from = new Date(since.getTime() - (Date.now() - since.getTime()));
+    const from = withPrevious ? new Date(since.getTime() - (Date.now() - since.getTime())) : since;
     const rows = options.stores
       .readLedger()
       .filter(
@@ -507,10 +508,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     ) {
       let a: ReturnType<typeof analysisRows>;
       try {
-        a = analysisRows(url);
+        a = analysisRows(url, url.pathname === "/api/report");
       } catch {
         return json(res, 400, {
-          error: "since must be a duration like 7d, 24h or 90m, or an ISO date",
+          error: "since must be a duration like 7d, 24h or 90m, or a past ISO date",
         });
       }
       if (url.pathname === "/api/tools")
@@ -649,11 +650,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     void (async () => {
       try {
         if (!hostAllowed(req)) return json(res, 421, { error: "Host header is not loopback" });
-        // The page's stylesheet and script are public: a <link> or <script> tag cannot send a header,
-        // and they hold nothing but layout and generic code. The page and every API call need the token.
+        // The page and its assets are public: a <link> or <script> tag cannot send a header, a reload
+        // has no token in its URL, and none of the three holds anything but markup, layout and generic
+        // code. Every API call needs the token, which the page keeps in its session storage.
         if (
           req.method === "GET" &&
-          (url.pathname === "/ui/app.css" || url.pathname === "/ui/app.js")
+          (url.pathname === "/ui" ||
+            url.pathname === "/ui/" ||
+            url.pathname === "/ui/app.css" ||
+            url.pathname === "/ui/app.js")
         )
           return handleUi(req, res, url);
         if (!authorized(req, url))

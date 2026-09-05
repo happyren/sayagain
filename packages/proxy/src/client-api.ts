@@ -10,7 +10,7 @@ import {
 } from "./control.js";
 import type { Decision } from "./holds.js";
 import type { LedgerRow } from "./ledger.js";
-import { type DaemonInfo, readDaemonInfo } from "./registry.js";
+import { type DaemonInfo, daemonBaseUrl, readDaemonInfo } from "./registry.js";
 import { daemonHealthy } from "./shim.js";
 
 export async function daemonFetch(
@@ -18,7 +18,7 @@ export async function daemonFetch(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  return fetch(`http://${info.host}:${info.port}${path}`, {
+  return fetch(`${daemonBaseUrl(info)}${path}`, {
     ...init,
     headers: {
       authorization: `Bearer ${info.token}`,

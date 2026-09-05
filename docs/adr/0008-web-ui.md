@@ -19,21 +19,25 @@ tool chain and a dev server, or pages the daemon serves itself.
 
 ### The daemon serves it
 
-The UI is static files inside `@sayagain/proxy` (`dist/ui`), served by
-the daemon at `/ui`. Same origin as the control API, so no CORS, no second
-port, no second process, and one bearer token. `sayagain ui` opens the
-browser at `http://127.0.0.1:7777/ui` with the token on the query string;
-the page moves the token into `sessionStorage` at once and sends it as a
-header from then on. The daemon accepts the query form on `GET /ui` only,
-as it already does for event streams. A Tauri shell (0.10) embeds the same
-pages and supplies the token itself.
+The UI lives inside `@sayagain/proxy`: the HTML and CSS as strings in
+`src/ui/page.ts`, the browser module compiled from `src/ui-browser` into
+`dist/ui/app.js`. The daemon serves it at `/ui`, same origin as the
+control API, so no CORS, no second port, no second process, and one
+bearer token. `sayagain ui` opens the browser at `/ui?token=...`; the page
+moves the token into `sessionStorage` at once, takes it off the URL, and
+sends it as a header from then on. The page and its two assets are public
+(a reload has no token in its URL, and none of the three holds anything but
+markup, layout and generic code); every API call needs the header, and the
+query form is accepted for event streams only, since `EventSource` cannot
+set headers. A Tauri shell (0.10) embeds the same page and supplies the
+token itself.
 
 ### No framework, no bundler
 
-The pages are hand-written HTML with one TypeScript module per screen,
-compiled by the same `tsc` build as the rest of the package into plain ES
-modules. No React, no bundler, no CSS framework, nothing loaded from a
-CDN. The reasons:
+The page is hand-written HTML with one TypeScript module, compiled by a
+second `tsc` project (with the DOM library) into a plain ES module. No
+React, no bundler, no CSS framework, nothing loaded from a CDN. The
+reasons:
 
 - The package stays dependency-free, which is what lets it be audited and
   what keeps `npx` fast.
@@ -87,8 +91,12 @@ does; nothing leaves the machine.
 
 ## Consequences
 
-- `@sayagain/proxy` ships HTML and CSS in its tarball; `files` gains
-  `dist/ui`. The build copies static assets next to the compiled modules.
+- `@sayagain/proxy` ships the page in its tarball under `dist/ui`, which
+  `files: ["dist"]` already covers; no assets are copied, since the markup
+  is code. The package `build` runs both `tsc` projects.
+- Anything on the machine can now tell that a daemon is running by loading
+  `/ui/app.css`; before 0.7 every path answered 401. Nothing secret is in
+  those files, and the `Host` check still applies.
 - The daemon gains `/ui` and three JSON routes over `analysis.ts`; the CLI
   gains `sayagain ui`.
 - Screens are tested where they matter: the routes by the daemon tests,

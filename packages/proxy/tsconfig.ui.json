@@ -7,9 +7,9 @@
     "types": [],
     "module": "ES2022",
     "moduleResolution": "Bundler",
-    "composite": true,
     "sourceMap": false,
-    "tsBuildInfoFile": "dist/ui/.tsbuildinfo"
+    "declaration": false,
+    "declarationMap": false
   },
   "include": ["src/ui-browser/**/*.ts"]
 }

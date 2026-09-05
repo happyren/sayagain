@@ -42,6 +42,7 @@ import { OtlpExporter, otlpHeadersFromEnv, resolveOtlpEndpoint } from "./otlp.js
 import { parseClassOverrides } from "./policy.js";
 import {
   addServer,
+  daemonBaseUrl,
   isValidServerName,
   loadOrCreateToken,
   loadRegistry,
@@ -532,7 +533,7 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
     process.stdout.write(
-      `daemon pid ${s.info.pid} at http://${s.info.host}:${s.info.port} since ${s.info.startedAt} (version ${s.info.version}; spans ${typeof s.health.otlp === "string" ? `to ${s.health.otlp}` : "not exported"})\n`,
+      `daemon pid ${s.info.pid} at ${daemonBaseUrl(s.info)} since ${s.info.startedAt} (version ${s.info.version}; spans ${typeof s.health.otlp === "string" ? `to ${s.health.otlp}` : "not exported"})\n`,
     );
     for (const srv of s.servers as {
       name: string;
@@ -565,7 +566,7 @@ export async function main(argv: string[]): Promise<number> {
     });
     if (!info)
       throw new UsageError("ui: no daemon is running and none could be started (sayagain serve)");
-    const url = `http://${info.host}:${info.port}/ui?token=${encodeURIComponent(info.token)}`;
+    const url = `${daemonBaseUrl(info)}/ui?token=${encodeURIComponent(info.token)}`;
     process.stdout.write(`${url}\n`);
     if (noOpen) return 0;
     const opener =
@@ -575,9 +576,15 @@ export async function main(argv: string[]): Promise<number> {
           ? ["cmd", "/c", "start", "", url]
           : ["xdg-open", url];
     const child = spawn(opener[0] as string, opener.slice(1), { stdio: "ignore", detached: true });
-    child.on("error", (err) =>
-      process.stderr.write(`could not open a browser (${err.message}); open the URL above\n`),
-    );
+    // spawn reports failure on the next tick; wait for either outcome so the message is not lost to process.exit.
+    await new Promise<void>((resolve) => {
+      child.once("spawn", () => resolve());
+      child.once("error", (err) => {
+        process.stderr.write(`could not open a browser (${err.message}); open the URL above
+`);
+        resolve();
+      });
+    });
     child.unref();
     return 0;
   }

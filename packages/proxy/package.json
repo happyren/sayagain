@@ -20,8 +20,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.ui.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:ui": "tsc -p tsconfig.ui.json"
   },
   "dependencies": {
     "@sayagain/sdk": "workspace:*",

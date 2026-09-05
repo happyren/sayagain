@@ -9,9 +9,6 @@
     },
     {
       "path": "packages/lint"
-    },
-    {
-      "path": "packages/proxy/tsconfig.ui.json"
     }
   ]
 }

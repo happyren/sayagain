@@ -13,6 +13,8 @@ nav a.active, nav a:hover { color: var(--text); background: var(--line); }
 header.top .tools { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 select, input, button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; }
 button { background: var(--accent); color: #06130f; border-color: transparent; cursor: pointer; font-weight: 600; }
+@media (prefers-color-scheme: light) { button { color: #fff; } }
+button:disabled { opacity: .5; cursor: wait; }
 button.secondary { background: var(--line); color: var(--text); }
 main { padding: 16px 20px; max-width: 1400px; }
 #status { color: var(--warn); min-height: 1.4em; margin-bottom: 8px; }
@@ -46,6 +48,7 @@ export const indexHtml = (version: string): string => `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>Say Again?</title>
 <link rel="stylesheet" href="/ui/app.css">
 </head>
@@ -62,7 +65,7 @@ export const indexHtml = (version: string): string => `<!doctype html>
     <a href="#report" data-screen="report">Report</a>
   </nav>
   <div class="tools">
-    <label>since <select id="since"><option value="24h">24 hours</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="90d">90 days</option></select></label>
+    <label id="window">since <select id="since"><option value="24h">24 hours</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="90d">90 days</option></select></label>
     <button id="refresh" class="secondary">Refresh</button>
   </div>
 </header>

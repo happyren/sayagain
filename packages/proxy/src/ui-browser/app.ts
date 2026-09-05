@@ -4,6 +4,8 @@
  * in on the query string once and lives in sessionStorage from then on.
  */
 
+export {};
+
 type Json = Record<string, unknown>;
 
 const params = new URLSearchParams(location.search);
@@ -13,6 +15,7 @@ if (queryToken) {
   history.replaceState(null, "", location.pathname + location.hash);
 }
 const token = sessionStorage.getItem("sayagain.token") ?? "";
+const NO_TOKEN = "this tab has no token: run `sayagain ui` to open the page with one";
 
 const $ = (sel: string): HTMLElement => {
   const el = document.querySelector<HTMLElement>(sel);
@@ -35,14 +38,22 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   });
   if (res.status === 401) {
-    $("#status").textContent = "not authorised: open the page with `sayagain ui`";
+    $("#status").textContent = token
+      ? "not authorised: the daemon's token changed; run `sayagain ui` again"
+      : NO_TOKEN;
     throw new Error("401");
   }
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return (await res.json()) as T;
 }
 
-const fmtWhen = (iso: string): string => iso.replace("T", " ").slice(0, 19);
+const fmtWhen = (iso: string): string => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+};
+const report = (err: unknown): void => {
+  $("#status").textContent = err instanceof Error ? err.message : String(err);
+};
 const kib = (n: number): string =>
   n < 1024 ? `${Math.round(n)} B` : `${(n / 1024).toFixed(1)} KiB`;
 const table = (head: string[], rows: string[][]): string =>
@@ -60,6 +71,7 @@ interface Hold {
   intent?: string;
   arguments: unknown;
   createdAt: string;
+  expiresAt: string;
   server?: string;
   mode?: string;
   orphaned?: boolean;
@@ -77,7 +89,7 @@ async function renderHolds(): Promise<void> {
       (
         h,
       ) => `<article class="hold${h.orphaned ? " orphaned" : ""}" data-receipt="${esc(h.receipt)}">
-  <header><strong>${esc(h.server ?? "")}/${esc(h.tool)}</strong> <span class="pill">${esc(h.toolClass)}</span> <span class="pill">${esc(h.mode ?? "pre")}</span> <time>${esc(fmtWhen(h.createdAt))}</time></header>
+  <header><strong>${esc(h.server ?? "")}/${esc(h.tool)}</strong> <span class="pill">${esc(h.toolClass)}</span> <span class="pill">${esc(h.mode ?? "pre")}</span> <time>${esc(fmtWhen(h.createdAt))} · expires ${esc(fmtWhen(h.expiresAt))}</time></header>
   <p>${esc(h.reason)}${h.orphaned ? " · from before a restart: the host is gone; approving runs it for the ledger" : ""}</p>
   ${h.intent ? `<p class="intent">intent: ${esc(h.intent)}</p>` : ""}
   <pre>${esc(JSON.stringify(h.arguments, null, 2))}</pre>
@@ -167,8 +179,13 @@ interface LedgerRow {
   replayOf?: string;
 }
 
-async function renderLedger(): Promise<void> {
-  const rows = await api<LedgerRow[]>("/api/ledger?tail=200");
+let ledgerRows: LedgerRow[] = [];
+async function loadLedger(): Promise<void> {
+  ledgerRows = await api<LedgerRow[]>("/api/ledger?tail=200");
+  renderLedger();
+}
+function renderLedger(): void {
+  const rows = ledgerRows;
   const filter = ($("#ledger-filter") as HTMLInputElement).value.trim().toLowerCase();
   const shown = rows
     .filter(
@@ -353,7 +370,7 @@ const screens: Record<string, () => Promise<void>> = {
   holds: renderHolds,
   servers: renderServers,
   deadletters: renderDeadLetters,
-  ledger: renderLedger,
+  ledger: loadLedger,
   tools: renderTools,
   errors: renderErrors,
   report: renderReport,
@@ -361,17 +378,32 @@ const screens: Record<string, () => Promise<void>> = {
 
 let current = location.hash.slice(1) || "holds";
 async function show(name: string): Promise<void> {
-  const screen = screens[name] ? name : "holds";
+  const screen = Object.hasOwn(screens, name) ? name : "holds";
   current = screen;
+  $("#window").hidden = !["tools", "errors", "report"].includes(screen);
   for (const a of document.querySelectorAll<HTMLAnchorElement>("nav a"))
     a.classList.toggle("active", a.dataset.screen === screen);
   for (const s of document.querySelectorAll<HTMLElement>("main > section"))
     s.hidden = s.id !== `screen-${screen}`;
-  $("#status").textContent = "";
+  $("#status").textContent = token ? "" : NO_TOKEN;
+  if (!token) return;
   try {
     await screens[screen]?.();
   } catch (err) {
-    $("#status").textContent = err instanceof Error ? err.message : String(err);
+    report(err);
+  }
+}
+
+/** Disable a button while its request is in flight, so a second click cannot send it twice. */
+async function busy(button: HTMLElement, work: () => Promise<unknown>): Promise<void> {
+  const b = button as HTMLButtonElement;
+  b.disabled = true;
+  try {
+    await work();
+  } catch (err) {
+    report(err);
+  } finally {
+    b.disabled = false;
   }
 }
 
@@ -380,9 +412,12 @@ document.addEventListener("click", (ev) => {
   const decide = t.closest<HTMLElement>("[data-decide]");
   if (decide) {
     const receipt = decide.closest<HTMLElement>("[data-receipt]")?.dataset.receipt ?? "";
-    void api(`/api/holds/${encodeURIComponent(receipt)}/${decide.dataset.decide}`, {
-      method: "POST",
-    }).then(() => renderHolds());
+    const decision = decide.dataset.decide === "reject" ? "reject" : "approve";
+    void busy(decide, () =>
+      api(`/api/holds/${encodeURIComponent(receipt)}/${decision}`, { method: "POST" }).then(() =>
+        renderHolds(),
+      ),
+    );
     return;
   }
   const replay = t.closest<HTMLElement>("[data-replay]");
@@ -399,13 +434,15 @@ document.addEventListener("click", (ev) => {
         return;
       }
     }
-    void api<{ isError: boolean; text: string }>(`/api/replay/${encodeURIComponent(receipt)}`, {
-      method: "POST",
-      body,
-    }).then((o) => {
-      $("#status").textContent = `replay ${o.isError ? "failed" : "succeeded"}: ${o.text}`;
-      return renderDeadLetters();
-    });
+    void busy(replay, () =>
+      api<{ isError: boolean; text: string }>(`/api/replay/${encodeURIComponent(receipt)}`, {
+        method: "POST",
+        body,
+      }).then((o) => {
+        $("#status").textContent = `replay ${o.isError ? "failed" : "succeeded"}: ${o.text}`;
+        return renderDeadLetters();
+      }),
+    );
     return;
   }
   const nav = t.closest<HTMLAnchorElement>("nav a[data-screen]");
@@ -416,7 +453,7 @@ document.addEventListener("click", (ev) => {
 });
 window.addEventListener("hashchange", () => void show(location.hash.slice(1)));
 $("#since").addEventListener("change", () => void show(current));
-$("#ledger-filter").addEventListener("input", () => void renderLedger());
+$("#ledger-filter").addEventListener("input", () => renderLedger());
 $("#refresh").addEventListener("click", () => void show(current));
 
 // Live updates: EventSource cannot set headers, so this one GET carries the token on the query
@@ -428,9 +465,15 @@ events.addEventListener(
   "dead-letter",
   () => void (current === "deadletters" && renderDeadLetters()),
 );
-events.addEventListener("row", () => void (current === "ledger" && renderLedger()));
+events.addEventListener("row", () => void (current === "ledger" && loadLedger().catch(report)));
 events.onerror = () => {
-  $("#status").textContent = "event stream disconnected; reconnecting";
+  // The browser reconnects on its own after a dropped connection, but not after a refused one.
+  $("#status").textContent =
+    events.readyState === EventSource.CLOSED
+      ? token
+        ? "live updates stopped: the daemon refused the token; run `sayagain ui` again"
+        : NO_TOKEN
+      : "event stream disconnected; reconnecting";
 };
 events.onopen = () => {
   if ($("#status").textContent?.includes("reconnecting")) $("#status").textContent = "";
