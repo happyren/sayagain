@@ -78,7 +78,8 @@ export function saveRegistry(registry: Registry): void {
   writePrivate(registryPath(), `${JSON.stringify(registry, null, 2)}\n`);
 }
 
-export const isValidServerName = (name: string): boolean => /^[A-Za-z0-9_.-]{1,64}$/.test(name);
+export const isValidServerName = (name: string): boolean =>
+  /^[A-Za-z0-9_.-]{1,64}$/.test(name) && !["__proto__", "constructor", "prototype"].includes(name);
 
 /** Register or replace a server; returns whether a server of that name already existed. */
 export function addServer(name: string, config: ServerConfig): boolean {

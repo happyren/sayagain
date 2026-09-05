@@ -79,7 +79,14 @@ export interface EjectResult {
   backup?: string;
 }
 
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+const safeName = (name: string): boolean => NAME.test(name) && !UNSAFE_KEYS.has(name);
+/** A property path segment that cannot reach Object.prototype. */
+function safeSegment(seg: string): string {
+  if (UNSAFE_KEYS.has(seg)) throw new Error(`refusing to touch the property "${seg}"`);
+  return seg;
+}
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 const own = <T>(o: Record<string, T>): [string, T][] =>
@@ -106,7 +113,7 @@ function mapAt(root: Record<string, unknown>, path: string[]): Record<string, un
   let node: unknown = root;
   for (const seg of path) {
     if (!isPlainObject(node)) return undefined;
-    node = node[seg];
+    node = node[safeSegment(seg)];
   }
   return isPlainObject(node) ? node : undefined;
 }
@@ -117,12 +124,13 @@ function setAt(
   value: Record<string, unknown>,
 ): void {
   let node: Record<string, unknown> = root;
-  for (const seg of path.slice(0, -1)) {
-    const next = node[seg];
-    if (!isPlainObject(next)) node[seg] = {};
+  const define = (o: Record<string, unknown>, k: string, v: unknown) =>
+    Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
+  for (const seg of path.slice(0, -1).map(safeSegment)) {
+    if (!isPlainObject(node[seg])) define(node, seg, {});
     node = node[seg] as Record<string, unknown>;
   }
-  node[path[path.length - 1] as string] = value;
+  define(node, safeSegment(path[path.length - 1] as string), value);
 }
 
 export function readHostFile(target: Target): HostDocument {
@@ -168,12 +176,7 @@ export function readHostFile(target: Target): HostDocument {
 export const originKey = (doc: Pick<HostDocument, "realFile">, target: Target): string =>
   `${doc.realFile}#${target.path.join("/")}`;
 
-const stamp = (): string =>
-  new Date()
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace("T", "T")
-    .replace(/(\.\d{3})Z$/, "$1Z");
+const stamp = (): string => new Date().toISOString().replace(/[-:]/g, "");
 
 /** Copy the file to ~/.sayagain/backups before changing it. Never overwrites an earlier backup. */
 export function backupFile(realFile: string): string {
@@ -205,8 +208,15 @@ export function writeHostFile(
 ): string | undefined {
   const map: Record<string, unknown> = { ...doc.raw };
   for (const [name, entry] of Object.entries(changes)) {
+    safeSegment(name);
     if (entry === null) delete map[name];
-    else map[name] = entry;
+    else
+      Object.defineProperty(map, name, {
+        value: entry,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
   }
   const root = { ...doc.root };
   setAt(root, target.path, map);
@@ -307,7 +317,7 @@ export function isBoundaryEntry(entry: HostEntry, registry: Registry): boolean {
   return false;
 }
 
-const HOST_VAR = /\$\{[^}]*\}/;
+const HOST_VAR = /\$\{[^${}]*\}/;
 const PLAIN_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 
 /** Translate values a host resolves itself into what the registry can resolve, or say why not. */
@@ -317,7 +327,7 @@ function translateValues(
   const values: Record<string, string> = {};
   for (const [k, v] of own(o)) {
     let s = String(v);
-    for (const m of s.matchAll(/\$\{([^}]*)\}/g)) {
+    for (const m of s.matchAll(/\$\{([^${}]*)\}/g)) {
       const inner = m[1] ?? "";
       if (inner.startsWith("input:"))
         return {
@@ -420,7 +430,7 @@ export function importHost(target: Target, opts: ImportOptions): ImportResult {
       result.skipped.push({ name, reason: "already goes through Say Again" });
       continue;
     }
-    if (!NAME.test(name)) {
+    if (!safeName(name)) {
       result.skipped.push({ name, reason: "name has characters the registry does not accept" });
       continue;
     }
