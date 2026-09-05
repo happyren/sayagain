@@ -499,6 +499,60 @@ describe("lifecycle", () => {
     expect(spans.map((s) => s.name)).toEqual(["tools/call echo"]);
   });
 
+  it("offers an advise-mode coercion only as a repair after a failure, on a tool whose schema cannot repair", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sayagain-wrap-advise-"));
+    const path = join(dir, "learned.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        updatedAt: "2026-09-05T00:00:00Z",
+        interventions: [
+          {
+            id: "coerce:fake/loose/limit:string-number",
+            kind: "coerce",
+            server: "upstream",
+            tool: "loose",
+            signature: "x",
+            signatures: ["x"],
+            errorClass: "coercible",
+            path: "/limit",
+            from: "string",
+            to: "number",
+            rule: "string-to-number",
+            evidence: 3,
+            learnedAt: "2026-09-05T00:00:00Z",
+            activatedAt: "2026-09-05T00:00:00Z",
+            state: "active",
+            // no mode: a 0.8.0 file, which loads as advise
+          },
+        ],
+      }),
+    );
+    const store = new LearnedStore(path);
+    expect(store.get("coerce:fake/loose/limit:string-number")?.mode).toBe("advise");
+    const h = harness({}, { learned: store });
+    try {
+      await h.handshake();
+      h.call(1, "loose", { limit: "10" });
+      const first = await h.waitFor(1);
+      const meta = (first.result as Record<string, unknown>)._meta as Record<string, unknown>;
+      expect(meta["sh.sayagain/status"]).toBe("repaired");
+      expect(JSON.stringify(meta["sh.sayagain/repair"])).toContain(
+        '"rule":"learned:string-to-number"',
+      );
+      await h.finish();
+      // The call failed first: nothing changed before it left.
+      expect(h.ledger.rows[0]).toMatchObject({
+        attempts: 2,
+        repairs: [{ path: "/limit", rule: "learned:string-to-number" }],
+      });
+    } finally {
+      await h.finish();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("applies a learned coercion from learned.json and notices when the file changes", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sayagain-wrap-learned-"));
     const path = join(dir, "learned.json");

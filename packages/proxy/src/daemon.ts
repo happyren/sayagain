@@ -564,6 +564,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return json(res, 200, buildReport(a.rows, { since: a.since, minCalls: a.minCalls }));
     }
     const path = url.pathname;
+    // The CLI writes learned.json directly when it cannot reach the daemon; pick that up before
+    // reading or saving, or a save from the in-memory copy would undo the operator's change.
+    if (path.startsWith("/api/learn")) learned.maybeReload(0);
     if (req.method === "GET" && path === "/api/learn")
       return json(res, 200, { updatedAt: learned.updatedAt, interventions: learned.list() });
     if (req.method === "POST" && path === "/api/learn/update") {

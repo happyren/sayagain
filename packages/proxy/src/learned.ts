@@ -58,8 +58,9 @@ export interface Intervention {
   activatedAt: string;
   state: "active" | "disabled" | "reverted";
   /**
-   * advise (default): the hint in the description and the repair after a failure. apply: also
-   * before a read-only call leaves, which only an operator can turn on (ADR-0009).
+   * Coercions only. advise (default): the fact in the description, the hint in the error, the
+   * repair after a failure. apply: also before a read-only call leaves, which only an operator can
+   * switch on (ADR-0009). Missing or unknown values load as advise.
    */
   mode?: "advise" | "apply";
   reason?: string;
@@ -541,7 +542,7 @@ export function upstreamReport(
       .list()
       .filter((x) => x.tool === s.tool && x.signatures.includes(s.signature)))
       lines.push(
-        `- Say Again ${i.state === "active" ? "applies" : `tried (${i.state})`}: ${i.kind === "coerce" ? `${i.rule} on ${i.path}` : i.fact}${i.after ? `; this failure was ${i.before?.failureRatePct ?? "?"}% of calls before, ${i.after.failureRatePct}% after (${i.after.calls} calls)` : ""}.`,
+        `- Say Again ${i.state !== "active" ? `tried (${i.state})` : i.kind === "coerce" && i.mode !== "apply" ? "offers as a repair after a failure" : "applies"}: ${i.kind === "coerce" ? `${i.rule} on ${i.path}` : i.fact}${i.after ? `; this failure was ${i.before?.failureRatePct ?? "?"}% of calls before, ${i.after.failureRatePct}% after (${i.after.calls} calls)` : ""}.`,
       );
     lines.push(`- Suggestion: ${s.suggestion}`, "");
   }

@@ -401,11 +401,11 @@ async function renderLearn(): Promise<void> {
     interventions
       .map(
         (i) => `<article class="learned ${esc(i.state)}" data-id="${esc(i.id)}">
-  <header><strong>${esc(i.server)}/${esc(i.tool)}</strong> <span class="pill">${esc(i.kind)}</span> <span class="pill ${i.state === "active" ? "" : "bad"}">${esc(i.state)}</span>${i.kind === "coerce" ? ` <span class="pill">${i.mode === "apply" ? "applied before calls leave" : "advise only"}</span>` : ""} <time>${esc(i.evidence)} occurrences</time></header>
+  <header><strong>${esc(i.server)}/${esc(i.tool)}</strong> <span class="pill">${esc(i.kind)}</span> <span class="pill ${i.state === "active" ? "" : "bad"}">${esc(i.state)}</span>${i.kind === "coerce" ? ` <span class="pill" title="${i.mode === "apply" ? "changes read-only calls before they leave, and repairs after a failure" : "offered as a repair after a failure; never changes a call before it leaves"}">mode ${i.mode === "apply" ? "apply" : "advise"}</span>` : ""} <time>${esc(i.evidence)} occurrences</time></header>
   <p>${esc(i.kind === "coerce" ? `${i.rule} on ${i.path}` : (i.fact ?? ""))}</p>
   <pre>${esc(i.signature)}</pre>
   <p class="suggestion">${lift(i)}${i.reason ? ` &middot; ${esc(i.reason)}` : ""}</p>
-  <footer>${i.state === "active" ? `<button data-learn="disable" class="secondary">Turn off</button>` : `<button data-learn="enable">Turn on</button>`}${i.kind === "coerce" && i.state === "active" ? (i.mode === "apply" ? ` <button data-learn="advise" class="secondary">Advise only</button>` : ` <button data-learn="apply" class="secondary">Apply before calls leave</button>`) : ""} <code>${esc(i.id)}</code></footer>
+  <footer>${i.state === "active" ? `<button data-learn="disable" class="secondary">Turn off</button>` : `<button data-learn="enable">Turn on</button>`}${i.kind === "coerce" && i.state === "active" ? (i.mode === "apply" ? ` <button data-learn="advise" class="secondary">Switch to advise</button>` : ` <button data-learn="apply" class="secondary">Switch to apply</button>`) : ""} <code>${esc(i.id)}</code></footer>
 </article>`,
       )
       .join("");

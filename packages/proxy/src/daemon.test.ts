@@ -668,6 +668,10 @@ describe("daemon", () => {
     expect((await api(d, "/api/learn/nope/apply", { method: "POST" })) as Obj).toMatchObject({
       error: expect.stringContaining("no coercion"),
     });
+    const hintId = encodeURIComponent("hint:fake/missing:precondition:x");
+    expect((await api(d, `/api/learn/${hintId}/apply`, { method: "POST" })) as Obj).toMatchObject({
+      error: expect.stringContaining("no coercion"), // hints have no mode
+    });
     const report = await (
       await fetch(`${d.url}/api/learn/report/fake`, {
         headers: { authorization: `Bearer ${d.token}` },

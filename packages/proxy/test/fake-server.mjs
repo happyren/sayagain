@@ -46,6 +46,7 @@ rl.on("line", (line) => {
           { name: "flaky", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
           { name: "write_flaky", inputSchema: { type: "object" } },
           { name: "strict", inputSchema: strictSchema, annotations: { readOnlyHint: true } },
+          { name: "loose", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
           { name: "strict_write", inputSchema: strictSchema },
           { name: "missing", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
           { name: "slow_write", inputSchema: { type: "object" } },
@@ -95,7 +96,7 @@ rl.on("line", (line) => {
         flaky.set(name, left - 1);
         fail("Error: Request timed out");
       } else ok();
-    } else if (name === "strict" || name === "strict_write") {
+    } else if (name === "strict" || name === "strict_write" || name === "loose") {
       if (typeof args.limit !== "number") fail("Invalid params: limit must be a number");
       else if (args.tags !== undefined && typeof args.tags !== "string")
         fail("Invalid params: tags must be a string");

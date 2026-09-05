@@ -216,6 +216,6 @@ by the daemon covers the operator today.
 
 - Change the arguments of a write without a hold.
 - Change any argument before a failure without the operator having opted
-  that tool in (ADR-0009).
+  that coercion in (ADR-0009: one switch per intervention).
 - Send anything but the contributed-shape schema, and never without consent.
 - Ship a feature without the metric that would show it working.

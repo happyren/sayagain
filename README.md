@@ -16,7 +16,7 @@ operator between the agent and its tools who says it, so the agent never has
 to.
 
 > **Status: pre-alpha.** The `_meta` convention, design records and package
-> skeletons are here. The proxy runs (0.8: `wrap`, the daemon, holds, repair,
+> skeletons are here. The proxy runs (0.9: `wrap`, the daemon, holds, repair,
 > dead letters, one-command onboarding, tool health, an operator page, a
 > learning loop). Watch the repo or open a
 > Discussion.

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -95,6 +95,51 @@ describe("learned", () => {
     expect(deriveInterventions(evidence().slice(0, 5))).toEqual([]); // one occurrence is not evidence
   });
 
+  it("loads a coercion without a mode, or with an unknown one, as advise", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sayagain-learned-load-"));
+    try {
+      const base = {
+        kind: "coerce",
+        server: "fake",
+        tool: "strict",
+        signature: "x",
+        errorClass: "coercible",
+        path: "/limit",
+        from: "string",
+        to: "number",
+        rule: "string-to-number",
+        evidence: 3,
+        learnedAt: "2026-09-05T00:00:00Z",
+        activatedAt: "2026-09-05T00:00:00Z",
+        state: "active",
+      };
+      writeFileSync(
+        join(dir, "learned.json"),
+        JSON.stringify({
+          version: 1,
+          updatedAt: "2026-09-05T00:00:00Z",
+          interventions: [
+            { ...base, id: "old" },
+            { ...base, id: "odd", mode: "yes" },
+            { ...base, id: "on", mode: "apply" },
+          ],
+        }),
+      );
+      const store = new LearnedStore(join(dir, "learned.json"));
+      expect(store.list().map((i) => [i.id, i.mode])).toEqual([
+        ["old", "advise"],
+        ["odd", "advise"],
+        ["on", "apply"],
+      ]);
+      expect(store.coercionsFor("fake", "strict")).toHaveLength(3);
+      expect(store.coercionsFor("fake", "strict", undefined, true).map((i) => i.id)).toEqual([
+        "on",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("applies a coercion only to a matching argument and names the rule", () => {
     const coerce = deriveInterventions(evidence()).find((i) => i.kind === "coerce") as Intervention;
     expect(applyLearnedCoercions({ limit: "10", other: "x" }, [coerce])).toEqual({
@@ -175,7 +220,14 @@ describe("learned", () => {
       const report = upstreamReport("fake-notion", rows, again, 3);
       expect(report).toContain("# Tool definition report: fake-notion");
       expect(report).toContain("## strict: Invalid params: limit must be a number");
-      expect(report).toContain("Say Again applies: string-to-number on /limit");
+      expect(report).toContain(
+        "Say Again offers as a repair after a failure: string-to-number on /limit",
+      );
+      expect(again.setMode(coerce.id, "apply")).toBe(true);
+      expect(upstreamReport("fake-notion", rows, again, 3)).toContain(
+        "Say Again applies: string-to-number on /limit",
+      );
+      expect(again.setMode(coerce.id, "advise")).toBe(true);
       // Evidence counts the specific change, not the signature: one type change among three recoveries is not enough.
       const mixed = evidence().map((r, k) =>
         k % 5 === 1 && k > 1 ? { ...r, argShape: ["limit:string"] } : r,

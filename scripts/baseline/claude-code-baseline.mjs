@@ -732,7 +732,7 @@ lines.push(
   `M10 sessions ended on an unretried failure: ${f(overall.endedOnFailure)} (${f(report.M10_endedOnFailure.pctOfSessionsWithCalls, 1)}%).`,
 );
 lines.push(
-  `North star: failure tax $${f(report.northStar.failureTaxUsdPer1kCalls, 2)} per 1K calls; unacknowledged writes ${f(report.northStar.unacknowledgedWritesPer1kCalls, 2)} per 1K calls.`,
+  `North star (risk, then cost): unacknowledged writes ${f(report.northStar.unacknowledgedWritesPer1kCalls, 2)} per 1K calls; failure tax $${f(report.northStar.failureTaxUsdPer1kCalls, 2)} per 1K calls.`,
 );
 lines.push("");
 lines.push(

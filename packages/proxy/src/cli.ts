@@ -110,9 +110,9 @@ const USAGE = `sayagain ${PROXY_VERSION}
       What the loop has learned from your own ledger: coercions offered as repairs, facts appended to tool
       descriptions and errors; each with its before and after numbers, reverted by itself when it does not help.
   sayagain learn --disable <id> | --enable <id> | --apply <id> | --advise <id> | --report <server>
-      Switch one intervention off or on; let a coercion change read-only calls before they leave (--apply: the
-      operator's call, the loop only advises by default); or print a tool definition report. A wrap picks changes
-      up within seconds.
+      Switch one intervention off or on. --apply <id> lets a coercion change read-only calls before they leave
+      (by default the loop only advises: the hint, and the repair after a failure); --advise <id> switches it back.
+      --report <server> prints a tool definition report. A wrap picks changes up within seconds.
   sayagain lint <name>|--all [--file <tools.json>] [--fail-below A|B|C|D] [--json]
       Grade a server's tool definitions with @sayagain/lint (starts the upstream through the daemon if needed).
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
@@ -968,9 +968,7 @@ export async function main(argv: string[]): Promise<number> {
     process.stdout.write(`learned as of ${updatedAt.slice(0, 19).replace("T", " ")} UTC\n`);
     for (const i of interventions) {
       const what =
-        i.kind === "coerce"
-          ? `${i.rule} on ${i.path} (${i.mode === "apply" ? "applied before a call leaves" : "advised: the hint, and the repair after a failure"})`
-          : (i.fact ?? "");
+        i.kind === "coerce" ? `${i.rule} on ${i.path}, mode ${i.mode ?? "advise"}` : (i.fact ?? "");
       const lift = i.after
         ? `before ${i.before?.failureRatePct ?? "?"}% fail (${i.before?.calls ?? 0} calls, median ${i.before?.medianCallsToRecover ?? 0} to recover) -> after ${i.after.failureRatePct}% (${i.after.calls} calls, median ${i.after.medianCallsToRecover})`
         : "";
@@ -979,7 +977,7 @@ export async function main(argv: string[]): Promise<number> {
       );
     }
     process.stdout.write(
-      "\nsayagain learn --disable <id> turns one off; --enable <id> turns it back on; --apply <id> lets a coercion change read-only calls before they leave; --report <server> writes the upstream report\n",
+      "\nMode advise offers a coercion as a repair after a failure; mode apply also changes read-only calls before they leave.\nsayagain learn --disable <id> turns one off; --enable <id> turns it back on; --apply <id> and --advise <id> switch a coercion's mode; --report <server> writes the upstream report\n",
     );
     return 0;
   }

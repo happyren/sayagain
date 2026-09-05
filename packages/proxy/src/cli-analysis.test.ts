@@ -181,7 +181,7 @@ describe("cli analysis", () => {
     out = "";
     expect(await main(["learn", "--update"])).toBe(0);
     expect(out).toContain("active   coerce:fake-notion/strict/limit:string-number");
-    expect(out).toContain("string-to-number on /limit (advised");
+    expect(out).toContain("string-to-number on /limit, mode advise");
     out = "";
     expect(await main(["learn", "--apply", "coerce:fake-notion/strict/limit:string-number"])).toBe(
       0,
@@ -189,7 +189,13 @@ describe("cli analysis", () => {
     expect(out.trim()).toBe("coerce:fake-notion/strict/limit:string-number: apply");
     out = "";
     expect(await main(["learn"])).toBe(0);
-    expect(out).toContain("(applied before a call leaves)");
+    expect(out).toContain("string-to-number on /limit, mode apply");
+    out = "";
+    expect(await main(["learn", "--advise", "coerce:fake-notion/strict/limit:string-number"])).toBe(
+      0,
+    );
+    expect(out.trim()).toBe("coerce:fake-notion/strict/limit:string-number: advise");
+    await expect(main(["learn", "--apply", "nope"])).rejects.toThrow(/no coercion/);
     out = "";
     expect(await main(["learn", "--revert", "coerce:fake-notion/strict/limit:string-number"])).toBe(
       0,
