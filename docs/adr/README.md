@@ -10,5 +10,6 @@
 | [0006](0006-onboarding-and-transparency.md) | One virtual server per upstream, one-command onboarding, identity preserved end to end | Accepted |
 | [0007](0007-observability-and-learning-loop.md) | Per-call spans, error signatures, mis-call ranking, and measured interventions that improve the next call | Accepted |
 | [0008](0008-web-ui.md) | The web UI is served by the daemon: no framework, no build step, one origin and one token | Accepted |
+| [0009](0009-tool-reliability-index-and-contribution.md) | The Tool Reliability Index, the contributed-shape schema, the consent flow, and the scope guard applied to 0.1 to 0.8 | Proposed |
 
 Template: [0000-template.md](0000-template.md).
