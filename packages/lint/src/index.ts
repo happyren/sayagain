@@ -24,6 +24,12 @@ export interface Rule {
   implemented: boolean;
 }
 
+/**
+ * The rule set's version: the date the catalogue or a check last changed. A scan or a grade
+ * quotes it so the number can be reproduced (docs/measurement.md 5.5).
+ */
+export const RULE_SET_VERSION = "2026-09-05";
+
 export const RULES: readonly Rule[] = [
   {
     id: "name/format",
@@ -74,7 +80,7 @@ export const RULES: readonly Rule[] = [
     severity: "warning",
     summary:
       "Strings that look like ids, dates or enums carry `format`, `pattern` or `enum`; numbers carry bounds.",
-    implemented: false,
+    implemented: true,
   },
   {
     id: "params/required-listed",
@@ -169,6 +175,28 @@ export interface Finding {
 }
 
 const NAME = /^[A-Za-z0-9_.-]{1,128}$/;
+/** Property names that read as an id, a date, a time, or a choice among a few values. */
+const CONSTRAINED_NAME =
+  /(^|_|-)(id|ids|uuid|guid|key|token|sha|hash|date|datetime|time|timestamp|at|before|after|since|until|status|state|type|kind|mode|format|level|priority|visibility|sort|order|direction|role|scope|unit|currency|locale|lang|language|region|country|timezone|tz)$/i;
+const CONSTRAINED_DESC =
+  /\b(one of|either|allowed values|must be (a|an|one)|in the form|ISO ?8601|RFC ?3339|YYYY|uuid|format)\b/i;
+const typeOf = (s: JsonSchema): string[] =>
+  Array.isArray(s.type) ? s.type : typeof s.type === "string" ? [s.type] : [];
+const hasStringConstraint = (s: JsonSchema): boolean =>
+  s.enum !== undefined ||
+  s.format !== undefined ||
+  s.pattern !== undefined ||
+  s.const !== undefined ||
+  s.minLength !== undefined ||
+  s.maxLength !== undefined;
+const hasNumberConstraint = (s: JsonSchema): boolean =>
+  s.minimum !== undefined ||
+  s.maximum !== undefined ||
+  s.exclusiveMinimum !== undefined ||
+  s.exclusiveMaximum !== undefined ||
+  s.multipleOf !== undefined ||
+  s.enum !== undefined ||
+  s.const !== undefined;
 
 export function lintTool(tool: ToolDefinition): Finding[] {
   const out: Finding[] = [];
@@ -200,6 +228,23 @@ export function lintTool(tool: ToolDefinition): Finding[] {
   for (const [key, schema] of Object.entries(props)) {
     if (!schema.description || schema.description.trim().length === 0)
       emit("params/described", `parameter ${key} has no description`, `/properties/${key}`);
+  }
+  for (const [key, schema] of Object.entries(props)) {
+    const types = typeOf(schema);
+    const path = `/properties/${key}`;
+    if (types.includes("number") || types.includes("integer")) {
+      if (!hasNumberConstraint(schema))
+        emit("params/constrained", `number ${key} has no bounds (minimum, maximum, enum)`, path);
+    } else if (types.includes("string") || (!types.length && schema.enum === undefined)) {
+      const looksConstrained =
+        CONSTRAINED_NAME.test(key) || CONSTRAINED_DESC.test(schema.description ?? "");
+      if (looksConstrained && !hasStringConstraint(schema))
+        emit(
+          "params/constrained",
+          `${key} reads as an id, date or choice but carries no format, pattern or enum`,
+          path,
+        );
+    }
   }
   if (tool.inputSchema.required === undefined)
     emit("params/required-listed", "inputSchema has no `required` array");

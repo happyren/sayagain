@@ -144,6 +144,117 @@ describe("cli audit and contribute", () => {
     await expect(main(["audit", "--since", "next week"])).rejects.toThrow(/--since/);
   });
 
+  it("lint --registry scans a registry and keeps the per-server results out of the page", async () => {
+    const hits: string[] = [];
+    const server: Server = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      hits.push(url.pathname);
+      let body = "";
+      req.on("data", (c) => {
+        body += c;
+      });
+      req.on("end", () => {
+        if (url.pathname === "/v0/servers") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              servers: [
+                {
+                  server: {
+                    name: "io.example/one",
+                    version: "1",
+                    remotes: [{ type: "streamable-http", url: `http://127.0.0.1:${port}/mcp` }],
+                  },
+                },
+              ],
+              metadata: { count: 1 },
+            }),
+          );
+          return;
+        }
+        const msg = JSON.parse(body || "{}") as { id?: number; method?: string };
+        res.writeHead(msg.method === "notifications/initialized" ? 202 : 200, {
+          "content-type": "application/json",
+        });
+        if (msg.method === "initialize")
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: {
+                protocolVersion: "2025-06-18",
+                capabilities: {},
+                serverInfo: { name: "one", version: "1" },
+              },
+            }),
+          );
+        else if (msg.method === "tools/list")
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: {
+                tools: [
+                  {
+                    name: "t",
+                    inputSchema: { type: "object", properties: { id: { type: "string" } } },
+                  },
+                ],
+              },
+            }),
+          );
+        else res.end();
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const outFile = join(dir, "scan.json");
+      expect(
+        await main([
+          "lint",
+          "--registry",
+          "--registry-url",
+          `http://127.0.0.1:${port}/v0/servers`,
+          "--timeout",
+          "2s",
+          "--out",
+          outFile,
+        ]),
+      ).toBe(0);
+      expect(out).toContain("Registry scan:");
+      expect(out).toContain("M16, tools without documented parameter constraints: 100%");
+      expect(out).toContain(`per-server results: ${outFile}`);
+      expect(out).not.toContain("io.example");
+      const saved = JSON.parse(readFileSync(outFile, "utf8")) as {
+        servers: { name: string; tools: { grade: string }[] }[];
+      };
+      expect(saved.servers[0]?.name).toBe("io.example/one");
+      expect(saved.servers[0]?.tools[0]?.grade).toBe("F");
+      out = "";
+      expect(
+        await main([
+          "lint",
+          "--registry",
+          "--registry-url",
+          `http://127.0.0.1:${port}/v0/servers`,
+          "--json",
+          "--first",
+          "1",
+        ]),
+      ).toBe(0);
+      const summary = JSON.parse(out) as { tools: number; servers?: unknown; ruleSet: string };
+      expect(summary.tools).toBe(1);
+      expect(summary.servers).toBeUndefined();
+      await expect(main(["lint", "--registry", "--sample", "1", "--first", "1"])).rejects.toThrow(
+        /alternatives/,
+      );
+      await expect(main(["lint", "--registry", "--timeout", "soon"])).rejects.toThrow(/--timeout/);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
   it("audit writes its page under the home directory by default", async () => {
     const claude = join(dir, "claude");
     writeClaudeCodeFixture(claude);

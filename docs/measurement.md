@@ -185,7 +185,14 @@ feed the logs to the same analyzer with `--tap`.
 
 Run `@sayagain/lint` over every server in the public registry that
 publishes a tool list. Report M16 with the exact rule set version so the
-scan is reproducible.
+scan is reproducible. Since 0.11, `sayagain lint --registry` does this:
+it lists the registry, asks each server with a Streamable HTTP remote for
+its tools without credentials, grades them, and prints the distribution
+with `RULE_SET_VERSION`; `--sample <n> --seed <n>` takes a reproducible
+random sample when the full list is too long for one sitting. Servers that
+need credentials, or that only ship as packages, are counted as unprobed,
+so the number describes the reachable, unauthenticated subset and says so.
+M16 is the share of graded tools with a `params/constrained` finding.
 
 ## 6. Reporting
 

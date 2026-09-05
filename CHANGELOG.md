@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-05
+
+### Added
+
+- `sayagain lint --registry`: the registry scan of `docs/measurement.md`
+  5.5. Lists the public MCP registry, asks every server with a Streamable
+  HTTP remote for its tools without credentials, grades them with
+  `@sayagain/lint`, and prints the outcome counts, the grade distribution,
+  the share of tools with a finding per rule, and M16 (tools without
+  documented parameter constraints) with a 95% interval and the rule-set
+  version. `--sample <n> --seed <n>` for a reproducible random sample,
+  `--first <n>`, `--concurrency`, `--timeout`, `--out <file>` for the
+  per-server results, `--json`. The printed page names no server.
+- `sayagain audit --project <name>`: one project's sessions only (its
+  directory name; worktrees and variants included; Codex sessions by their
+  working directory), for the per-agent baselines.
+- `@sayagain/lint` implements `params/constrained`: a number without
+  bounds, or a string that reads as an id, date or choice without a
+  format, pattern or enum, is a warning. `RULE_SET_VERSION` (2026-09-05)
+  is exported and quoted by the scan.
+
 ## [0.10.0] - 2026-09-05
 
 ### Added
