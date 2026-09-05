@@ -87,9 +87,10 @@ sayagain eject --host claude-code
 sayagain status | list | ledger | holds | replay <receipt>
 ```
 
-`wrap` runs the boundary in-process with a SQLite ledger and no daemon. It
+`wrap` runs the boundary in-process with a JSONL ledger and no daemon. It
 is the demo path and the fallback when the daemon cannot start. `add`,
-`import` and `install` write `~/.sayagain/config.toml` and the host's own
+`import` and `install` write `~/.sayagain/config.json` (JSON, not TOML: no
+parser dependency yet) and the host's own
 file, in the host's own format, with a timestamped backup beside it.
 
 Registered server entry:

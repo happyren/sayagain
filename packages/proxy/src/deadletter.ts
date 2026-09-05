@@ -1,7 +1,7 @@
 /** UNABLE: calls whose retries and repairs are exhausted, kept with intent for replay. */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { homePath } from "./home.js";
 
 export interface DeadLetter {
   receipt: string;
@@ -20,7 +20,7 @@ export interface DeadLetter {
   resolvedBy?: string;
 }
 
-export const defaultDeadLetterPath = (): string => join(homedir(), ".sayagain", "deadletter.jsonl");
+export const defaultDeadLetterPath = (): string => homePath("deadletter.jsonl");
 
 /** Read every entry and fold resolutions: a later line for the same receipt replaces the earlier one. */
 export function readDeadLetters(

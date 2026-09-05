@@ -16,6 +16,9 @@ export interface Hold {
   expiresAt: number;
   decision?: Decision;
   decidedAt?: number;
+  /** Which upstream the call was headed for, and why it is waiting. */
+  upstream?: string;
+  mode?: string;
 }
 
 export class HoldQueue extends EventEmitter {

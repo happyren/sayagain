@@ -6,6 +6,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-05
+
+### Added
+
+- `sayagain serve`: one daemon on loopback with a bearer token, one virtual
+  server per registered upstream at `/mcp/<name>` (Streamable HTTP POST,
+  plus a GET event stream for server notifications), and a control API
+  (`/api/health`, `servers`, `holds`, `deadletters`, `replay`, `ledger`,
+  `events`, `shutdown`). `--detach` runs it in the background.
+- `sayagain add <name> -- <command>` and `--url <url>` register upstreams in
+  `~/.sayagain/config.json`; `remove`, `list`, `status`, `stop`.
+- `sayagain stdio <name>`: a thin stdio client for hosts that only spawn
+  commands; starts the daemon if none is running; fails closed.
+- Streamable HTTP upstreams (`HttpUpstream`), with `Mcp-Method` and
+  `Mcp-Name` hints on every POST.
+- SQLite storage (`--ledger sqlite`, `node:sqlite`, Node 24+): ledger, dead
+  letters and persisted holds that survive a daemon restart; JSONL remains
+  the default and the fallback.
+- The boundary core (`Boundary`) now multiplexes any number of hosts over
+  one upstream, with request ids remapped per host and server-to-client
+  requests routed to the single attached host; `wrap` is a thin shell
+  around it.
+- `SAYAGAIN_HOME` relocates every file the tool keeps.
+- `scripts/bench/overhead.mjs` measures M15e. On this machine, 500
+  sequential `echo` calls: direct stdio p99 0.38 ms, `wrap` p99 0.54 ms,
+  daemon over HTTP p99 2.04 ms. The 0.4 gate (p99 overhead under 25 ms) is
+  met.
+
+### Changed
+
+- The registry is JSON (`config.json`) rather than the TOML named in
+  ADR-0006; a TOML parser is not worth a dependency yet.
+- Client request ids are no longer forwarded verbatim to the upstream; they
+  are remapped so several hosts can share it. Arguments are untouched.
+
 ## [0.3.0] - 2026-09-05
 
 ### Added

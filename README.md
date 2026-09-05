@@ -42,16 +42,24 @@ approval.
 
 ## Getting started
 
-Today, 0.3: one server, wrapped in place. The daemon, HTTP routes and
-`import --rewrite` arrive in 0.4 and 0.5 (see `docs/ROADMAP.md`).
+Today, 0.4: a daemon that serves every registered upstream, or one server
+wrapped in place. `import --rewrite` arrives in 0.5 (see `docs/ROADMAP.md`).
 
 ```bash
-# Wrap a stdio server. Its name, tools and errors are untouched; every result
-# gains a receipt; destructive tools are held until you approve.
-npx sayagain wrap -- npx -y @notionhq/notion-mcp-server
+# Register upstreams, start the daemon, point hosts at it.
+sayagain add notion -- npx -y @notionhq/notion-mcp-server
+sayagain add linear --url https://mcp.linear.app/mcp --header "Authorization=Bearer ${LINEAR_TOKEN}"
+sayagain serve --detach            # http://127.0.0.1:7777/mcp/<name>, token in ~/.sayagain/daemon.json
+sayagain status
 
-# In your host config, keep the key and wrap the command:
-#   "notion": { "command": "npx", "args": ["sayagain", "wrap", "--", "npx", "-y", "@notionhq/notion-mcp-server"] }
+# Host entry, keeping the key the host already uses (stdio hosts):
+#   "notion": { "command": "sayagain", "args": ["stdio", "notion"] }
+# or, for hosts that speak Streamable HTTP:
+#   "notion": { "type": "http", "url": "http://127.0.0.1:7777/mcp/notion",
+#               "headers": { "Authorization": "Bearer <token>" } }
+
+# Or wrap one stdio server in place, no daemon:
+npx sayagain wrap -- npx -y @notionhq/notion-mcp-server
 
 sayagain holds                 # what is waiting
 sayagain approve <receipt>     # or: sayagain reject <receipt>

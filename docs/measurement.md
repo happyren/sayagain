@@ -79,7 +79,7 @@ own ledger once it exists, **X** = a designed experiment.
 | M15b | Tokens saved | Sum over avoided retries of the recovery cost the failure would have carried, using the session's own M5 as the counterfactual. | L |
 | M15c | Calls held | Non-read-only calls held, and the split of operator decisions: approved, rejected, expired. A held call later rejected is a prevented side effect. | L |
 | M15d | Replays | Operator replays, and whether the replay succeeded. | L |
-| M15e | Overhead | Boundary latency p50 and p99 on pass-through calls, separately for local and network transport. | L |
+| M15e | Overhead | Boundary latency p50 and p99 on pass-through calls, separately for local and network transport. `scripts/bench/overhead.mjs` measures it locally. | L |
 | M15f | Task success | Share of tasks that end without a dead-lettered call, with and without the boundary. | L, X |
 
 ### Ecosystem metrics (linter)

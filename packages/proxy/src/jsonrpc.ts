@@ -80,3 +80,5 @@ export class LineSplitter {
     return rest.length ? rest : null;
   }
 }
+
+export const keyOfId = (id: JsonRpcId): string => `${typeof id}:${String(id)}`;

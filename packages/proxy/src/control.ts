@@ -5,13 +5,14 @@
  */
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
-import { homedir, platform } from "node:os";
+import { platform } from "node:os";
 import { join } from "node:path";
 import type { DeadLetter } from "./deadletter.js";
 import type { Decision, Hold, HoldQueue } from "./holds.js";
+import { homePath } from "./home.js";
 import { LineSplitter } from "./jsonrpc.js";
 
-export const runDir = (): string => join(homedir(), ".sayagain", "run");
+export const runDir = (): string => homePath("run");
 const isWindows = () => platform() === "win32";
 
 export function socketPathFor(pid: number): string {
@@ -40,6 +41,8 @@ export interface HoldSummary {
   createdAt: string;
   expiresAt: string;
   pid: number;
+  upstream?: string;
+  mode?: string;
 }
 
 export interface DeadLetterSummary {
@@ -79,6 +82,8 @@ export const summarizeHold = (h: Hold, pid: number): HoldSummary => {
     pid,
   };
   if (h.intent !== undefined) s.intent = h.intent;
+  if (h.upstream !== undefined) s.upstream = h.upstream;
+  if (h.mode !== undefined) s.mode = h.mode;
   return s;
 };
 
