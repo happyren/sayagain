@@ -97,4 +97,6 @@ ADR-0009 decision 3; this section is updated when they are.
 
 Every document you offered, sent or not, stays in
 `~/.sayagain/contributions/` with owner-only permissions. Delete them at
-will; the index never reads that directory.
+will; the hosted index never reads that directory. `sayagain index build`
+on your own machine reads your own copies there, for a local build of the
+index pages, and sends nothing.

@@ -170,6 +170,7 @@ export {
   GRADE_SCORE,
   renderIndexSite,
   slugOf,
+  ungradedReason,
 } from "./reliability-index.js";
 export type { RepairChange, RepairResult } from "./repair.js";
 export { repairArguments } from "./repair.js";

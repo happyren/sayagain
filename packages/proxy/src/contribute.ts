@@ -494,6 +494,9 @@ function assertShapeSafe(raw: unknown, where: string): void {
   for (const k of ["toolClass", "modelFamily", "intentCategory"]) enumWord(s[k], `${where}.${k}`);
   for (const k of ["calls", "failures", "unacknowledgedWrites", "duplicateWrites"])
     count(s[k], `${where}.${k}`);
+  for (const k of ["failures", "unacknowledgedWrites", "duplicateWrites"])
+    if ((s[k] as number) > (s.calls as number))
+      throw new Error(`contribution: ${where}.${k} exceeds calls`);
   if (!Array.isArray(s.errors)) throw new Error(`contribution: ${where}.errors must be a list`);
   for (const [j, e] of s.errors.entries()) assertErrorSafe(e, `${where}.errors[${j}]`);
 }

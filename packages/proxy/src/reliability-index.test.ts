@@ -7,8 +7,10 @@ import {
   buildIndex,
   fixesText,
   GRADE_SCORE,
+  type IndexedServer,
   renderIndexSite,
   slugOf,
+  ungradedReason,
 } from "./reliability-index.js";
 
 const finding = (rule: string, severity: Finding["severity"]): Finding => ({
@@ -227,7 +229,7 @@ describe("reliability index", () => {
     expect(pageText).toContain("Two fixes");
     expect(pageText).toContain("Every input property has a description");
     expect(pageText).toContain(
-      "50 contributed calls, 26% failed, mostly coercible; what worked: type-change",
+      "50 contributed calls, 26% failed, most often coercible; what worked: type-change",
     );
     expect(pageText).toContain("claude 40, gpt 10");
     const badge = site.get("badges/io-github-acme-notion-bridge.svg") ?? "";
@@ -264,7 +266,248 @@ describe("reliability index", () => {
     expect(text).toContain("page: https://index.example/servers/io-github-acme-notion-bridge.html");
     expect(text).not.toContain("c_0123456789abcdef");
     const walled = fixesText(index, index.servers[2] as NonNullable<(typeof index.servers)[0]>);
-    expect(walled).toContain("not graded");
+    expect(walled).toContain("not graded: the server wants credentials before it lists its tools");
+  });
+
+  it("links relatively without a base URL, so the site works under any path", () => {
+    const index = buildIndex(scan, [], { version: "t" });
+    const site = renderIndexSite(index, "");
+    const home = site.get("index.html") ?? "";
+    expect(home).toContain('href="servers/io-github-acme-notion-bridge.html"');
+    expect(home).toContain('href="index.json"');
+    expect(home).not.toContain('href="/');
+    const pageText = site.get("servers/io-github-acme-notion-bridge.html") ?? "";
+    expect(pageText).toContain('href="../index.html"');
+    expect(pageText).toContain('src="../badges/io-github-acme-notion-bridge/create-page.svg"');
+    expect(fixesText(index, index.servers[0] as IndexedServer)).toContain(
+      "page: servers/io-github-acme-notion-bridge.html   badge: badges/io-github-acme-notion-bridge.svg   (paths relative to the index)",
+    );
+  });
+
+  it("ranks fixes by what they cost the grade and never by information", () => {
+    const infoOnly: RegistryScan = {
+      ...scan,
+      servers: [
+        {
+          ...(scan.servers[0] as RegistryScan["servers"][number]),
+          tools: [
+            { name: "a", grade: "A", findings: [finding("annotations/compensation", "info")] },
+            {
+              name: "b",
+              grade: "A",
+              findings: [
+                finding("annotations/compensation", "info"),
+                finding("params/constrained", "warning"),
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const index = buildIndex(infoOnly, [], { version: "t" });
+    expect(index.servers[0]?.fixes.map((f) => f.rule)).toEqual(["params/constrained"]);
+    const clean: RegistryScan = {
+      ...infoOnly,
+      servers: [
+        {
+          ...(infoOnly.servers[0] as RegistryScan["servers"][number]),
+          tools: [
+            { name: "a", grade: "A", findings: [finding("annotations/compensation", "info")] },
+          ],
+        },
+      ],
+    };
+    const cleanIndex = buildIndex(clean, [], { version: "t" });
+    expect(cleanIndex.servers[0]?.fixes).toEqual([]);
+    expect(fixesText(cleanIndex, cleanIndex.servers[0] as IndexedServer)).toContain(
+      "nothing moves the score",
+    );
+    expect(renderIndexSite(cleanIndex).get("servers/io-github-acme-notion-bridge.html")).toContain(
+      "Nothing moves the score",
+    );
+  });
+
+  it("matches a contribution by last segment only when one scanned server has it, and merges both keys", () => {
+    const twins: RegistryScan = {
+      ...scan,
+      servers: [
+        {
+          ...(scan.servers[0] as RegistryScan["servers"][number]),
+          name: "io.github.a/mcp",
+          tools: [{ name: "search", grade: "A", findings: [] }],
+        },
+        {
+          ...(scan.servers[0] as RegistryScan["servers"][number]),
+          name: "io.github.b/mcp",
+          tools: [{ name: "search", grade: "A", findings: [] }],
+        },
+        {
+          ...(scan.servers[0] as RegistryScan["servers"][number]),
+          name: "io.github.c/only",
+          tools: [{ name: "search", grade: "A", findings: [] }],
+        },
+      ],
+    };
+    const shape = (
+      server: string,
+      calls: number,
+      failures: number,
+    ): ShapeDocument["shapes"][number] => ({
+      server,
+      tool: "search",
+      toolClass: "read-only",
+      modelFamily: "claude",
+      intentCategory: "search",
+      calls,
+      failures,
+      unacknowledgedWrites: 0,
+      duplicateWrites: 0,
+      errors: [],
+    });
+    const doc: ShapeDocument = {
+      ...contribution,
+      shapes: [shape("mcp", 10, 1), shape("only", 20, 2), shape("io.github.c/only", 30, 3)],
+    };
+    const index = buildIndex(twins, [doc], { version: "t" });
+    const runtimeOf = (name: string) =>
+      index.servers.find((s) => s.name === name)?.tools[0]?.runtime;
+    expect(runtimeOf("io.github.a/mcp")).toBeUndefined(); // "mcp" names two servers
+    expect(runtimeOf("io.github.b/mcp")).toBeUndefined();
+    expect(runtimeOf("io.github.c/only")).toMatchObject({ calls: 50, failures: 5 }); // both keys, merged
+  });
+
+  it("keeps slugs distinct, refuses a score for no calls, and caps failures at calls", () => {
+    const clash: RegistryScan = {
+      ...scan,
+      servers: [
+        {
+          ...(scan.servers[0] as RegistryScan["servers"][number]),
+          name: "io.github.foo-bar/baz",
+          tools: [
+            { name: "get_page", grade: "A", findings: [] },
+            { name: "get-page", grade: "F", findings: [finding("description/present", "error")] },
+          ],
+        },
+        {
+          ...(scan.servers[0] as RegistryScan["servers"][number]),
+          name: "io.github.foo/bar-baz",
+          tools: [{ name: "x", grade: "A", findings: [] }],
+        },
+      ],
+    };
+    const index = buildIndex(clash, [], { version: "t" });
+    expect(index.servers.map((s) => s.slug).sort()).toEqual([
+      "io-github-foo-bar-baz",
+      "io-github-foo-bar-baz-2",
+    ]);
+    const first = index.servers.find((s) => s.name === "io.github.foo-bar/baz");
+    expect(first?.tools.map((t) => t.slug)).toEqual(["get-page", "get-page-2"]);
+    const site = renderIndexSite(index);
+    expect(site.get("badges/io-github-foo-bar-baz/get-page-2.svg")).toContain("F 20");
+    expect(site.get("badges/io-github-foo-bar-baz/get-page.svg")).toContain("A 100");
+    const empty: ShapeDocument = {
+      ...contribution,
+      shapes: [
+        { ...(contribution.shapes[1] as ShapeDocument["shapes"][number]), calls: 0, failures: 0 },
+      ],
+    };
+    expect(
+      buildIndex(scan, [empty], { version: "t" }).servers[0]?.tools.find(
+        (t) => t.name === "create_page",
+      )?.runtime,
+    ).toBeUndefined();
+  });
+
+  it("escapes every registry string and keeps urls and error text out of index.json", () => {
+    const hostile: RegistryScan = {
+      ...scan,
+      servers: [
+        {
+          ...(scan.servers[0] as RegistryScan["servers"][number]),
+          name: 'io.github.x/<b>"bold"</b>',
+          version: "1.0<script>",
+          url: 'https://x.example/mcp?a="1"&b=<2>',
+          detail: "HTTP 500 <secret>",
+          tools: [
+            {
+              name: "t<1>",
+              grade: "F",
+              findings: [
+                {
+                  rule: "description/present",
+                  severity: "error",
+                  message: 'no <description> "here"',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const index = buildIndex(hostile, [], { version: "t" });
+    const site = renderIndexSite(index, "");
+    for (const [path, content] of site) {
+      if (path.endsWith(".json")) continue;
+      expect(content, path).not.toContain("<script>");
+      expect(content, path).not.toContain("<b>");
+      expect(content, path).not.toContain("<description>");
+      expect(content, path).not.toContain("<secret>");
+    }
+    const json = site.get("index.json") ?? "";
+    expect(json).not.toContain("x.example");
+    expect(json).not.toContain("secret");
+    expect(fixesText(index, index.servers[0] as IndexedServer)).not.toContain("secret");
+  });
+
+  it("names the reason a server has no score", () => {
+    const outcomes: RegistryScan["servers"][number]["outcome"][] = [
+      "auth",
+      "unreachable",
+      "not-mcp",
+      "no-tools",
+      "refused",
+      "skipped",
+    ];
+    const index = buildIndex(
+      {
+        ...scan,
+        servers: outcomes.map((outcome, i) => ({
+          ...(scan.servers[2] as RegistryScan["servers"][number]),
+          name: `io.example/s${i}`,
+          outcome,
+        })),
+      },
+      [],
+      { version: "t" },
+    );
+    const reasons = index.servers.map((s) => ungradedReason(s));
+    expect(reasons).toEqual(
+      expect.arrayContaining([
+        "wants credentials before it lists its tools",
+        "did not answer the probe",
+        "answered with something other than MCP",
+        "listed no tools",
+        "answered the probe with an error",
+        "points at a private address and was not probed",
+      ]),
+    );
+    const invalid = buildIndex(
+      {
+        ...scan,
+        servers: [
+          {
+            ...(scan.servers[2] as RegistryScan["servers"][number]),
+            outcome: "ok",
+            invalidTools: 2,
+          },
+        ],
+      },
+      [],
+      { version: "t" },
+    );
+    expect(fixesText(invalid, invalid.servers[0] as IndexedServer)).toContain(
+      "not graded: the server listed 2 definitions the linter could not read",
+    );
   });
 
   it("makes slugs and badges", () => {

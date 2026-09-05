@@ -92,8 +92,8 @@ Deliverables
   behaviour, the resolution that worked, and a description-rewrite
   suggestion. A README badge per tool, a link per server.
 - A data post with the headline numbers: registry share without parameter
-  constraints; wrong-tool rate and recovery rate across the contributed
-  sessions.
+  constraints; mis-call rate (M19) and calls to recover (M17) across the
+  contributed sessions.
 - Direct outreach to the top hundred server maintainers with their score
   and two fixes each.
 - The convention published: `sh.sayagain/intent` and the `_meta` keys

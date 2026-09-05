@@ -1,14 +1,16 @@
-name: Index
+name: Tool Reliability Index
 
 # The Tool Reliability Index as a static artefact (ADR-0010): scan a sample of the public
 # registry, build the site, keep both as workflow artifacts. Publishing to GitHub Pages and the
-# weekly schedule are switched on by repository variables, so hosting stays a decision.
+# weekly schedule are switched on by repository variables, so hosting stays a decision. A CI
+# build has no contribution documents (the endpoint of ADR-0009 decision 3 does not exist yet),
+# so its pages carry static scores only.
 
 on:
   workflow_dispatch:
     inputs:
       sample:
-        description: Servers with a remote to probe (a seeded random sample)
+        description: How many servers with a Streamable HTTP remote to probe (a seeded random sample)
         default: "400"
       seed:
         description: Seed for the sample
@@ -33,6 +35,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
       - name: Scan the registry
+        shell: bash
         run: >
           node packages/proxy/dist/cli.js lint --registry
           --sample ${{ inputs.sample || '400' }} --seed ${{ inputs.seed || '20260905' }}
@@ -41,7 +44,7 @@ jobs:
         run: node packages/proxy/dist/cli.js index build --from scan.json --contributions contributions --out site --base-url ""
       - uses: actions/upload-artifact@v6
         with:
-          name: index
+          name: reliability-index
           path: |
             site
             scan.json

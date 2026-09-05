@@ -21,7 +21,7 @@ server: it is a function of two files.
 
 `sayagain index build` turns a registry scan and a directory of
 contribution documents into a directory of static files: `index.html`,
-one page and one SVG badge per server, one badge per tool, and
+one page and one SVG badge per graded server, one badge per tool, and
 `index.json`. `sayagain index fixes <server>` prints the outreach message
 for one maintainer. A GitHub Actions workflow (`index.yml`) runs the scan
 and the build on demand and, when the repository variable
@@ -32,17 +32,20 @@ Flipping those variables is the hosting decision, left to the owner.
 Scoring: a tool's static score is its linter grade (A 100, B 80, C 60,
 D 40, F 20); a server's is the mean over its tools, graded again at 90,
 70, 50 and 30. A runtime score is 100 minus the failure rate over the
-contributed calls for that tool, shown with the dominant error class, the
-per-family counts, the resolution that worked most, and the linter's
-suggestion for that class. Contributions are matched to registry servers
+contributed calls for that tool, shown with the most frequent error class,
+the per-family counts, the most-recorded resolution, and the audit's
+suggestion for that error class (operator wording; a maintainer-facing
+rewrite suggestion waits for real runtime data). Contributions are matched to registry servers
 by name (the registry name, or its last segment, lowercased). The "two
 fixes" are the two rules whose findings weigh most across the server's
-tools (error 3, warning 1, info 0.25, per tool).
+tools (error 3, warning 1, per tool; informational findings never move a
+grade and are never a fix).
 
 What the site carries: registry names, versions and remote URLs (public
-registry data), grades, findings, and aggregates over shapes. What it never
-carries: contributor ids, consent records, sessions, receipts, argument
-shapes, signature hashes, or anything from the local ledger.
+registry data), grades, findings, and aggregates over shapes (counts,
+including a session count). What it never carries: contributor ids,
+consent records, session ids, receipts, argument shapes, signature hashes,
+error text, or anything from the local ledger.
 
 ## Alternatives considered
 

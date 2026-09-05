@@ -290,13 +290,15 @@ structured result, dotted). When the effect cannot be undone:
 { "none": "an email cannot be unsent" }
 ```
 
-A boundary MAY run a declared compensation when a declared sequence of
-calls fails past its budget and the earlier steps must be unwound (units of
-commitment; a later document). It MUST NOT run one on its own initiative
-for a single call: the compensation is a verdict's tool, not the boundary's
-plan. The linter reports a tool that is neither read-only nor idempotent
-and carries no `sh.sayagain/compensation` key as informational
-(`annotations/compensation`).
+Running a compensation is an operator action, or the policy of a unit of
+commitment the client declared (a later document). A boundary MUST NOT run
+one automatically for a single call, and MUST NOT run one on another
+server than the one that declared it.
+
+Note: `@sayagain/lint` reports a tool that is neither read-only nor
+idempotent and carries no `sh.sayagain/compensation` key as informational
+(`annotations/compensation`). That is a product convention, not part of
+this document's conformance.
 
 ## 9. Security considerations
 
@@ -326,7 +328,7 @@ and the schema shim (section 7) are optional features.
 - v0.1.1 (2026-09-04): added 5.5, the boundary announcement on `initialize`.
 - v0.1.2 (2026-09-05): `sh.sayagain/duplicate-of` on deduplicated responses; `held.decision` on rejected and later-approved calls.
 - v0.1.3 (2026-09-05): `sh.sayagain/replay-of`; guidance sentence appended to failed results; dead-lettered semantics clarified.
-- v0.1.5 (2026-09-05): receipt and status on JSON-RPC error responses via `error.data`; `held.mode`; cancellation of held calls; `repaired` status emitted when arguments were changed and the call succeeded.
+- v0.1.4 (2026-09-05): receipt and status on JSON-RPC error responses via `error.data`; `held.mode`; cancellation of held calls; `repaired` status emitted when arguments were changed and the call succeeded.
 - v0.1.5 (2026-09-05): `boundary.ledger` enumerated and `boundary.hold` added to 5.5.
 - v0.1.6 (2026-09-05): `repair.rule` may be `learned:<rule>` for a coercion the boundary derived from its own ledger (5.4).
-- v0.1.7 (2026-09-05): section 8, tool declarations: `sh.sayagain/idempotency` and `sh.sayagain/compensation` in a tool's `_meta`; sections 8 to 10 renumbered.
+- v0.1.7 (2026-09-05): section 8, tool declarations: `sh.sayagain/idempotency` and `sh.sayagain/compensation` in a tool's `_meta`; former sections 8 to 10 are now 9 to 11.

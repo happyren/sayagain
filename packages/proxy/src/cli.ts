@@ -161,12 +161,6 @@ const USAGE = `sayagain ${PROXY_VERSION}
       rotate the id and ask the index to delete the old one's data.
   sayagain lint <name>|--all [--file <tools.json>] [--fail-below A|B|C|D] [--json]
       Grade a server's tool definitions with @sayagain/lint (starts the upstream through the daemon if needed).
-  sayagain index build --from <scan.json> [--contributions <dir>] [--out <dir>] [--base-url <url>]
-      The Tool Reliability Index as a static site (ADR-0010) from a registry scan (--out of lint --registry) and
-      the contributed shape documents in <dir> (default ~/.sayagain/contributions): index.html, a page and a
-      badge per server, a badge per tool, index.json. Public registry data and aggregates only.
-  sayagain index fixes <server> --from <scan.json> [--contributions <dir>] [--base-url <url>]
-      The message for a maintainer: their score and the two fixes that move it most. Printed, never sent.
   sayagain lint --registry [--sample <n> [--seed 20260905] | --first <n>] [--concurrency 8] [--timeout 10s]
                  [--out <file>] [--json] [--registry-url <url> [--allow-private]]
       Scan the public MCP registry (docs/measurement.md 5.5): ask every server with a Streamable HTTP remote for
@@ -174,6 +168,13 @@ const USAGE = `sayagain ${PROXY_VERSION}
       parameter constraints) with the rule-set version. The page and --json name no server; the progress log on
       stderr does. --out writes every probed server (registry name, version, remote URL, outcome, status, error
       text) and every graded tool with its findings, all of it public registry data.
+  sayagain index build --from <scan.json> [--contributions <dir>] [--out <dir>] [--base-url <url>]
+      The Tool Reliability Index as a static site (ADR-0010): from the scan file that lint --registry --out
+      wrote and the contributed shape documents in <dir> (your own copies; default ~/.sayagain/contributions),
+      index.html, a page and a badge per graded server, a badge per tool, index.json, into --out (default
+      ~/.sayagain/index). Public registry data and aggregates only; nothing is sent.
+  sayagain index fixes <server> --from <scan.json> [--contributions <dir>] [--base-url <url>]
+      The message for a maintainer: their score and the two changes that move it most. Printed, never sent.
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
   sayagain holds [--json]
   sayagain approve <receipt> | sayagain reject <receipt>
