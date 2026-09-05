@@ -152,10 +152,13 @@ const USAGE = `sayagain ${PROXY_VERSION}
       rotate the id and ask the index to delete the old one's data.
   sayagain lint <name>|--all [--file <tools.json>] [--fail-below A|B|C|D] [--json]
       Grade a server's tool definitions with @sayagain/lint (starts the upstream through the daemon if needed).
-  sayagain lint --registry [--sample <n> [--seed <n>] | --first <n>] [--concurrency 8] [--timeout 10s] [--out <file>]
+  sayagain lint --registry [--sample <n> [--seed 20260905] | --first <n>] [--concurrency 8] [--timeout 10s]
+                 [--out <file>] [--json] [--registry-url <url>]
       Scan the public MCP registry (docs/measurement.md 5.5): ask every server with a Streamable HTTP remote for
-      its tools without credentials, grade them, print the M16 distribution with the rule-set version. --out keeps
-      the per-server results as JSON; the printed page names no server.
+      its tools without credentials, grade them, print the grade distribution and M16 (tools without documented
+      parameter constraints) with the rule-set version. The page and --json name no server; the progress log on
+      stderr does. --out writes every probed server (registry name, version, remote URL, outcome, status, error
+      text) and every graded tool with its findings, all of it public registry data.
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
   sayagain holds [--json]
   sayagain approve <receipt> | sayagain reject <receipt>
@@ -1301,6 +1304,8 @@ export async function main(argv: string[]): Promise<number> {
     if (opts.length) throw new UsageError(`lint: unknown option ${opts[0]}`);
     if (sample !== undefined && first !== undefined)
       throw new UsageError("lint: --sample and --first are alternatives");
+    if (seed !== undefined && sample === undefined)
+      throw new UsageError("lint: --seed goes with --sample");
     let timeoutMs: number | undefined;
     if (timeoutOption !== undefined) {
       const m = timeoutOption.match(/^(\d+)\s*(ms|s)?$/);

@@ -65,8 +65,21 @@ export interface RegistryScan {
   grades: Record<"A" | "B" | "C" | "D" | "F", number>;
   /** Share of graded tools with at least one finding under the rule, in percent. */
   findingShares: Record<string, number>;
-  /** M16: share of graded tools without documented parameter constraints, with a 95% interval. */
-  m16: { pct: number; low: number; high: number; n: number };
+  /**
+   * M16: share of graded tools with a `params/constrained` finding, with a 95% Wilson interval
+   * that treats tools as independent (it ignores clustering by server), plus the per-server view.
+   */
+  m16: {
+    pct: number;
+    low: number;
+    high: number;
+    n: number;
+    /** Servers that answered, and how many of them list at least one such tool. */
+    servers: number;
+    serversWithFinding: number;
+    /** The median, across servers that answered, of each server's own share. */
+    medianServerSharePct: number;
+  };
   servers: ScannedServer[];
 }
 
@@ -266,7 +279,6 @@ export async function scanRegistry(opts: ScanOptions = {}): Promise<RegistryScan
   const listed = await listRegistry({
     ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
     ...(opts.registryUrl ? { url: opts.registryUrl } : {}),
-    ...(opts.first !== undefined && opts.sample === undefined ? { max: opts.first * 3 } : {}),
     ...(opts.log ? { log: opts.log } : {}),
   });
   const withRemote = listed.filter(
@@ -321,16 +333,26 @@ export async function scanRegistry(opts: ScanOptions = {}): Promise<RegistryScan
   const byRule: Record<string, number> = {};
   let tools = 0;
   let unconstrained = 0;
+  const serverShares: number[] = [];
   for (const r of results) {
     outcomes[r.outcome]++;
+    let own = 0;
     for (const t of r.tools) {
       tools++;
       grades[t.grade]++;
       const rules = new Set(t.findings.map((f) => f.rule));
       for (const rule of rules) byRule[rule] = (byRule[rule] ?? 0) + 1;
-      if (rules.has("params/constrained")) unconstrained++;
+      if (rules.has("params/constrained")) {
+        unconstrained++;
+        own++;
+      }
     }
+    if (r.outcome === "ok" && r.tools.length) serverShares.push((100 * own) / r.tools.length);
   }
+  const sortedShares = [...serverShares].sort((a, b) => a - b);
+  const medianServerSharePct = sortedShares.length
+    ? +(sortedShares[Math.floor((sortedShares.length - 1) / 2)] as number).toFixed(1)
+    : 0;
   const findingShares: Record<string, number> = {};
   for (const [rule, n] of Object.entries(byRule).sort())
     findingShares[rule] = tools ? +((100 * n) / tools).toFixed(1) : 0;
@@ -349,7 +371,13 @@ export async function scanRegistry(opts: ScanOptions = {}): Promise<RegistryScan
     tools,
     grades,
     findingShares,
-    m16: { ...wilson(unconstrained, tools), n: tools },
+    m16: {
+      ...wilson(unconstrained, tools),
+      n: tools,
+      servers: serverShares.length,
+      serversWithFinding: serverShares.filter((x) => x > 0).length,
+      medianServerSharePct,
+    },
     servers: results,
   };
 }
@@ -377,7 +405,16 @@ export function renderRegistryScan(s: RegistryScan): string {
   );
   out.push("");
   out.push(
-    `M16, tools without documented parameter constraints: ${s.m16.pct}% (95% interval ${s.m16.low} to ${s.m16.high}, n = ${s.m16.n})`,
+    `M16, tools without documented parameter constraints: ${s.m16.pct}% (95% interval ${s.m16.low} to ${s.m16.high}, n = ${s.m16.n} tools)`,
+  );
+  out.push(
+    `  per server: ${s.m16.serversWithFinding} of ${s.m16.servers} servers list at least one such tool; median share within a server ${s.m16.medianServerSharePct}%`,
+  );
+  out.push(
+    "  coverage: only servers with a Streamable HTTP remote were probed, without credentials; package-only and SSE-only servers are listed, not probed.",
+  );
+  out.push(
+    "  the interval treats tools as independent and ignores that they cluster by server; the denominator is every tool a server that answered listed, parameterless tools included",
   );
   out.push("Share of tools with a finding, per rule");
   for (const [rule, share] of Object.entries(s.findingShares))

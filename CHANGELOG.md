@@ -15,10 +15,14 @@ All notable changes to this project are documented here. The format follows
   HTTP remote for its tools without credentials, grades them with
   `@sayagain/lint`, and prints the outcome counts, the grade distribution,
   the share of tools with a finding per rule, and M16 (tools without
-  documented parameter constraints) with a 95% interval and the rule-set
-  version. `--sample <n> --seed <n>` for a reproducible random sample,
-  `--first <n>`, `--concurrency`, `--timeout`, `--out <file>` for the
-  per-server results, `--json`. The printed page names no server.
+  documented parameter constraints) with a 95% interval, the per-server
+  view, the coverage statement, and the rule-set version. `--sample <n>
+  --seed <n>` for a reproducible random sample of the servers with a
+  remote, `--first <n>`, `--concurrency`, `--timeout`, `--out <file>` for
+  the per-server results (registry names, URLs, outcomes, findings: public
+  registry data), `--json`. The page and `--json` name no server; the
+  progress log on stderr does. The first scan is in
+  `docs/registry-scan.md`.
 - `sayagain audit --project <name>`: one project's sessions only (its
   directory name; worktrees and variants included; Codex sessions by their
   working directory), for the per-agent baselines.

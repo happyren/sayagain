@@ -249,6 +249,9 @@ describe("cli audit and contribute", () => {
       await expect(main(["lint", "--registry", "--sample", "1", "--first", "1"])).rejects.toThrow(
         /alternatives/,
       );
+      await expect(main(["lint", "--registry", "--first", "1", "--seed", "3"])).rejects.toThrow(
+        /--seed goes with --sample/,
+      );
       await expect(main(["lint", "--registry", "--timeout", "soon"])).rejects.toThrow(/--timeout/);
     } finally {
       await new Promise<void>((r) => server.close(() => r()));

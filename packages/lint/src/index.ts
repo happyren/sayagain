@@ -79,7 +79,7 @@ export const RULES: readonly Rule[] = [
     category: "parameters",
     severity: "warning",
     summary:
-      "Strings that look like ids, dates or enums carry `format`, `pattern` or `enum`; numbers carry bounds.",
+      "A string that reads as an id, date or choice carries `format`, `pattern`, `enum`, `const` or a length bound; a number carries a bound, `multipleOf`, `enum` or `const`.",
     implemented: true,
   },
   {
@@ -236,8 +236,9 @@ export function lintTool(tool: ToolDefinition): Finding[] {
       if (!hasNumberConstraint(schema))
         emit("params/constrained", `number ${key} has no bounds (minimum, maximum, enum)`, path);
     } else if (types.includes("string") || (!types.length && schema.enum === undefined)) {
+      const snake = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2"); // userId reads as user_id
       const looksConstrained =
-        CONSTRAINED_NAME.test(key) || CONSTRAINED_DESC.test(schema.description ?? "");
+        CONSTRAINED_NAME.test(snake) || CONSTRAINED_DESC.test(schema.description ?? "");
       if (looksConstrained && !hasStringConstraint(schema))
         emit(
           "params/constrained",

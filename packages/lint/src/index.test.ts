@@ -61,13 +61,20 @@ describe("lintTool", () => {
           kind: { type: "string", description: "one of these", enum: ["a", "b"] },
           count: { type: "number", description: "A bounded number", minimum: 0, maximum: 10 },
           note: { type: "string", description: "Free text" },
+          sortOrder: { type: "string", description: "asc or desc" },
+          createdAt: { type: "string", description: "when", format: "date-time" },
         },
         required: [],
         additionalProperties: false,
       },
     });
     const paths = f.filter((x) => x.rule === "params/constrained").map((x) => x.path);
-    expect(paths).toEqual(["/properties/user_id", "/properties/status", "/properties/limit"]);
+    expect(paths).toEqual([
+      "/properties/user_id",
+      "/properties/status",
+      "/properties/limit",
+      "/properties/sortOrder",
+    ]);
     expect(RULES.find((r) => r.id === "params/constrained")?.implemented).toBe(true);
     expect(RULE_SET_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });

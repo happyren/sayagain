@@ -1,6 +1,6 @@
 # Tool Definition Best Practices for MCP (whitepaper outline)
 
-Working title. The linter (`@sayagain/lint`) implements the rules; this
+Working title. The linter (`@sayagain/lint`) implements ten of the fifteen rules (the catalogue marks the rest as intent; `RULE_SET_VERSION` dates the set); this
 document explains them. Draft sections:
 
 1. **Why descriptions fail.** Original descriptions cover under 12 percent

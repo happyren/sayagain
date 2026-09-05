@@ -221,7 +221,13 @@ describe("registry scan", () => {
     expect(scan.tools).toBe(2);
     expect(scan.grades).toEqual({ A: 1, B: 0, C: 0, D: 0, F: 1 });
     expect(scan.findingShares["params/constrained"]).toBe(50);
-    expect(scan.m16).toEqual({ ...wilson(1, 2), n: 2 });
+    expect(scan.m16).toEqual({
+      ...wilson(1, 2),
+      n: 2,
+      servers: 1,
+      serversWithFinding: 1,
+      medianServerSharePct: 50,
+    });
     expect(
       scan.servers.find((s) => s.name === "io.example/good")?.tools.map((t) => t.grade),
     ).toEqual(["A", "F"]);
