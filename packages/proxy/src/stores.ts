@@ -1,8 +1,10 @@
 /**
  * Storage behind the boundary: the ledger, dead letters and persisted holds.
- * JSONL files by default; SQLite (node:sqlite, Node 24+) when asked for.
+ * JSONL files by default; SQLite (node:sqlite, Node 22.13+) when asked for.
  */
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname } from "node:path";
 import { type DeadLetter, DeadLetterStore, defaultDeadLetterPath } from "./deadletter.js";
 import type { Decision, Hold } from "./holds.js";
 import { homePath } from "./home.js";
@@ -24,15 +26,18 @@ export interface DeadLetters {
 
 export interface HoldPersistence {
   save(hold: Hold): void;
-  decide(receipt: string, decision: Decision): void;
+  decide(receipt: string, decision: Decision, decidedAt?: number): void;
   pending(): Hold[];
 }
 
+export type StoreKind = "jsonl" | "sqlite" | "memory";
+
 export interface Stores {
-  kind: "jsonl" | "sqlite" | "memory";
+  kind: StoreKind;
   ledger: Ledger;
   deadLetters: DeadLetters;
-  holds?: HoldPersistence;
+  holds: HoldPersistence;
+  /** The last `tail` rows in ledger order; every row when `tail` is undefined; none when it is 0. */
   readLedger(tail?: number): LedgerRow[];
   close(): void;
 }
@@ -48,39 +53,66 @@ interface SqliteDatabase {
   close(): void;
 }
 
-function openSqlite(path: string): SqliteDatabase | null {
+/** True when this Node.js ships node:sqlite. */
+export function sqliteAvailable(): boolean {
   try {
-    const require = createRequire(import.meta.url);
-    const mod = require("node:sqlite") as { DatabaseSync: new (p: string) => SqliteDatabase };
-    return new mod.DatabaseSync(path);
+    loadSqlite();
+    return true;
   } catch {
-    return null;
+    return false;
+  }
+}
+
+function loadSqlite(): { DatabaseSync: new (p: string) => SqliteDatabase } {
+  const require = createRequire(import.meta.url);
+  // node:sqlite prints an ExperimentalWarning at load on 22.13 to 24; it is stable enough for a
+  // local ledger, and the warning would land in the host's log on every start.
+  const emit = process.emitWarning;
+  process.emitWarning = ((warning: unknown, ...rest: unknown[]) => {
+    const text =
+      typeof warning === "string" ? warning : ((warning as Error | undefined)?.message ?? "");
+    if (/SQLite is an experimental feature/.test(text)) return;
+    (emit as (...a: unknown[]) => void).call(process, warning, ...rest);
+  }) as typeof process.emitWarning;
+  try {
+    return require("node:sqlite") as { DatabaseSync: new (p: string) => SqliteDatabase };
+  } finally {
+    process.emitWarning = emit;
   }
 }
 
 export const defaultSqlitePath = (): string => homePath("sayagain.db");
+export const defaultHoldsPath = (): string => homePath("holds.jsonl");
+
+const tailOf = <T>(rows: T[], tail: number | undefined): T[] => {
+  if (tail === undefined) return rows;
+  const n = Math.max(0, Math.floor(tail));
+  return n === 0 ? [] : rows.slice(-n);
+};
 
 class SqliteStores implements Stores {
   readonly kind = "sqlite" as const;
   readonly ledger: Ledger;
   readonly deadLetters: DeadLetters;
   readonly holds: HoldPersistence;
-  private readonly insertCall: SqliteStatement;
   private readonly selectCalls: SqliteStatement;
+  private open = true;
   constructor(private readonly db: SqliteDatabase) {
     db.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS calls (seq INTEGER PRIMARY KEY AUTOINCREMENT, receipt TEXT NOT NULL, ts TEXT NOT NULL, upstream TEXT, tool TEXT, status TEXT, is_error INTEGER, row TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS calls_receipt ON calls(receipt);
       CREATE TABLE IF NOT EXISTS deadletters (receipt TEXT PRIMARY KEY, ts TEXT, upstream TEXT, tool TEXT, entry TEXT NOT NULL, resolved_by TEXT);
       CREATE TABLE IF NOT EXISTS holds (receipt TEXT PRIMARY KEY, upstream TEXT, created_at INTEGER, expires_at INTEGER, hold TEXT NOT NULL, decision TEXT, decided_at INTEGER);
     `);
-    this.insertCall = db.prepare(
+    const insertCall = db.prepare(
       "INSERT INTO calls (receipt, ts, upstream, tool, status, is_error, row) VALUES (?, ?, ?, ?, ?, ?, ?)",
     );
     this.selectCalls = db.prepare("SELECT row FROM calls ORDER BY seq DESC LIMIT ?");
     this.ledger = {
       append: (row: LedgerRow) => {
-        this.insertCall.run(
+        insertCall.run(
           row.receipt,
           row.ts,
           row.upstream,
@@ -123,8 +155,9 @@ class SqliteStores implements Stores {
     const saveHold = db.prepare(
       "INSERT OR REPLACE INTO holds (receipt, upstream, created_at, expires_at, hold, decision, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     );
+    const getHold = db.prepare("SELECT hold FROM holds WHERE receipt = ?");
     const decideHold = db.prepare(
-      "UPDATE holds SET decision = ?, decided_at = ? WHERE receipt = ?",
+      "UPDATE holds SET decision = ?, decided_at = ?, hold = ? WHERE receipt = ?",
     );
     const pendingHolds = db.prepare(
       "SELECT hold FROM holds WHERE decision IS NULL AND expires_at > ? ORDER BY created_at",
@@ -141,38 +174,116 @@ class SqliteStores implements Stores {
           h.decidedAt ?? null,
         );
       },
-      decide: (receipt, decision) => {
-        decideHold.run(decision, Date.now(), receipt);
+      decide: (receipt, decision, decidedAt = Date.now()) => {
+        const r = getHold.get(receipt);
+        if (!r) return;
+        const hold = { ...(JSON.parse(String(r.hold)) as Hold), decision, decidedAt };
+        decideHold.run(decision, decidedAt, JSON.stringify(hold), receipt);
       },
       pending: () => pendingHolds.all(Date.now()).map((r) => JSON.parse(String(r.hold)) as Hold),
     };
   }
-  readLedger(tail = 100): LedgerRow[] {
+  readLedger(tail?: number): LedgerRow[] {
+    const limit = tail === undefined ? -1 : Math.max(0, Math.floor(tail));
+    if (limit === 0) return [];
     return this.selectCalls
-      .all(tail)
+      .all(limit)
       .map((r) => JSON.parse(String(r.row)) as LedgerRow)
       .reverse();
   }
   close(): void {
+    if (!this.open) return;
+    this.open = false;
     this.db.close();
+  }
+}
+
+/** Holds in a JSONL file: one line per hold, one line per decision; `pending()` replays the file. */
+export class JsonlHolds implements HoldPersistence {
+  constructor(readonly path: string) {}
+  private write(line: unknown): void {
+    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+    appendFileSync(this.path, `${JSON.stringify(line)}\n`, { mode: 0o600 });
+  }
+  save(hold: Hold): void {
+    this.write({ type: "hold", hold });
+  }
+  decide(receipt: string, decision: Decision, decidedAt = Date.now()): void {
+    this.write({ type: "decision", receipt, decision, decidedAt });
+  }
+  pending(): Hold[] {
+    if (!existsSync(this.path)) return [];
+    const holds = new Map<string, Hold>();
+    for (const line of readFileSync(this.path, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      let entry: {
+        type: string;
+        hold?: Hold;
+        receipt?: string;
+        decision?: Decision;
+        decidedAt?: number;
+      };
+      try {
+        entry = JSON.parse(line) as typeof entry;
+      } catch {
+        continue;
+      }
+      if (entry.type === "hold" && entry.hold) holds.set(entry.hold.receipt, entry.hold);
+      else if (entry.type === "decision" && entry.receipt) holds.delete(entry.receipt);
+    }
+    const now = Date.now();
+    return [...holds.values()].filter((h) => h.decision === undefined && h.expiresAt > now);
+  }
+}
+
+export class MemoryHolds implements HoldPersistence {
+  readonly holds = new Map<string, Hold>();
+  save(hold: Hold): void {
+    this.holds.set(hold.receipt, { ...hold });
+  }
+  decide(receipt: string, decision: Decision, decidedAt = Date.now()): void {
+    const h = this.holds.get(receipt);
+    if (h) Object.assign(h, { decision, decidedAt });
+  }
+  pending(): Hold[] {
+    const now = Date.now();
+    return [...this.holds.values()].filter((h) => h.decision === undefined && h.expiresAt > now);
   }
 }
 
 export interface OpenStoresOptions {
   ledgerPath?: string;
   deadLetterPath?: string;
+  holdsPath?: string;
   sqlitePath?: string;
   log?: (line: string) => void;
 }
 
-export function openStores(
-  kind: "jsonl" | "sqlite" | "memory",
-  opts: OpenStoresOptions = {},
-): Stores {
+/**
+ * Open the stores of one kind. "sqlite" falls back to JSONL only when this Node.js has no
+ * node:sqlite; any other failure (unwritable directory, corrupt file) is thrown.
+ */
+export function openStores(kind: StoreKind, opts: OpenStoresOptions = {}): Stores {
   if (kind === "sqlite") {
-    const db = openSqlite(opts.sqlitePath ?? defaultSqlitePath());
-    if (db) return new SqliteStores(db);
-    opts.log?.("sayagain: node:sqlite is not available on this Node.js; using JSONL files instead");
+    let mod: ReturnType<typeof loadSqlite> | null = null;
+    try {
+      mod = loadSqlite();
+    } catch {
+      opts.log?.(
+        "sayagain: this Node.js has no node:sqlite (needs 22.13 or newer); using JSONL files instead",
+      );
+    }
+    if (mod) {
+      const path = opts.sqlitePath ?? defaultSqlitePath();
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      const db = new mod.DatabaseSync(path);
+      try {
+        chmodSync(path, 0o600);
+      } catch {
+        // best effort; the home directory is 0700 anyway
+      }
+      return new SqliteStores(db);
+    }
   }
   if (kind === "memory") {
     const ledger = new MemoryLedger();
@@ -180,7 +291,8 @@ export function openStores(
       kind: "memory",
       ledger,
       deadLetters: new DeadLetterStore(),
-      readLedger: (tail) => (tail === undefined ? ledger.rows : ledger.rows.slice(-tail)),
+      holds: new MemoryHolds(),
+      readLedger: (tail) => tailOf(ledger.rows, tail),
       close: () => {},
     };
   }
@@ -189,7 +301,9 @@ export function openStores(
     kind: "jsonl",
     ledger,
     deadLetters: new DeadLetterStore(opts.deadLetterPath ?? defaultDeadLetterPath()),
-    readLedger: (tail) => readLedger(ledger.path, tail === undefined ? {} : { tail }),
+    holds: new JsonlHolds(opts.holdsPath ?? defaultHoldsPath()),
+    readLedger: (tail) =>
+      tail === undefined ? readLedger(ledger.path, {}) : tailOf(readLedger(ledger.path, {}), tail),
     close: () => {},
   };
 }

@@ -83,6 +83,16 @@ export class ToolClassifier {
     return this.resolveReady === undefined;
   }
 
+  /** Forget what was learned (the upstream restarted and may serve different tools); `ready` resets too. */
+  reset(): void {
+    this.annotations.clear();
+    this.schemas.clear();
+    if (this.resolveReady === undefined)
+      (this as { ready: Promise<void> }).ready = new Promise((resolve) => {
+        this.resolveReady = resolve;
+      });
+  }
+
   /** The probe answered without tools (error or empty): stop waiting, there is nothing to learn yet. */
   markProbed(): void {
     if (this.resolveReady) {

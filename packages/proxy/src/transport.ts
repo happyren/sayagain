@@ -1,15 +1,18 @@
-/** Transports the boundary core talks through. A Session is a connected host; an Upstream is the real server. */
+/** The two ends of the boundary: hosts attach as sessions; the upstream is what the boundary talks to. */
 import type { JsonRpcMessage } from "./jsonrpc.js";
 
 export interface Session {
-  /** Stable within the boundary's lifetime. */
   id: string;
-  /** Deliver one message to this host. */
   send(msg: JsonRpcMessage): void;
+  /**
+   * Can this session carry messages the upstream initiates (requests, notifications)?
+   * A stdio host can; a one-shot HTTP POST cannot. Undefined means yes.
+   */
+  readonly bidirectional?: boolean;
 }
 
 export interface Upstream {
-  /** Send one newline-terminated JSON-RPC line. Returns false when the upstream cannot take it. */
+  /** Queue one newline-terminated JSON-RPC line. Returns false when the upstream cannot take it. */
   send(line: string): boolean;
   readonly ready: boolean;
   onLine(cb: (line: string) => void): void;

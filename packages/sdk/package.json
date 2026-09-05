@@ -25,7 +25,7 @@
     "directory": "packages/sdk"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "publishConfig": {
     "access": "public"

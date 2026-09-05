@@ -90,9 +90,16 @@ export class StdioUpstream implements Upstream {
     }
   }
 
-  stop(): void {
+  /** Close stdin and give the server a moment to exit on EOF before killing it. */
+  stop(graceMs = 1500): void {
     this.end();
-    if (this.child && !this.closed) this.child.kill();
+    const child = this.child;
+    if (!child || this.closed) return;
+    const timer = setTimeout(() => {
+      if (!this.closed) child.kill();
+    }, graceMs);
+    timer.unref();
+    child.once("close", () => clearTimeout(timer));
   }
 
   kill(signal?: NodeJS.Signals): void {

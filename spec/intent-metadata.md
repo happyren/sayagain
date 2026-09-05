@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1.4                                      |
+| Status         | Draft v0.1.5                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -207,8 +207,14 @@ boundary MUST NOT alter `serverInfo`, `capabilities` or tool names to
 announce itself; this key is the only announcement.
 
 ```json
-{ "name": "sayagain", "version": "0.1.0", "upstream": "notion", "ledger": "sqlite", "shim": false }
+{ "name": "sayagain", "version": "0.4.0", "upstream": "notion", "ledger": "jsonl", "shim": false, "hold": "destructive" }
 ```
+
+`ledger` is one of `"memory"`, `"jsonl"`, `"sqlite"`, `"postgres"`: where
+receipts can be looked up. `hold` is the boundary's hold policy, one of
+`"destructive"`, `"always"`, `"never"` (section 3.5 uses the same words for
+a per-call override; `"auto"` there means "the boundary's setting"). Both
+are informational.
 
 Clients MAY display it and MUST NOT require it. A boundary MAY additionally
 append one sentence to the `initialize` result's `instructions` naming the
@@ -276,4 +282,5 @@ and the schema shim (section 7) are optional features.
 - v0.1.1 (2026-09-04): added 5.5, the boundary announcement on `initialize`.
 - v0.1.2 (2026-09-05): `sh.sayagain/duplicate-of` on deduplicated responses; `held.decision` on rejected and later-approved calls.
 - v0.1.3 (2026-09-05): `sh.sayagain/replay-of`; guidance sentence appended to failed results; dead-lettered semantics clarified.
-- v0.1.4 (2026-09-05): receipt and status on JSON-RPC error responses via `error.data`; `held.mode`; cancellation of held calls; `repaired` status emitted when arguments were changed and the call succeeded.
+- v0.1.5 (2026-09-05): receipt and status on JSON-RPC error responses via `error.data`; `held.mode`; cancellation of held calls; `repaired` status emitted when arguments were changed and the call succeeded.
+- v0.1.5 (2026-09-05): `boundary.ledger` enumerated and `boundary.hold` added to 5.5.

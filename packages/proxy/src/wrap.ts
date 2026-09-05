@@ -119,21 +119,32 @@ export function wrap(options: WrapOptions): Wrapped {
     exitCode = code ?? 0;
     finish();
   });
-  void boundary.start().then((result) => {
-    if (result === null && !finished) {
+  output.on("error", () => finish());
+  boundary
+    .start()
+    .then((result) => {
+      if (result === null && !finished) {
+        exitCode = 1;
+        finish();
+      }
+    })
+    .catch((err: unknown) => {
+      log(
+        `sayagain: could not start the upstream: ${err instanceof Error ? err.message : String(err)}`,
+      );
       exitCode = 1;
       finish();
-    }
-  });
+    });
 
   const lines = new LineSplitter();
   input.on("data", (chunk: Buffer | string) => {
-    for (const line of lines.push(chunk)) void boundary.handle(session, line);
+    for (const line of lines.push(chunk)) boundary.handle(session, line).catch(() => undefined);
   });
   input.on("end", () => {
+    // Everything the host sent is dispatched before its stdin closes the upstream's.
     const rest = lines.flush();
-    const tail = rest ? boundary.handle(session, rest) : Promise.resolve();
-    void tail.finally(() => upstream?.end());
+    if (rest) boundary.handle(session, rest).catch(() => undefined);
+    void boundary.drain(session).finally(() => upstream?.end());
   });
 
   return {

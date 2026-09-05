@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import {
   allDeadLetters,
   allHolds,
+  daemonLedger,
   daemonStatus,
   decideAnywhere,
+  liveDaemon,
   replayAnywhere,
   stopDaemon,
 } from "./client-api.js";
@@ -15,13 +17,17 @@ import { defaultLedgerPath, JsonlLedger, readLedger } from "./ledger.js";
 import { parseClassOverrides } from "./policy.js";
 import {
   addServer,
+  isValidServerName,
+  loadOrCreateToken,
   loadRegistry,
   readDaemonInfo,
+  removeDaemonInfo,
   removeServer,
   type ServerConfig,
+  tokenPath,
 } from "./registry.js";
-import { runStdioShim } from "./shim.js";
-import { openStores } from "./stores.js";
+import { daemonHealthy, runStdioShim, serveArgv, waitForDaemon } from "./shim.js";
+import { openStores, type StoreKind } from "./stores.js";
 import { PROXY_VERSION } from "./version.js";
 import { wrap } from "./wrap.js";
 
@@ -40,10 +46,12 @@ const USAGE = `sayagain ${PROXY_VERSION}
       --retry <n>              attempts for retryable failures on safe tools (default 3; 1 disables)
       --no-repair              disable deterministic argument repair
       --no-rewrite-errors      do not append guidance to failures
-  sayagain serve [--listen 127.0.0.1:7777] [--ledger jsonl|sqlite] [--detach]
+  sayagain serve [--listen 127.0.0.1:7777] [--store jsonl|sqlite] [--db <path>] [--detach]
       Run the daemon: one virtual server per registered upstream at /mcp/<name>, plus the control API.
-  sayagain add <name> [--url <url>] [--header k=v]... [--env K=V]... [--class t=c]... [--hold m] [-- <command> [args...]]
-      Register an upstream (stdio command, or --url for Streamable HTTP).
+      The bearer token is in ~/.sayagain/token. SAYAGAIN_HOME moves every file elsewhere.
+  sayagain add <name> [--url <url>] [--header k=v]... [--env K[=V]]... [--cwd <dir>] [--class t=c]... [--hold m] [-- <command> [args...]]
+      Register an upstream (stdio command, or --url for Streamable HTTP). --env K alone stores "\${K}",
+      resolved from the daemon's environment at spawn; so does a \${VAR} inside --header or --env values.
   sayagain remove <name> | sayagain list | sayagain status | sayagain stop
   sayagain stdio <name>
       Thin stdio client for hosts that only spawn commands; starts the daemon if needed.
@@ -62,7 +70,8 @@ function takeOption(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
   if (i < 0) return undefined;
   const value = args[i + 1];
-  if (value === undefined) throw new UsageError(`${name} expects a value`);
+  if (value === undefined || value.startsWith("--"))
+    throw new UsageError(`${name} expects a value`);
   args.splice(i, 2);
   return value;
 }
@@ -149,52 +158,61 @@ export async function main(argv: string[]): Promise<number> {
   if (command === "serve") {
     const opts = [...rest];
     const listen = takeOption(opts, "--listen");
-    const ledgerKind = takeOption(opts, "--ledger");
+    const store = takeOption(opts, "--store");
+    const db = takeOption(opts, "--db");
     const detach = takeFlag(opts, "--detach");
     if (opts.length) throw new UsageError(`serve: unknown option ${opts[0]}`);
-    if (ledgerKind !== undefined && ledgerKind !== "jsonl" && ledgerKind !== "sqlite")
-      throw new UsageError("serve: --ledger must be jsonl or sqlite");
-    if (detach) {
-      const cli = fileURLToPath(import.meta.url);
-      const args = [
-        cli,
-        "serve",
-        ...(listen ? ["--listen", listen] : []),
-        ...(ledgerKind ? ["--ledger", ledgerKind] : []),
-      ];
-      const child = spawn(process.execPath, args, {
-        detached: true,
-        stdio: "ignore",
-        env: process.env,
-      });
-      child.unref();
-      process.stdout.write(`started sayagain serve (pid ${child.pid ?? "?"})\n`);
-      return 0;
-    }
+    if (store !== undefined && store !== "jsonl" && store !== "sqlite")
+      throw new UsageError("serve: --store must be jsonl or sqlite");
     const registry = loadRegistry();
     const running = readDaemonInfo();
     if (running && running.pid !== process.pid) {
-      try {
-        process.kill(running.pid, 0);
+      if (await daemonHealthy(running))
         throw new UsageError(
           `a daemon is already running (pid ${running.pid}, ${running.host}:${running.port}); use sayagain stop first`,
         );
-      } catch (err) {
-        if (err instanceof UsageError) throw err;
-      }
+      removeDaemonInfo(running.pid); // stale: crashed, killed, or a reboot
     }
-    const stores = openStores(ledgerKind ?? registry.daemon?.ledger ?? "jsonl", {
+    if (detach) {
+      const { file, args } = serveArgv([
+        ...(listen ? ["--listen", listen] : []),
+        ...(store ? ["--store", store] : []),
+        ...(db ? ["--db", db] : []),
+      ]);
+      const child = spawn(file, args, { detached: true, stdio: "ignore", env: process.env });
+      child.on("error", () => undefined);
+      child.unref();
+      const info = await waitForDaemon(10_000, child.pid);
+      if (!info) {
+        process.stderr.write(
+          "sayagain: the daemon did not come up within 10 s; run `sayagain serve` in the foreground to see why\n",
+        );
+        return 1;
+      }
+      process.stdout.write(
+        `sayagain serve running (pid ${info.pid}) at http://${info.host}:${info.port}; token in ${tokenPath()}\n`,
+      );
+      return 0;
+    }
+    const token = loadOrCreateToken();
+    const kind: StoreKind = (store as StoreKind | undefined) ?? registry.daemon?.store ?? "jsonl";
+    const storeOptions: Parameters<typeof openStores>[1] = {
       log: (l) => process.stderr.write(`${l}\n`),
-    });
+    };
+    const sqlitePath = db ?? registry.daemon?.db;
+    if (sqlitePath !== undefined) storeOptions.sqlitePath = resolve(sqlitePath);
+    const stores = openStores(kind, storeOptions);
     const daemonOptions: Parameters<typeof startDaemon>[0] = {
       registry,
       stores,
       version: PROXY_VERSION,
+      token,
+      onShutdown: () => process.exit(0),
     };
     if (listen !== undefined) daemonOptions.listen = listen;
     const daemon = await startDaemon(daemonOptions);
     process.stderr.write(
-      `sayagain ${PROXY_VERSION} serving ${Object.keys(registry.servers).length} upstream(s) at ${daemon.url} (ledger: ${stores.kind})\n`,
+      `sayagain ${PROXY_VERSION} serving ${Object.keys(registry.servers).length} upstream(s) at ${daemon.url} (store: ${stores.kind}; token in ${tokenPath()})\n`,
     );
     for (const name of Object.keys(registry.servers))
       process.stderr.write(`  ${daemon.url}/mcp/${name}\n`);
@@ -218,22 +236,28 @@ export async function main(argv: string[]): Promise<number> {
     const serverCommand = sep >= 0 ? opts.slice(sep + 1) : [];
     const flags = sep >= 0 ? opts.slice(0, sep) : opts;
     const name = flags.shift();
-    if (!name) throw new UsageError("add: expected a server name");
+    if (!name || name.startsWith("--")) throw new UsageError("add: expected a server name first");
+    if (!isValidServerName(name))
+      throw new UsageError(
+        `add: server names use letters, digits, dot, dash, underscore (got ${JSON.stringify(name)})`,
+      );
     const url = takeOption(flags, "--url");
+    const pair = (flag: string, raw: string, bareOk: boolean): [string, string] => {
+      const i = raw.indexOf("=");
+      if (i > 0) return [raw.slice(0, i), raw.slice(i + 1)];
+      if (bareOk && i < 0) return [raw, `\${${raw}}`];
+      throw new UsageError(`${flag} expects k=v, got ${raw}`);
+    };
     const headers = Object.fromEntries(
-      takeAll(flags, "--header").map((h) => {
-        const i = h.indexOf("=");
-        if (i <= 0) throw new UsageError(`--header expects k=v, got ${h}`);
-        return [h.slice(0, i), h.slice(i + 1)];
-      }),
+      takeAll(flags, "--header").map((h) => pair("--header", h, false)),
     );
-    const env = Object.fromEntries(
-      takeAll(flags, "--env").map((h) => {
-        const i = h.indexOf("=");
-        return i > 0 ? [h.slice(0, i), h.slice(i + 1)] : [h, `\${${h}}`];
-      }),
-    );
-    const classes = parseClassOverrides(takeAll(flags, "--class"));
+    const env = Object.fromEntries(takeAll(flags, "--env").map((h) => pair("--env", h, true)));
+    let classes: ReturnType<typeof parseClassOverrides>;
+    try {
+      classes = parseClassOverrides(takeAll(flags, "--class"));
+    } catch (err) {
+      throw new UsageError(`add: ${err instanceof Error ? err.message : String(err)}`);
+    }
     const hold = takeOption(flags, "--hold");
     const cwd = takeOption(flags, "--cwd");
     if (flags.length) throw new UsageError(`add: unknown option ${flags[0]}`);
@@ -241,33 +265,51 @@ export async function main(argv: string[]): Promise<number> {
       throw new UsageError("add: --hold must be destructive, always or never");
     let config: ServerConfig;
     if (url) {
+      if (serverCommand.length)
+        throw new UsageError("add: give either --url <url> or -- <command>, not both");
+      if (Object.keys(env).length || cwd !== undefined)
+        throw new UsageError("add: --env and --cwd apply to stdio commands, not --url");
       config = { transport: "http", url };
       if (Object.keys(headers).length) config.headers = headers;
     } else {
       const [cmd, ...args] = serverCommand;
       if (!cmd) throw new UsageError("add: expected --url <url> or -- <command> [args...]");
+      if (Object.keys(headers).length)
+        throw new UsageError("add: --header applies to --url upstreams; use --env for a command");
       config = { transport: "stdio", command: cmd, args };
       if (Object.keys(env).length) config.env = env;
-      if (cwd !== undefined) config.cwd = cwd;
+      if (cwd !== undefined) config.cwd = resolve(cwd);
     }
     if (Object.keys(classes).length) config.classes = classes;
     if (hold !== undefined) config.hold = hold;
-    addServer(name, config);
-    const info = readDaemonInfo();
-    process.stdout.write(
-      `registered ${name} (${config.transport}). Host entry: ${info ? `{ "type": "http", "url": "http://${info.host}:${info.port}/mcp/${name}", "headers": { "Authorization": "Bearer <token from ~/.sayagain/daemon.json>" } }` : `{ "command": "sayagain", "args": ["stdio", "${name}"] }`}\n`,
+    const literalSecrets = [...Object.values(headers), ...Object.values(env)].filter(
+      (v) => !v.includes("${") && /token|secret|key|bearer|password/i.test(v),
     );
-    if (info)
-      process.stdout.write(
-        "restart the daemon to serve the new upstream: sayagain stop && sayagain serve --detach\n",
+    const replaced = addServer(name, config);
+    process.stdout.write(`${replaced ? "replaced" : "registered"} ${name} (${config.transport})\n`);
+    if (literalSecrets.length)
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the hint tells the user to type a reference
+      process.stderr.write(
+        "note: a value looks like a literal secret; prefer '${VAR}' (single-quoted) so it is resolved from the daemon's environment and never stored\n",
       );
+    const live = await liveDaemon();
+    process.stdout.write(
+      live
+        ? `host entry (Streamable HTTP): { "type": "http", "url": "http://${live.host}:${live.port}/mcp/${name}", "headers": { "Authorization": "Bearer <contents of ${tokenPath()}>" } }\n`
+        : `host entry: { "command": "sayagain", "args": ["stdio", "${name}"] }   (or start the daemon: sayagain serve --detach)\n`,
+    );
     return 0;
   }
 
   if (command === "remove") {
     const name = rest[0];
     if (!name) throw new UsageError("remove: expected a server name");
-    process.stdout.write(removeServer(name) ? `removed ${name}\n` : `no server named ${name}\n`);
+    const removed = removeServer(name);
+    process.stdout.write(removed ? `removed ${name}\n` : `no server named ${name}\n`);
+    if (removed && (await liveDaemon()))
+      process.stdout.write(
+        "the running daemon keeps serving it until restarted: sayagain stop && sayagain serve --detach\n",
+      );
     return 0;
   }
 
@@ -321,12 +363,28 @@ export async function main(argv: string[]): Promise<number> {
 
   if (command === "ledger") {
     const opts = [...rest];
-    const ledgerPath = takeOption(opts, "--ledger") ?? defaultLedgerPath();
+    const ledgerOption = takeOption(opts, "--ledger");
     const tail = takeNumber(opts, "--tail");
     const json = takeFlag(opts, "--json");
-    const readOptions: { tail?: number } = {};
-    if (tail !== undefined) readOptions.tail = tail;
-    const rows = readLedger(ledgerPath, readOptions);
+    if (opts.length) throw new UsageError(`ledger: unknown option ${opts[0]}`);
+    // A running daemon answers from whatever store it uses; otherwise read the files directly.
+    let rows = ledgerOption === undefined ? await daemonLedger(tail ?? 100) : null;
+    let ledgerPath = ledgerOption ?? defaultLedgerPath();
+    if (rows === null) {
+      const registry = loadRegistry();
+      if (ledgerOption === undefined && registry.daemon?.store === "sqlite") {
+        const storeOptions: Parameters<typeof openStores>[1] = {};
+        if (registry.daemon.db !== undefined) storeOptions.sqlitePath = resolve(registry.daemon.db);
+        const stores = openStores("sqlite", storeOptions);
+        rows = stores.readLedger(tail);
+        ledgerPath = storeOptions.sqlitePath ?? "the SQLite store";
+        stores.close();
+      } else {
+        const readOptions: { tail?: number } = {};
+        if (tail !== undefined) readOptions.tail = tail;
+        rows = readLedger(ledgerPath, readOptions);
+      }
+    }
     if (json) {
       process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
       return 0;
@@ -369,8 +427,9 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     for (const h of holds) {
+      const where = h.server ? `${h.server}/` : "";
       process.stdout.write(
-        `${h.receipt}  ${h.tool} [${h.toolClass}]  ${h.reason}  since ${h.createdAt}\n`,
+        `${h.receipt}  ${where}${h.tool} [${h.toolClass}]  ${h.reason}  since ${h.createdAt}${h.orphaned ? "  (from before a restart: the host is gone; approve runs it for the ledger)" : ""}\n`,
       );
       if (h.intent) process.stdout.write(`    intent: ${h.intent}\n`);
       process.stdout.write(`    arguments: ${JSON.stringify(h.arguments)}\n`);
@@ -394,10 +453,20 @@ export async function main(argv: string[]): Promise<number> {
   if (command === "deadletters" || command === "dead") {
     const opts = [...rest];
     const json = takeFlag(opts, "--json");
-    const deadLetterPath = takeOption(opts, "--deadletter") ?? defaultDeadLetterPath();
+    const deadLetterOption = takeOption(opts, "--deadletter");
+    if (opts.length) throw new UsageError(`deadletters: unknown option ${opts[0]}`);
     const live = await allDeadLetters();
     const liveReceipts = new Set(live.map((d) => d.receipt));
-    const stored = readDeadLetters(deadLetterPath).filter((d) => !liveReceipts.has(d.receipt));
+    const registry = loadRegistry();
+    let storedAll: ReturnType<typeof readDeadLetters>;
+    if (deadLetterOption === undefined && registry.daemon?.store === "sqlite") {
+      const storeOptions: Parameters<typeof openStores>[1] = {};
+      if (registry.daemon.db !== undefined) storeOptions.sqlitePath = resolve(registry.daemon.db);
+      const stores = openStores("sqlite", storeOptions);
+      storedAll = stores.deadLetters.list();
+      stores.close();
+    } else storedAll = readDeadLetters(deadLetterOption ?? defaultDeadLetterPath());
+    const stored = storedAll.filter((d) => !liveReceipts.has(d.receipt));
     if (json) {
       process.stdout.write(`${JSON.stringify({ live, stored }, null, 2)}\n`);
       return 0;

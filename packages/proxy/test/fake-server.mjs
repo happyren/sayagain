@@ -5,6 +5,7 @@ const rl = createInterface({ input: process.stdin });
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 let calls = 0;
 const flaky = new Map(); // tool -> remaining failures
+const asks = new Map(); // id -> resolver for a request the server made of the client
 const strictSchema = {
   type: "object",
   properties: { limit: { type: "number" }, tags: { type: "string" }, title: { type: "string" } },
@@ -48,6 +49,13 @@ rl.on("line", (line) => {
           { name: "strict_write", inputSchema: strictSchema },
           { name: "missing", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
           { name: "slow_write", inputSchema: { type: "object" } },
+          { name: "notify", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+          {
+            name: "ask_client",
+            inputSchema: { type: "object" },
+            annotations: { readOnlyHint: true },
+          },
+          { name: "crash", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
         ],
       },
     });
@@ -96,9 +104,43 @@ rl.on("line", (line) => {
       fail("Error: page 'zzz' not found");
     } else if (name === "slow_write") {
       setTimeout(ok, Number(args.delayMs ?? 200));
+    } else if (name === "notify") {
+      // A server-initiated notification before the result.
+      send({
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: { level: "info", data: args.text ?? "hello" },
+      });
+      ok();
+    } else if (name === "ask_client") {
+      // A server-initiated request: the result reports what the client answered.
+      const id = `ask-${calls}`;
+      const timer = setTimeout(
+        () => {
+          asks.delete(id);
+          fail("Error: client did not answer the ping");
+        },
+        Number(args.timeoutMs ?? 2000),
+      );
+      asks.set(id, (reply) => {
+        clearTimeout(timer);
+        send({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            content: [{ type: "text", text: JSON.stringify({ answered: !reply.error, reply }) }],
+          },
+        });
+      });
+      send({ jsonrpc: "2.0", id, method: args.method ?? "ping", params: {} });
+    } else if (name === "crash") {
+      process.exit(Number(args.code ?? 3));
     } else ok();
   } else if (msg.method === "ping") {
     send({ jsonrpc: "2.0", id: msg.id, result: {} });
+  } else if (msg.method === undefined && msg.id !== undefined && asks.has(msg.id)) {
+    asks.get(msg.id)(msg);
+    asks.delete(msg.id);
   }
 });
 rl.on("close", () => process.exit(0));

@@ -65,7 +65,7 @@ export interface BoundaryCoreOptions {
   warmupMs?: number;
   pendingTtlMs?: number;
   replayTimeoutMs?: number;
-  /** Restart a stdio upstream that exited when the next message arrives. Default false (wrap); the daemon sets true. */
+  /** Start the upstream again after it exited, on the next message. Default false (wrap); the daemon sets true. */
   restartUpstream?: boolean;
   clientInfo?: { name: string; version: string };
 }
@@ -75,7 +75,16 @@ interface SessionEntry {
   chain: Promise<void>;
 }
 
+interface Routed {
+  session: Session;
+  clientId: JsonRpcId;
+  method: string;
+  at: number;
+}
+
 type FailureAction = "retry" | "repair" | "hold" | "final";
+
+const MAX_START_BACKOFF_MS = 30_000;
 
 export class Boundary extends EventEmitter {
   readonly name: string;
@@ -87,15 +96,18 @@ export class Boundary extends EventEmitter {
   private readonly dedupe: DedupeCache;
   private readonly state = createState();
   private readonly sessions = new Map<string, SessionEntry>();
-  private readonly idMap = new Map<string, { session: Session; clientId: JsonRpcId }>();
+  private readonly idMap = new Map<string, Routed>();
   private readonly reverseMap = new Map<string, { session: Session; upstreamId: JsonRpcId }>();
   private readonly settles = new Map<string, (r: Remembered | null) => void>();
   private readonly heldById = new Map<string, PendingCall>();
+  private readonly heldByClient = new Map<string, PendingCall>();
   private readonly repairBudget = new Map<string, number>();
   private readonly replayWaiters = new Map<
     string,
     { resolve: (o: ReplayOutcome) => void; timer: NodeJS.Timeout }
   >();
+  private readonly timers = new Set<NodeJS.Timeout>();
+  private readonly initWaiters = new Map<string, (r: Record<string, unknown> | null) => void>();
   private readonly log: (line: string) => void;
   private readonly opts: Required<
     Pick<
@@ -110,7 +122,10 @@ export class Boundary extends EventEmitter {
   private upstreamSeq = 0;
   private reverseSeq = 0;
   private sweep: NodeJS.Timeout | undefined;
-  private closed = false;
+  private closing: Promise<void> | undefined;
+  private everStarted = false;
+  private startFailures = 0;
+  private nextStartAt = 0;
 
   constructor(options: BoundaryCoreOptions) {
     super();
@@ -144,19 +159,34 @@ export class Boundary extends EventEmitter {
   get sessionCount(): number {
     return this.sessions.size;
   }
+  get closed(): boolean {
+    return this.closing !== undefined;
+  }
 
   // ---------------------------------------------------------------- upstream lifecycle
 
-  /** Start the upstream and initialize it as the boundary's own client. Idempotent. */
+  /**
+   * Start the upstream and initialize it as the boundary's own client. Idempotent while one is
+   * running. Resolves null when the upstream cannot be started now: closed, an earlier instance
+   * still shutting down, inside the backoff after a failed start, or exited with restarts disabled.
+   */
   start(): Promise<Record<string, unknown> | null> {
     if (this.upstreamInit) return this.upstreamInit;
+    if (this.closing || this.upstream) return Promise.resolve(null);
+    if (Date.now() < this.nextStartAt) return Promise.resolve(null);
+    if (this.everStarted && !this.opts.restartUpstream) return Promise.resolve(null);
+    const restarted = this.everStarted;
+    if (restarted) this.log(`sayagain: starting upstream ${this.name} again`);
     const up = this.opts.upstream();
     this.upstream = up;
     up.onLine((line) => this.handleUpstreamLine(line));
-    up.onClose((reason, code) => this.handleUpstreamClose(reason, code));
+    up.onClose((reason, code) => this.handleUpstreamClose(up, reason, code));
     this.upstreamInit = (async () => {
       await up.start();
-      if (!up.ready) return null;
+      if (!up.ready) {
+        this.noteStartFailure(up, "did not start");
+        return null;
+      }
       const id = ownId(this.state, "init");
       const req: JsonRpcRequest = {
         jsonrpc: "2.0",
@@ -172,6 +202,9 @@ export class Boundary extends EventEmitter {
       const result = await new Promise<Record<string, unknown> | null>((resolve) => {
         const timer = setTimeout(() => {
           this.initWaiters.delete(keyOf(id));
+          this.state.initializeIds.delete(keyOf(id));
+          this.state.ownIds.delete(keyOf(id));
+          this.log(`sayagain: upstream ${this.name} did not answer initialize within 30 s`);
           resolve(null);
         }, 30_000);
         timer.unref();
@@ -185,27 +218,56 @@ export class Boundary extends EventEmitter {
           resolve(null);
         }
       });
-      this.initResult = result;
-      if (result) {
-        up.send(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
-        this.warmClassifier();
+      if (!result) {
+        this.noteStartFailure(up, "failed to initialize");
+        return null;
       }
+      this.initResult = result;
+      this.everStarted = true;
+      this.startFailures = 0;
+      this.nextStartAt = 0;
+      up.send(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+      if (restarted) {
+        this.classifier.reset();
+        this.broadcast({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+      }
+      this.warmClassifier();
       return result;
     })();
     return this.upstreamInit;
   }
-  private readonly initWaiters = new Map<string, (r: Record<string, unknown> | null) => void>();
+
+  /** A start that did not reach a working upstream: back off, and let the next message try again. */
+  private noteStartFailure(up: Upstream, why: string): void {
+    this.startFailures++;
+    const delay = Math.min(MAX_START_BACKOFF_MS, 1000 * 2 ** (this.startFailures - 1));
+    this.nextStartAt = Date.now() + delay;
+    this.log(`sayagain: upstream ${this.name} ${why}; next attempt after ${delay} ms`);
+    if (this.upstream === up) {
+      this.upstreamInit = undefined;
+      this.initResult = null;
+      up.stop();
+    }
+  }
 
   private async ensureUpstream(): Promise<boolean> {
-    if (this.closed) return false;
-    if (!this.upstreamInit && this.opts.restartUpstream)
-      this.log(`sayagain: starting upstream ${this.name}`);
+    if (this.closing) return false;
     const result = await this.start();
     return result !== null && !!this.upstream?.ready;
   }
 
-  private handleUpstreamClose(reason: string, code: number | null): void {
+  private unavailable(): string {
+    const wait = this.nextStartAt - Date.now();
+    return wait > 0
+      ? `Say Again: upstream ${this.name} is restarting; try again in ${Math.ceil(wait / 1000)} s`
+      : `Say Again: upstream ${this.name} is not available`;
+  }
+
+  private handleUpstreamClose(up: Upstream, reason: string, code: number | null): void {
+    if (this.upstream !== up) return; // a superseded instance closing late
     this.log(`sayagain: upstream ${this.state.upstreamName ?? this.name} closed: ${reason}`);
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
     for (const call of [...this.state.pending.values()])
       this.abandon(call, "upstream exited before answering");
     for (const call of [...this.heldById.values()]) {
@@ -213,6 +275,20 @@ export class Boundary extends EventEmitter {
       this.holds.decide(call.receipt, "reject");
       this.abandon(call, "upstream exited while the call was held");
     }
+    // Requests other than tools/call that were still in flight: answer them, or their hosts hang.
+    for (const [key, routed] of [...this.idMap]) {
+      this.idMap.delete(key);
+      this.safeSend(routed.session, {
+        jsonrpc: "2.0",
+        id: routed.clientId,
+        error: {
+          code: -32000,
+          message: `Say Again: upstream ${this.name} exited before answering ${routed.method}`,
+        },
+      });
+    }
+    this.state.toolsListIds.clear();
+    this.reverseMap.clear();
     for (const w of this.initWaiters.values()) w(null);
     this.initWaiters.clear();
     this.upstream = undefined;
@@ -223,20 +299,23 @@ export class Boundary extends EventEmitter {
 
   /** Stop the upstream and resolve once it has actually exited (or after a short grace period). */
   close(graceMs = 3000): Promise<void> {
-    if (this.closed) return Promise.resolve();
-    this.closed = true;
+    if (this.closing) return this.closing;
     if (this.sweep) clearInterval(this.sweep);
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
     const up = this.upstream;
-    if (!up) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, graceMs);
-      timer.unref();
-      this.once("upstream-closed", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-      up.stop();
-    });
+    this.closing = !up
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, graceMs);
+          timer.unref();
+          this.once("upstream-closed", () => {
+            clearTimeout(timer);
+            resolve();
+          });
+          up.stop();
+        });
+    return this.closing;
   }
 
   private sendUpstream(line: string): boolean {
@@ -259,11 +338,14 @@ export class Boundary extends EventEmitter {
   // ---------------------------------------------------------------- sessions
 
   attach(session: Session): void {
-    this.sessions.set(session.id, { session, chain: Promise.resolve() });
+    const existing = this.sessions.get(session.id);
+    if (existing && existing.session !== session)
+      throw new Error(`session id ${session.id} is already attached`);
+    if (!existing) this.sessions.set(session.id, { session, chain: Promise.resolve() });
   }
 
   detach(session: Session): void {
-    this.sessions.delete(session.id);
+    if (this.sessions.get(session.id)?.session === session) this.sessions.delete(session.id);
     for (const [k, v] of this.idMap) if (v.session === session) this.idMap.delete(k);
     for (const [k, v] of this.reverseMap) if (v.session === session) this.reverseMap.delete(k);
   }
@@ -280,7 +362,7 @@ export class Boundary extends EventEmitter {
         );
         const msg = parseMessage(line);
         if (msg && !Array.isArray(msg) && isRequest(msg))
-          session.send({
+          this.safeSend(session, {
             jsonrpc: "2.0",
             id: msg.id,
             error: {
@@ -292,10 +374,25 @@ export class Boundary extends EventEmitter {
     return entry.chain;
   }
 
+  /** Resolves once every line this session has fed so far has been dispatched. */
+  drain(session: Session): Promise<void> {
+    return this.sessions.get(session.id)?.chain ?? Promise.resolve();
+  }
+
+  private safeSend(session: Session, msg: JsonRpcMessage): void {
+    try {
+      session.send(msg);
+    } catch (err) {
+      this.log(
+        `sayagain: could not write to host ${session.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   /** Map a client request id to a fresh upstream id and remember the way back. */
-  private mapId(session: Session, clientId: JsonRpcId): string {
+  private mapId(session: Session, clientId: JsonRpcId, method: string): string {
     const upstreamId = `s${++this.upstreamSeq}`;
-    this.idMap.set(keyOf(upstreamId), { session, clientId });
+    this.idMap.set(keyOf(upstreamId), { session, clientId, method, at: Date.now() });
     return upstreamId;
   }
 
@@ -306,20 +403,16 @@ export class Boundary extends EventEmitter {
     const target = this.idMap.get(key);
     if (!target) return false;
     this.idMap.delete(key);
-    target.session.send({ ...msg, id: target.clientId });
+    this.safeSend(target.session, { ...msg, id: target.clientId });
     return true;
   }
 
   private broadcast(msg: JsonRpcMessage): void {
-    for (const { session } of this.sessions.values()) session.send(msg);
+    for (const { session } of this.sessions.values())
+      if (session.bidirectional !== false) this.safeSend(session, msg);
   }
 
-  private initializeResponse(clientId: JsonRpcId): JsonRpcMessage {
-    const base = this.initResult ?? {
-      protocolVersion: "2026-07-28",
-      capabilities: {},
-      serverInfo: { name: this.name, version: "unknown" },
-    };
+  private initializeResponse(clientId: JsonRpcId, base: Record<string, unknown>): JsonRpcMessage {
     const result = { ...base };
     const boundary: Record<string, unknown> = {
       name: BOUNDARY_NAME,
@@ -342,14 +435,22 @@ export class Boundary extends EventEmitter {
 
   private async handleClientLine(session: Session, line: string): Promise<void> {
     const msg = parseMessage(line);
-    if (!msg) return;
+    if (!msg) {
+      if (line.trim())
+        this.safeSend(session, {
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32700, message: "Say Again: the line is not a JSON-RPC message" },
+        });
+      return;
+    }
     if (Array.isArray(msg)) {
       this.log(
         "sayagain: JSON-RPC batches are not supported by the boundary; batching was removed from MCP",
       );
       for (const m of msg)
         if (isRequest(m))
-          session.send({
+          this.safeSend(session, {
             jsonrpc: "2.0",
             id: m.id,
             error: { code: -32600, message: "Say Again: JSON-RPC batches are not supported" },
@@ -357,30 +458,45 @@ export class Boundary extends EventEmitter {
       return;
     }
     if (isRequest(msg) && msg.method === "initialize") {
-      await this.ensureUpstream();
-      session.send(this.initializeResponse(msg.id));
+      const ok = await this.ensureUpstream();
+      if (!ok || !this.initResult) {
+        this.safeSend(session, {
+          jsonrpc: "2.0",
+          id: msg.id,
+          error: { code: -32000, message: this.unavailable() },
+        });
+        return;
+      }
+      this.safeSend(session, this.initializeResponse(msg.id, this.initResult));
       return;
     }
     if ("method" in msg && msg.method === "notifications/initialized") return;
     if ("method" in msg && msg.method === "notifications/cancelled") {
       const rid = (msg.params as { requestId?: JsonRpcId } | undefined)?.requestId;
-      if (rid !== undefined && this.cancelHeld(session, rid)) return;
-      const up =
-        rid !== undefined
-          ? [...this.idMap.entries()].find(
-              ([, v]) => v.session === session && keyOf(v.clientId) === keyOf(rid),
-            )
-          : undefined;
-      if (up) {
-        const upstreamId = up[0].slice(up[0].indexOf(":") + 1);
-        this.sendUpstream(
-          `${JSON.stringify({ ...msg, params: { ...(msg.params ?? {}), requestId: upstreamId } })}\n`,
-        );
+      if (rid === undefined) return;
+      if (this.cancelHeld(session, rid)) return;
+      const entry = [...this.idMap.entries()].find(
+        ([, v]) => v.session === session && keyOf(v.clientId) === keyOf(rid),
+      );
+      if (!entry) return;
+      const [upKey] = entry;
+      const upstreamId = upKey.slice(upKey.indexOf(":") + 1);
+      // The host no longer wants an answer: forget the call so a late response is dropped rather
+      // than dead-lettered ten minutes from now.
+      this.idMap.delete(upKey);
+      const call = this.state.pending.get(upKey);
+      if (call) {
+        this.state.pending.delete(upKey);
+        this.settle(call, null);
       }
+      this.state.toolsListIds.delete(upKey);
+      this.sendUpstream(
+        `${JSON.stringify({ ...msg, params: { ...(msg.params ?? {}), requestId: upstreamId } })}\n`,
+      );
       return;
     }
     if (isResponse(msg) && msg.id !== null && msg.id !== undefined) {
-      // The host answering a request the upstream made of it.
+      // The host answering a request the upstream made of it (any session may carry it back).
       const rev = this.reverseMap.get(keyOf(msg.id));
       if (rev) {
         this.reverseMap.delete(keyOf(msg.id));
@@ -390,15 +506,15 @@ export class Boundary extends EventEmitter {
     }
     if (!(await this.ensureUpstream())) {
       if (isRequest(msg))
-        session.send({
+        this.safeSend(session, {
           jsonrpc: "2.0",
           id: msg.id,
-          error: { code: -32000, message: `Say Again: upstream ${this.name} is not available` },
+          error: { code: -32000, message: this.unavailable() },
         });
       return;
     }
     if (isRequest(msg)) {
-      const upstreamId = this.mapId(session, msg.id);
+      const upstreamId = this.mapId(session, msg.id, msg.method);
       const mapped: JsonRpcRequest = { ...msg, id: upstreamId };
       if (mapped.method === "tools/call") {
         await this.handleToolCall(mapped);
@@ -421,7 +537,13 @@ export class Boundary extends EventEmitter {
   }
 
   private record(row: ReturnType<typeof baseRow>): void {
-    this.ledger.append(row);
+    try {
+      this.ledger.append(row);
+    } catch (err) {
+      this.log(
+        `sayagain: could not write the ledger: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     this.emit("row", row);
   }
 
@@ -439,7 +561,10 @@ export class Boundary extends EventEmitter {
       return `task:${call.task}`;
     }
     call.budget = "window";
-    return `window:${Math.floor(now / this.policy.repairWindowMs)}`;
+    const key = `window:${Math.floor(now / this.policy.repairWindowMs)}`;
+    for (const k of this.repairBudget.keys())
+      if (k.startsWith("window:") && k !== key) this.repairBudget.delete(k);
+    return key;
   }
 
   private recordDeadLetter(call: PendingCall, errorClass: string, errorSignature: string): void {
@@ -447,6 +572,7 @@ export class Boundary extends EventEmitter {
       receipt: call.receipt,
       ts: new Date(call.startedAt).toISOString(),
       upstream: this.state.upstreamName,
+      server: this.name,
       tool: call.tool,
       rawLine: call.rawLine,
       errorClass,
@@ -456,7 +582,13 @@ export class Boundary extends EventEmitter {
     };
     if (call.intent !== undefined) entry.intent = call.intent;
     if (call.task !== undefined) entry.task = call.task;
-    this.deadLetters.add(entry);
+    try {
+      this.deadLetters.add(entry);
+    } catch (err) {
+      this.log(
+        `sayagain: could not store dead letter ${call.receipt}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     this.emit("dead-letter", entry);
   }
 
@@ -469,17 +601,15 @@ export class Boundary extends EventEmitter {
     this.recordDeadLetter(call, row.errorClass ?? "retryable", reason);
     this.settle(call, null);
     if (!this.state.ownIds.delete(keyOf(call.id))) this.deliver(abandonedResponse(call, reason));
+    this.resolveWaiter(call, { isError: true, text: reason });
+  }
+
+  private resolveWaiter(call: PendingCall, outcome: { isError: boolean; text: string }): void {
     const waiter = this.replayWaiters.get(keyOf(call.id));
-    if (waiter) {
-      clearTimeout(waiter.timer);
-      this.replayWaiters.delete(keyOf(call.id));
-      waiter.resolve({
-        receipt: call.receipt,
-        replayOf: call.replayOf ?? "",
-        isError: true,
-        text: reason,
-      });
-    }
+    if (!waiter) return;
+    clearTimeout(waiter.timer);
+    this.replayWaiters.delete(keyOf(call.id));
+    waiter.resolve({ receipt: call.receipt, replayOf: call.replayOf ?? "", ...outcome });
   }
 
   private forward(call: PendingCall): void {
@@ -499,7 +629,8 @@ export class Boundary extends EventEmitter {
       arguments: call.arguments,
       createdAt,
       expiresAt,
-      upstream: this.name,
+      upstream: this.state.upstreamName,
+      server: this.name,
       mode,
     };
     if (call.intent !== undefined) hold.intent = call.intent;
@@ -507,9 +638,13 @@ export class Boundary extends EventEmitter {
     this.emit("hold", hold);
     call.held = { reason, mode };
     this.heldById.set(keyOf(call.id), call);
+    const routed = this.idMap.get(keyOf(call.id));
+    const clientKey = routed ? `${routed.session.id}|${keyOf(routed.clientId)}` : undefined;
+    if (clientKey) this.heldByClient.set(clientKey, call);
     const finishHold = () => {
       this.holds.forget(call.receipt);
       this.heldById.delete(keyOf(call.id));
+      if (clientKey) this.heldByClient.delete(clientKey);
     };
     const heldRow = (now: number) => {
       const row = baseRow(call, this.state.upstreamName, "held", 0, now);
@@ -566,16 +701,14 @@ export class Boundary extends EventEmitter {
   }
 
   private cancelHeld(session: Session, clientId: JsonRpcId): boolean {
-    for (const [upKey, target] of this.idMap) {
-      if (target.session !== session || keyOf(target.clientId) !== keyOf(clientId)) continue;
-      const call = this.heldById.get(upKey);
-      if (!call?.held) return false;
-      call.held.cancelled = true;
-      this.holds.decide(call.receipt, "reject");
-      this.idMap.delete(upKey);
-      return true;
-    }
-    return false;
+    const key = `${session.id}|${keyOf(clientId)}`;
+    const call = this.heldByClient.get(key);
+    if (!call?.held) return false;
+    call.held.cancelled = true;
+    this.heldByClient.delete(key);
+    this.idMap.delete(keyOf(call.id));
+    this.holds.decide(call.receipt, "reject");
+    return true;
   }
 
   private async handleToolCall(msg: JsonRpcRequest): Promise<void> {
@@ -585,7 +718,8 @@ export class Boundary extends EventEmitter {
     const text = `${JSON.stringify(msg)}\n`;
     const call = describeCall(msg, text, this.classifier.classOf(tool), Buffer.byteLength(text));
 
-    // DISREGARD: one identity per call; a concurrent duplicate waits for the first result.
+    // DISREGARD: one identity per call; a concurrent duplicate waits for the first result,
+    // off the session's chain so it does not block the host's later calls.
     const key = DedupeCache.keyFor(call);
     if (key !== null) {
       const hit = this.dedupe.lookup(key);
@@ -595,19 +729,30 @@ export class Boundary extends EventEmitter {
       }
       const reservation = this.dedupe.reserve(key);
       if ("existing" in reservation) {
-        const first = await reservation.existing;
-        if (first) {
-          this.answerDuplicate(call, first);
-          return;
-        }
-        const again = this.dedupe.reserve(key);
-        if ("settle" in again) this.settles.set(call.receipt, again.settle);
-      } else {
-        this.settles.set(call.receipt, reservation.settle);
+        void reservation.existing
+          .then((first) => {
+            if (first) {
+              this.answerDuplicate(call, first);
+              return;
+            }
+            const again = this.dedupe.reserve(key);
+            if ("settle" in again) this.settles.set(call.receipt, again.settle);
+            this.dispatch(call);
+          })
+          .catch((err: unknown) =>
+            this.log(
+              `sayagain: duplicate wait failed: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+        return;
       }
+      this.settles.set(call.receipt, reservation.settle);
     }
+    this.dispatch(call);
+  }
 
-    // STANDBY: hold before leaving.
+  /** STANDBY before leaving, or forward. */
+  private dispatch(call: PendingCall): void {
     if (shouldHold(call.toolClass, this.policy.hold)) {
       const reason =
         this.policy.hold === "always"
@@ -641,10 +786,13 @@ export class Boundary extends EventEmitter {
     if (action === "retry") {
       call.attempts++;
       const delay = this.policy.retryBaseMs * 2 ** (call.attempts - 2);
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        this.timers.delete(timer);
+        if (this.state.pending.get(keyOf(call.id)) !== call) return; // abandoned meanwhile
         if (!this.sendUpstream(call.rawLine))
           this.abandon(call, "upstream is not accepting requests");
       }, delay);
+      this.timers.add(timer);
       return true;
     }
     if (action === "repair") {
@@ -684,6 +832,31 @@ export class Boundary extends EventEmitter {
     return false;
   }
 
+  /** Send one of the boundary's own calls and resolve with its outcome (or a timeout). */
+  private execute(call: PendingCall): Promise<ReplayOutcome> {
+    return new Promise((resolve) => {
+      void this.ensureUpstream().then((ok) => {
+        if (!ok) {
+          resolve({
+            receipt: call.receipt,
+            replayOf: call.replayOf ?? "",
+            isError: true,
+            text: this.unavailable(),
+          });
+          return;
+        }
+        const timer = setTimeout(() => {
+          if (this.replayWaiters.delete(keyOf(call.id)))
+            this.abandon(call, `no response from upstream within ${this.opts.replayTimeoutMs} ms`);
+        }, this.opts.replayTimeoutMs);
+        timer.unref();
+        this.replayWaiters.set(keyOf(call.id), { resolve, timer });
+        this.state.ownIds.add(keyOf(call.id));
+        this.forward(call);
+      });
+    });
+  }
+
   replay(receipt: string, args?: unknown): Promise<ReplayOutcome | null> {
     const entry = this.deadLetters.get(receipt);
     if (!entry) return Promise.resolve(null);
@@ -698,26 +871,31 @@ export class Boundary extends EventEmitter {
       Buffer.byteLength(rawLine),
     );
     call.replayOf = receipt;
-    return new Promise((resolve) => {
-      void this.ensureUpstream().then((ok) => {
-        if (!ok) {
-          resolve({
-            receipt: call.receipt,
-            replayOf: receipt,
-            isError: true,
-            text: `upstream ${this.name} is not available`,
-          });
-          return;
-        }
-        const timer = setTimeout(() => {
-          if (this.replayWaiters.delete(keyOf(id)))
-            this.abandon(call, `no response from upstream within ${this.opts.replayTimeoutMs} ms`);
-        }, this.opts.replayTimeoutMs);
-        timer.unref();
-        this.replayWaiters.set(keyOf(id), { resolve, timer });
-        this.forward(call);
-      });
-    });
+    return this.execute(call);
+  }
+
+  /**
+   * Execute a hold that was reloaded after a restart: the host that sent it is gone, so the
+   * result goes to the ledger only, under the hold's own receipt.
+   */
+  resume(hold: Hold): Promise<ReplayOutcome> {
+    const id = ownId(this.state, "resume");
+    const req: JsonRpcRequest = {
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: hold.tool, arguments: hold.arguments },
+    };
+    const rawLine = `${JSON.stringify(req)}\n`;
+    const call = describeCall(req, rawLine, hold.toolClass, Buffer.byteLength(rawLine));
+    call.receipt = hold.receipt;
+    if (hold.intent !== undefined) call.intent = hold.intent;
+    call.held = {
+      reason: hold.reason,
+      mode: (hold.mode as HoldMode | undefined) ?? "pre",
+      decision: "approve",
+    };
+    return this.execute(call);
   }
 
   private sweepPending(): void {
@@ -725,6 +903,19 @@ export class Boundary extends EventEmitter {
     for (const call of [...this.state.pending.values()])
       if (call.startedAt < cutoff)
         this.abandon(call, `no response from upstream within ${this.opts.pendingTtlMs} ms`);
+    for (const [key, routed] of [...this.idMap]) {
+      if (routed.at >= cutoff) continue;
+      this.idMap.delete(key);
+      this.state.toolsListIds.delete(key);
+      this.safeSend(routed.session, {
+        jsonrpc: "2.0",
+        id: routed.clientId,
+        error: {
+          code: -32000,
+          message: `Say Again: no response from upstream ${this.name} to ${routed.method} within ${this.opts.pendingTtlMs} ms`,
+        },
+      });
+    }
   }
 
   // ---------------------------------------------------------------- upstream -> hosts
@@ -739,23 +930,36 @@ export class Boundary extends EventEmitter {
     }
   }
 
+  /** A request the upstream makes of its client (sampling, roots, elicitation, ping). */
+  private routeServerRequest(msg: JsonRpcRequest): void {
+    if (msg.method === "ping") {
+      this.sendUpstream(`${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} })}\n`);
+      return;
+    }
+    const able = [...this.sessions.values()].filter((e) => e.session.bidirectional !== false);
+    const target = able.length === 1 ? able[0] : undefined;
+    if (!target) {
+      const why =
+        able.length === 0
+          ? "no connected host can answer it"
+          : `${able.length} hosts share this upstream`;
+      this.sendUpstream(
+        `${JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `Say Again: ${msg.method} is not routed: ${why}` } })}\n`,
+      );
+      return;
+    }
+    const reverseId = `r${++this.reverseSeq}`;
+    this.reverseMap.set(keyOf(reverseId), { session: target.session, upstreamId: msg.id });
+    this.safeSend(target.session, { ...msg, id: reverseId });
+  }
+
   private processUpstreamLine(line: string): void {
     const msg = parseMessage(line);
     if (!msg || Array.isArray(msg)) return;
     const bytes = Buffer.byteLength(line) + 1;
 
-    // A request the upstream makes of its client (sampling, roots, elicitation).
     if (isRequest(msg)) {
-      const [only] = [...this.sessions.values()];
-      if (this.sessions.size === 1 && only) {
-        const reverseId = `r${++this.reverseSeq}`;
-        this.reverseMap.set(keyOf(reverseId), { session: only.session, upstreamId: msg.id });
-        only.session.send({ ...msg, id: reverseId });
-      } else {
-        this.sendUpstream(
-          `${JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `Say Again: ${msg.method} is not routed when ${this.sessions.size} hosts share this upstream` } })}\n`,
-        );
-      }
+      this.routeServerRequest(msg);
       return;
     }
     if ("method" in msg && !isResponse(msg)) {
@@ -775,6 +979,10 @@ export class Boundary extends EventEmitter {
         typeof msg.result === "object" && msg.result !== null
           ? (msg.result as Record<string, unknown>)
           : null;
+      if (!result && "error" in msg && msg.error)
+        this.log(
+          `sayagain: upstream ${this.name} rejected initialize: ${String(msg.error.message ?? msg.error.code)}`,
+        );
       const serverInfo = result?.serverInfo as { name?: unknown } | undefined;
       if (serverInfo && typeof serverInfo.name === "string")
         this.state.upstreamName = serverInfo.name;
@@ -817,10 +1025,7 @@ export class Boundary extends EventEmitter {
           this.dedupe.remember(key, remembered.receipt, remembered.result, remembered.at);
         this.settle(call, remembered);
       } else this.settle(call, null);
-      const waiter = this.replayWaiters.get(keyOf(call.id));
-      if (waiter) {
-        clearTimeout(waiter.timer);
-        this.replayWaiters.delete(keyOf(call.id));
+      if (this.replayWaiters.has(keyOf(call.id))) {
         const result = "result" in message ? message.result : undefined;
         const text =
           "error" in message && message.error
@@ -829,7 +1034,7 @@ export class Boundary extends EventEmitter {
         const isError = row?.isError ?? true;
         if (!isError && call.replayOf !== undefined)
           this.deadLetters.resolve(call.replayOf, call.receipt);
-        waiter.resolve({ receipt: call.receipt, replayOf: call.replayOf ?? "", isError, text });
+        this.resolveWaiter(call, { isError, text });
       }
     }
     if (swallow) return;

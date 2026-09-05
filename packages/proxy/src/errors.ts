@@ -13,7 +13,7 @@ const CLASSES: [ErrorClass, RegExp][] = [
   ],
   [
     "retryable",
-    /\btimed out\b|\btime-?out\b(?!\s*(must|should|is|param|value))|ETIMEDOUT|deadline exceeded|rate limit|too many requests|\b429\b|ECONNRESET|ECONNREFUSED|socket hang up|unavailable|not running|unresponsive|is stuck|\b50[234]\b/i,
+    /\btimed out\b|\btime-?out\b(?!\s*(must|should|is|param|value))|ETIMEDOUT|deadline exceeded|rate limit|too many requests|\b429\b|ECONNRESET|ECONNREFUSED|socket hang up|unavailable|unreachable|fetch failed|operation was aborted|no response headers|session expired|not running|unresponsive|is stuck|\b50[234]\b/i,
   ],
   [
     "semantic",

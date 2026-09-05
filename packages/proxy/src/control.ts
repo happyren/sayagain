@@ -42,7 +42,10 @@ export interface HoldSummary {
   expiresAt: string;
   pid: number;
   upstream?: string;
+  server?: string;
   mode?: string;
+  /** Reloaded after a daemon restart: no host is waiting; approving executes it for the ledger. */
+  orphaned?: boolean;
 }
 
 export interface DeadLetterSummary {
@@ -56,6 +59,7 @@ export interface DeadLetterSummary {
   attempts: number;
   repairs: number;
   pid: number;
+  server?: string;
 }
 
 export interface ReplayOutcome {
@@ -83,7 +87,9 @@ export const summarizeHold = (h: Hold, pid: number): HoldSummary => {
   };
   if (h.intent !== undefined) s.intent = h.intent;
   if (h.upstream !== undefined) s.upstream = h.upstream;
+  if (h.server !== undefined) s.server = h.server;
   if (h.mode !== undefined) s.mode = h.mode;
+  if (h.orphaned) s.orphaned = true;
   return s;
 };
 
@@ -100,6 +106,7 @@ export const summarizeDeadLetter = (d: DeadLetter, pid: number): DeadLetterSumma
     pid,
   };
   if (d.intent !== undefined) s.intent = d.intent;
+  if (d.server !== undefined) s.server = d.server;
   return s;
 };
 

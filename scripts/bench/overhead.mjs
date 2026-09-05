@@ -16,7 +16,9 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const fake = join(root, "packages/proxy/test/fake-server.mjs");
 const cli = join(root, "packages/proxy/dist/cli.js");
-const calls = Number(process.argv[process.argv.indexOf("--calls") + 1] || 500);
+const callsAt = process.argv.indexOf("--calls");
+const calls = callsAt >= 0 ? Number(process.argv[callsAt + 1]) : 500;
+if (!Number.isFinite(calls) || calls < 1) throw new Error("--calls needs a positive number");
 const home = mkdtempSync(join(tmpdir(), "sayagain-bench-"));
 process.env.SAYAGAIN_HOME = home;
 

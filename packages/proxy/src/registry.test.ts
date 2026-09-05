@@ -7,12 +7,15 @@ import { addServer, loadRegistry, removeServer, resolveEnv } from "./registry.js
 
 describe("registry", () => {
   let home = "";
+  let previous: string | undefined;
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "sayagain-reg-"));
+    previous = process.env.SAYAGAIN_HOME;
     process.env.SAYAGAIN_HOME = home;
   });
   afterEach(() => {
-    process.env.SAYAGAIN_HOME = undefined;
+    if (previous === undefined) delete process.env.SAYAGAIN_HOME;
+    else process.env.SAYAGAIN_HOME = previous;
     rmSync(home, { recursive: true, force: true });
   });
   it("adds, lists, removes and validates names", () => {
@@ -27,6 +30,9 @@ describe("registry", () => {
     expect(Object.keys(loadRegistry().servers)).toEqual(["notion", "linear"]);
     expect(() => addServer("bad name", { transport: "stdio", command: "x" })).toThrow(
       /server name/,
+    );
+    expect(addServer("linear", { transport: "http", url: "https://mcp.linear.app/mcp" })).toBe(
+      true,
     );
     expect(removeServer("notion")).toBe(true);
     expect(removeServer("notion")).toBe(false);

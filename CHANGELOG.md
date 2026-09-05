@@ -21,14 +21,25 @@ All notable changes to this project are documented here. The format follows
   commands; starts the daemon if none is running; fails closed.
 - Streamable HTTP upstreams (`HttpUpstream`), with `Mcp-Method` and
   `Mcp-Name` hints on every POST.
-- SQLite storage (`--ledger sqlite`, `node:sqlite`, Node 24+): ledger, dead
-  letters and persisted holds that survive a daemon restart; JSONL remains
-  the default and the fallback.
+- Persisted holds: a held call survives a daemon restart (JSONL by default,
+  `holds.jsonl`). Reloaded holds are listed as orphaned, since the host that
+  sent them is no longer waiting; approving one executes it and records the
+  result in the ledger.
+- SQLite storage (`serve --store sqlite`, `node:sqlite`, Node 22.13+):
+  ledger, dead letters and holds in one file. JSONL remains the default, and
+  the fallback on a Node.js without `node:sqlite`.
 - The boundary core (`Boundary`) now multiplexes any number of hosts over
   one upstream, with request ids remapped per host and server-to-client
   requests routed to the single attached host; `wrap` is a thin shell
   around it.
-- `SAYAGAIN_HOME` relocates every file the tool keeps.
+- `SAYAGAIN_HOME` relocates every file the tool keeps. The home directory,
+  `config.json`, `token`, `daemon.json` and the data files are created 0600
+  or 0700: they hold tokens, hold arguments and dead letters.
+- The daemon's bearer token lives in `~/.sayagain/token` and is stable
+  across restarts, so a host entry pasted once keeps working.
+- Hosts get an `Mcp-Session-Id` on `initialize`; requests that carry it
+  share one session, so `notifications/cancelled` and server-to-client
+  requests reach the right host.
 - `scripts/bench/overhead.mjs` measures M15e. On this machine, 500
   sequential `echo` calls: direct stdio p99 0.38 ms, `wrap` p99 0.54 ms,
   daemon over HTTP p99 2.04 ms. The 0.4 gate (p99 overhead under 25 ms) is
@@ -40,6 +51,9 @@ All notable changes to this project are documented here. The format follows
   ADR-0006; a TOML parser is not worth a dependency yet.
 - Client request ids are no longer forwarded verbatim to the upstream; they
   are remapped so several hosts can share it. Arguments are untouched.
+- `wrap --ledger <path>` keeps its meaning (a JSONL file); the daemon takes
+  `--store jsonl|sqlite` and `--db <path>` instead, so the same flag does
+  not mean two things.
 
 ## [0.3.0] - 2026-09-05
 

@@ -5,26 +5,34 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type Daemon, startDaemon } from "./daemon.js";
 import { runStdioShim } from "./shim.js";
-import { openStores } from "./stores.js";
+import { openStores, sqliteAvailable } from "./stores.js";
 
 const fixture = new URL("../test/fake-server.mjs", import.meta.url).pathname;
+type Obj = Record<string, unknown>;
+const meta = (body: Obj): Obj => ((body.result as Obj)?._meta as Obj) ?? {};
 
 describe("daemon", () => {
   let home = "";
+  let previousHome: string | undefined;
   let daemon: Daemon | undefined;
   const logs: string[] = [];
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "sayagain-daemon-"));
+    previousHome = process.env.SAYAGAIN_HOME;
     process.env.SAYAGAIN_HOME = home;
   });
   afterEach(async () => {
     await daemon?.close();
     daemon = undefined;
-    process.env.SAYAGAIN_HOME = undefined;
+    if (previousHome === undefined) delete process.env.SAYAGAIN_HOME;
+    else process.env.SAYAGAIN_HOME = previousHome;
     rmSync(home, { recursive: true, force: true });
   });
 
-  const boot = async (ledger: "jsonl" | "sqlite" | "memory" = "memory") => {
+  const boot = async (
+    ledger: "jsonl" | "sqlite" | "memory" = "memory",
+    extra: Record<string, unknown> = {},
+  ) => {
     const stores = openStores(ledger, { log: (l) => logs.push(l) });
     daemon = await startDaemon({
       registry: {
@@ -41,22 +49,30 @@ describe("daemon", () => {
       version: "0.4.0-test",
       listen: "127.0.0.1:0",
       log: (l) => logs.push(l),
+      ...extra,
     });
     return daemon;
   };
-  const rpc = async (d: Daemon, name: string, msg: unknown, token = d.token) => {
+  const rpc = async (
+    d: Daemon,
+    name: string,
+    msg: unknown,
+    opts: { token?: string; session?: string } = {},
+  ) => {
     const res = await fetch(`${d.url}/mcp/${name}`, {
       method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      headers: {
+        authorization: `Bearer ${opts.token ?? d.token}`,
+        "content-type": "application/json",
+        ...(opts.session ? { "mcp-session-id": opts.session } : {}),
+      },
       body: JSON.stringify(msg),
     });
-    return {
-      status: res.status,
-      body: (res.status === 202 ? {} : ((await res.json()) as Record<string, unknown>)) as Record<
-        string,
-        unknown
-      >,
-    };
+    const body: Obj = res.status === 202 || res.status === 204 ? {} : ((await res.json()) as Obj);
+    const out: { status: number; body: Obj; session?: string } = { status: res.status, body };
+    const sid = res.headers.get("mcp-session-id");
+    if (sid) out.session = sid;
+    return out;
   };
   const api = async (d: Daemon, path: string, init: RequestInit = {}) =>
     (
@@ -68,77 +84,113 @@ describe("daemon", () => {
           ...(init.headers ?? {}),
         },
       })
-    ).json() as Promise<Record<string, unknown> | unknown[]>;
+    ).json() as Promise<Obj | unknown[]>;
+  const initMsg = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2026-07-28",
+      capabilities: {},
+      clientInfo: { name: "t", version: "0" },
+    },
+  };
+  const until = async <T>(probe: () => Promise<T | undefined>, ms = 3000): Promise<T> => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const v = await probe();
+      if (v !== undefined) return v;
+      if (Date.now() > deadline) throw new Error("timed out waiting");
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  };
 
   it("serves a registered upstream over HTTP with receipts, and rejects bad tokens and unknown names", async () => {
     const d = await boot();
-    expect(
-      (await rpc(d, "fake", { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, "wrong"))
-        .status,
-    ).toBe(401);
-    expect(
-      (await rpc(d, "nope", { jsonrpc: "2.0", id: 1, method: "initialize", params: {} })).status,
-    ).toBe(404);
-    const init = await rpc(d, "fake", {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2026-07-28",
-        capabilities: {},
-        clientInfo: { name: "t", version: "0" },
-      },
-    });
+    expect((await rpc(d, "fake", initMsg, { token: "wrong" })).status).toBe(401);
+    expect((await rpc(d, "nope", initMsg)).status).toBe(404);
+    const init = await rpc(d, "fake", initMsg);
     expect(init.status).toBe(200);
-    const result = init.body.result as Record<string, unknown>;
+    expect(init.session).toMatch(/^[A-Za-z0-9_-]{8,}$/);
+    const result = init.body.result as Obj;
     expect(result.serverInfo).toEqual({ name: "fake-notion", version: "9.9.9" });
-    expect((result._meta as Record<string, unknown>)["sh.sayagain/boundary"]).toMatchObject({
+    expect((result._meta as Obj)["sh.sayagain/boundary"]).toMatchObject({
       upstream: "fake-notion",
       hold: "destructive",
+      ledger: "memory",
     });
     expect(
-      (await rpc(d, "fake", { jsonrpc: "2.0", method: "notifications/initialized" })).status,
+      (
+        await rpc(
+          d,
+          "fake",
+          { jsonrpc: "2.0", method: "notifications/initialized" },
+          { session: init.session ?? "" },
+        )
+      ).status,
     ).toBe(202);
-    const call = await rpc(d, "fake", {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/call",
-      params: { name: "echo", arguments: { a: 1 } },
-    });
-    expect(
-      ((call.body.result as Record<string, unknown>)._meta as Record<string, unknown>)[
-        "sh.sayagain/status"
-      ],
-    ).toBe("executed");
+    const call = await rpc(
+      d,
+      "fake",
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "echo", arguments: { a: 1 } },
+      },
+      { session: init.session ?? "" },
+    );
+    expect(meta(call.body)["sh.sayagain/status"]).toBe("executed");
     const list = await rpc(d, "fake", { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
+    expect(((list.body.result as Obj).tools as unknown[]).length).toBeGreaterThan(3);
     expect(
-      ((list.body.result as Record<string, unknown>).tools as unknown[]).length,
-    ).toBeGreaterThan(3);
-    const health = (await api(d, "/api/health")) as Record<string, unknown>;
-    expect(health.servers).toEqual(["fake"]);
+      (
+        await rpc(
+          d,
+          "fake",
+          { jsonrpc: "2.0", id: 9, method: "tools/list", params: {} },
+          { session: "nope" },
+        )
+      ).status,
+    ).toBe(404);
+    const health = (await api(d, "/api/health")) as Obj;
+    expect(health).toMatchObject({ servers: ["fake"], ledger: "memory" });
   });
 
-  it("lets two hosts share one upstream and dedupes across them", async () => {
+  it("lets two hosts share one upstream: same request ids, cross-host dedupe, one process", async () => {
     const d = await boot();
-    const a = await rpc(d, "fake", {
+    const a = rpc(d, "fake", {
       jsonrpc: "2.0",
-      id: "a1",
+      id: 1,
+      method: "tools/call",
+      params: { name: "echo", arguments: { who: "a" } },
+    });
+    const b = rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "echo", arguments: { who: "b" } },
+    });
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(ra.body.id).toBe(1);
+    expect(rb.body.id).toBe(1);
+    const textOf = (r: Obj) => String(((r.result as Obj).content as { text: string }[])[0]?.text);
+    expect(textOf(ra.body)).toContain('"who":"a"');
+    expect(textOf(rb.body)).toContain('"who":"b"');
+    const w1 = await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: "w",
       method: "tools/call",
       params: { name: "create_page", arguments: { t: 1 } },
     });
-    const b = await rpc(d, "fake", {
+    const w2 = await rpc(d, "fake", {
       jsonrpc: "2.0",
       id: 7,
       method: "tools/call",
       params: { name: "create_page", arguments: { t: 1 } },
     });
-    expect(a.body.id).toBe("a1");
-    expect(b.body.id).toBe(7);
-    expect(
-      ((b.body.result as Record<string, unknown>)._meta as Record<string, unknown>)[
-        "sh.sayagain/status"
-      ],
-    ).toBe("deduplicated");
+    expect(meta(w1.body)["sh.sayagain/status"]).toBe("executed");
+    expect(meta(w2.body)["sh.sayagain/status"]).toBe("deduplicated");
     const servers = (await api(d, "/api/servers")) as {
       name: string;
       started: boolean;
@@ -148,7 +200,7 @@ describe("daemon", () => {
   });
 
   it("holds a destructive call and completes it through the API", async () => {
-    const d = await boot("sqlite");
+    const d = await boot();
     const pending = rpc(d, "fake", {
       jsonrpc: "2.0",
       id: 5,
@@ -159,64 +211,160 @@ describe("daemon", () => {
         _meta: { "sh.sayagain/intent": "drop it" },
       },
     });
-    let holds: { receipt: string; intent?: string }[] = [];
-    for (let i = 0; i < 50 && !holds.length; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-      holds = (await api(d, "/api/holds")) as { receipt: string; intent?: string }[];
-    }
-    expect(holds[0]).toMatchObject({
+    const hold = await until(async () => ((await api(d, "/api/holds")) as Obj[])[0]);
+    expect(hold).toMatchObject({
       tool: "delete_page",
       intent: "drop it",
-      upstream: "fake",
+      upstream: "fake-notion",
+      server: "fake",
       mode: "pre",
     });
-    const decided = (await api(d, `/api/holds/${holds[0]?.receipt}/approve`, {
-      method: "POST",
-    })) as { decided: boolean };
+    expect(hold.orphaned).toBeUndefined();
+    const decided = (await api(d, `/api/holds/${hold.receipt}/approve`, { method: "POST" })) as {
+      decided: boolean;
+    };
     expect(decided.decided).toBe(true);
     const done = await pending;
-    expect(
-      ((done.body.result as Record<string, unknown>)._meta as Record<string, unknown>)[
-        "sh.sayagain/held"
-      ],
-    ).toMatchObject({ decision: "approve" });
+    expect(meta(done.body)["sh.sayagain/held"]).toMatchObject({ decision: "approve" });
     const ledger = (await api(d, "/api/ledger?tail=5")) as { tool: string; status: string }[];
     expect(ledger.some((r) => r.tool === "delete_page" && r.status === "executed")).toBe(true);
+    expect((await api(d, "/api/ledger?tail=0")) as unknown[]).toEqual([]);
   });
 
-  it("dead-letters, lists, replays and resolves through the API with SQLite storage", async () => {
-    const d = await boot("sqlite");
-    const dead = await rpc(d, "fake", {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "strict", arguments: { limit: "10", tags: { nested: true } } },
+  it("keeps a held call across a restart, lists it as orphaned, and executes it on approve", async () => {
+    const stores = () => openStores("jsonl", { log: (l) => logs.push(l) });
+    const first = await startDaemon({
+      registry: {
+        servers: { fake: { transport: "stdio", command: process.execPath, args: [fixture] } },
+      },
+      stores: stores(),
+      version: "t",
+      listen: "127.0.0.1:0",
+      log: (l) => logs.push(l),
     });
-    const meta = (dead.body.result as Record<string, unknown>)._meta as Record<string, unknown>;
-    expect(meta["sh.sayagain/status"]).toBe("dead-lettered");
-    const receipt = String(meta["sh.sayagain/receipt"]);
+    const pending = rpc(first, "fake", {
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: { name: "delete_page", arguments: { id: 9 } },
+    });
+    const hold = await until(async () => ((await api(first, "/api/holds")) as Obj[])[0]);
+    await first.close();
+    await pending.catch(() => undefined);
+    const second = await boot("jsonl");
+    const reloaded = (await api(second, "/api/holds")) as Obj[];
+    expect(reloaded).toHaveLength(1);
+    expect(reloaded[0]).toMatchObject({ receipt: hold.receipt, orphaned: true, server: "fake" });
     expect(
-      ((await api(d, "/api/deadletters")) as { receipt: string }[]).map((x) => x.receipt),
-    ).toEqual([receipt]);
-    const outcome = (await api(d, `/api/replay/${receipt}`, {
-      method: "POST",
-      body: JSON.stringify({ arguments: { limit: 10, tags: "ok" } }),
-    })) as { isError: boolean; replayOf: string };
-    expect(outcome).toMatchObject({ isError: false, replayOf: receipt });
-    expect(await api(d, "/api/deadletters")).toEqual([]);
+      (await api(second, `/api/holds/${hold.receipt}/approve`, { method: "POST" })) as Obj,
+    ).toMatchObject({ decided: true });
+    const row = await until(async () =>
+      (
+        (await api(second, "/api/ledger?tail=10")) as {
+          receipt: string;
+          tool: string;
+          status: string;
+          held?: Obj;
+        }[]
+      ).find((r) => r.tool === "delete_page" && r.status === "executed"),
+    );
+    expect(row.receipt).toBe(hold.receipt);
+    expect(row.held).toMatchObject({ decision: "approve" });
+    expect(await api(second, "/api/holds")).toEqual([]);
+    const third = openStores("jsonl", { log: (l) => logs.push(l) });
+    expect(third.holds.pending()).toEqual([]);
   });
 
-  it("drives the stdio shim end to end against the daemon", async () => {
+  it.skipIf(!sqliteAvailable())(
+    "dead-letters, lists, replays and resolves through the API with SQLite storage",
+    async () => {
+      const d = await boot("sqlite");
+      expect(((await api(d, "/api/health")) as Obj).ledger).toBe("sqlite");
+      const dead = await rpc(d, "fake", {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "strict", arguments: { limit: "10", tags: { nested: true } } },
+      });
+      expect(meta(dead.body)["sh.sayagain/status"]).toBe("dead-lettered");
+      const receipt = String(meta(dead.body)["sh.sayagain/receipt"]);
+      expect(
+        ((await api(d, "/api/deadletters")) as { receipt: string; server?: string }[]).map((x) => [
+          x.receipt,
+          x.server,
+        ]),
+      ).toEqual([[receipt, "fake"]]);
+      expect(
+        (await api(d, `/api/replay/${receipt}`, { method: "POST", body: "{not json" })) as Obj,
+      ).toMatchObject({ error: expect.stringContaining("JSON") });
+      const outcome = (await api(d, `/api/replay/${receipt}`, {
+        method: "POST",
+        body: JSON.stringify({ arguments: { limit: 10, tags: "ok" } }),
+      })) as { isError: boolean; replayOf: string };
+      expect(outcome).toMatchObject({ isError: false, replayOf: receipt });
+      expect(await api(d, "/api/deadletters")).toEqual([]);
+      expect((await api(d, "/api/replay/nope", { method: "POST" })) as Obj).toMatchObject({
+        error: expect.stringContaining("no dead letter"),
+      });
+    },
+  );
+
+  it("streams server notifications to the host's GET stream and control events to /api/events", async () => {
+    const d = await boot();
+    const init = await rpc(d, "fake", initMsg);
+    const session = init.session ?? "";
+    const seen: string[] = [];
+    const events: string[] = [];
+    const ctl = new AbortController();
+    const stream = async (path: string, into: string[], headers: Record<string, string>) => {
+      const res = await fetch(`${d.url}${path}`, {
+        headers: { authorization: `Bearer ${d.token}`, accept: "text/event-stream", ...headers },
+        signal: ctl.signal,
+      });
+      const reader = res.body?.getReader();
+      if (!reader) return;
+      for (;;) {
+        const { value, done } = await reader.read().catch(() => ({ value: undefined, done: true }));
+        if (done) break;
+        into.push(new TextDecoder().decode(value));
+      }
+    };
+    void stream(`/mcp/fake`, seen, { "mcp-session-id": session });
+    void stream(`/api/events?token=${d.token}`, events, { authorization: "Bearer nope" });
+    await until(async () =>
+      seen.join("").includes("connected") && events.join("").includes("connected")
+        ? true
+        : undefined,
+    );
+    const call = await rpc(
+      d,
+      "fake",
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "notify", arguments: { text: "hey" } },
+      },
+      { session },
+    );
+    expect(meta(call.body)["sh.sayagain/status"]).toBe("executed");
+    await until(async () => (seen.join("").includes("notifications/message") ? true : undefined));
+    await until(async () => (events.join("").includes("event: row") ? true : undefined));
+    expect(seen.join("")).toContain('"data":"hey"');
+    ctl.abort();
+  });
+
+  it("drives the stdio shim end to end, including a request the server makes of the host", async () => {
     await boot();
     const input = new PassThrough();
     const output = new PassThrough();
-    const lines: Record<string, unknown>[] = [];
+    const lines: Obj[] = [];
     let buf = "";
     output.on("data", (c: Buffer) => {
       buf += c.toString();
       let nl = buf.indexOf("\n");
       while (nl >= 0) {
-        lines.push(JSON.parse(buf.slice(0, nl)) as Record<string, unknown>);
+        lines.push(JSON.parse(buf.slice(0, nl)) as Obj);
         buf = buf.slice(nl + 1);
         nl = buf.indexOf("\n");
       }
@@ -228,22 +376,68 @@ describe("daemon", () => {
       autoStart: false,
       log: (l) => logs.push(l),
     });
-    input.write(
-      `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2026-07-28", capabilities: {}, clientInfo: { name: "t", version: "0" } } })}\n`,
-    );
+    input.write(`${JSON.stringify(initMsg)}\n`);
     input.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    await until(async () => lines.find((m) => m.id === 1));
+    input.write("this is not json\n");
     input.write(
       `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "echo", arguments: { via: "shim" } } })}\n`,
     );
-    for (let i = 0; i < 100 && !lines.find((m) => m.id === 2); i++)
-      await new Promise((r) => setTimeout(r, 30));
-    const reply = lines.find((m) => m.id === 2) as Record<string, unknown>;
-    expect(
-      ((reply.result as Record<string, unknown>)._meta as Record<string, unknown>)[
-        "sh.sayagain/receipt"
-      ],
-    ).toMatch(/^rcpt_/);
+    const reply = await until(async () => lines.find((m) => m.id === 2));
+    expect(meta(reply)["sh.sayagain/receipt"]).toMatch(/^rcpt_/);
+    // The server asks the host something (roots/list); the host answers on stdin; the tool result reports it.
+    input.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "ask_client", arguments: { method: "roots/list" } } })}\n`,
+    );
+    const ask = await until(async () => lines.find((m) => m.method === "roots/list"));
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: ask.id, result: { roots: [] } })}\n`);
+    const answered = await until(async () => lines.find((m) => m.id === 3));
+    expect(String(((answered.result as Obj).content as { text: string }[])[0]?.text)).toContain(
+      '"answered":true',
+    );
     input.end();
     expect(await run).toBe(0);
+  });
+
+  it("answers a server ping itself, restarts a crashed upstream on the next call, and fails non-tool requests when it dies", async () => {
+    const d = await boot();
+    const ping = await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "ask_client", arguments: { method: "ping" } },
+    });
+    expect(String(((ping.body.result as Obj).content as { text: string }[])[0]?.text)).toContain(
+      '"answered":true',
+    );
+    const listWhileCrashing = rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
+    });
+    const crash = await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "crash", arguments: { code: 3 } },
+    });
+    expect(
+      meta(crash.body)["sh.sayagain/status"] ??
+        ((crash.body.error as Obj)?.data as Obj)?.["sh.sayagain/status"],
+    ).toBe("dead-lettered");
+    const list = await listWhileCrashing;
+    expect(list.body.result !== undefined || (list.body.error as Obj)?.code === -32000).toBe(true);
+    const again = await until(async () => {
+      const r = await rpc(d, "fake", {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "echo", arguments: {} },
+      });
+      return meta(r.body)["sh.sayagain/status"] === "executed" ? r : undefined;
+    }, 5000);
+    expect(meta(again.body)["sh.sayagain/status"]).toBe("executed");
+    expect(logs.some((l) => l.includes("closed: upstream exited"))).toBe(true);
   });
 });
