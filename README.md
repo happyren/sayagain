@@ -47,7 +47,7 @@ Today, 0.5: one command wraps every server your hosts know about, and one
 command puts it back (see `docs/ROADMAP.md` for what follows).
 
 ```bash
-npm install -g sayagain              # Node 22.13+
+npm install -g @sayagain/proxy       # Node 22.13+; provides the `sayagain` command (or: npx -y -p @sayagain/proxy sayagain ...)
 
 sayagain hosts                       # what Claude Code, Cursor, Claude Desktop and VS Code have configured
 sayagain import --host all --rewrite # register every server and point each host at Say Again (backups beside the files)

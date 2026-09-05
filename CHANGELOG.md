@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-05
+
+### Removed
+
+- The bare `sayagain` wrapper package. npm rejects the name as too similar
+  to the existing `say-again` (names that differ only by punctuation are
+  blocked), which also means nobody else can take it. Install
+  `@sayagain/proxy`; it provides the `sayagain` command.
+
 ## [0.5.0] - 2026-09-05
 
 ### Added

@@ -67,7 +67,7 @@ wants to show "via Say Again" reads it; every other client ignores it.
 
 ```bash
 # Thirty seconds, one server, no configuration: wrap the command in place.
-npx sayagain wrap -- npx -y @notionhq/notion-mcp-server
+npx -y -p @sayagain/proxy sayagain wrap -- npx -y @notionhq/notion-mcp-server
 
 # Register upstreams with the daemon.
 sayagain add notion -- npx -y @notionhq/notion-mcp-server

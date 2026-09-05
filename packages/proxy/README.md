@@ -11,7 +11,7 @@ are held for a decision; failures with a known fix are repaired; the rest
 are dead-lettered and can be replayed with the agent's original intent.
 
 ```bash
-npm install -g @sayagain/proxy        # or: npx -p @sayagain/proxy sayagain ...
+npm install -g @sayagain/proxy        # provides the sayagain command; or: npx -y -p @sayagain/proxy sayagain ...
 
 # One command wraps every server your hosts know about; one puts it back.
 sayagain hosts
