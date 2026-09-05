@@ -30,10 +30,11 @@ properties:
 3. **Held, not retried**, when the tool is not provably idempotent.
 4. **Replayable** by an operator, with the original intent attached.
 
-**Layer 0, zero-touch (any MCP client):** queue, bounded backoff retry,
-dead-letter queue (SQLite by default, Postgres for shared deployments),
-deterministic argument coercion, and error rewriting into model-actionable
-feedback.
+**Layer 0, zero-touch (any MCP client):** bounded backoff retry, holds for
+destructive tools and for writes with an unknown outcome, deterministic
+argument repair from the tool's own schema, dead-letter and replay, and
+error rewriting into model-actionable feedback. The ledger is a JSONL file
+today; SQLite and Postgres arrive with the daemon in 0.4.
 
 **Layer 1, opt-in:** intent capture, intent verification and reroute, bounded
 side-model repair, intent-drift detection, and hold-before-write with
