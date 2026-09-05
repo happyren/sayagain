@@ -457,4 +457,50 @@ describe("daemon", () => {
     expect(meta(again.body)["sh.sayagain/status"]).toBe("executed");
     expect(logs.some((l) => l.includes("closed: upstream exited"))).toBe(true);
   });
+
+  it("serves the operator page with a strict CSP, takes the token on the query string for the page only, and answers the analysis routes", async () => {
+    const d = await boot();
+    const page = await fetch(`${d.url}/ui?token=${d.token}`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-security-policy")).toContain("default-src 'self'");
+    expect(page.headers.get("content-type")).toContain("text/html");
+    const html = await page.text();
+    expect(html).toContain('<script type="module" src="/ui/app.js">');
+    expect(html).toContain("0.4.0-test");
+    expect(html).not.toMatch(/https?:\/\/(?!127\.0\.0\.1)/); // no remote origins
+    const css = await fetch(`${d.url}/ui/app.css`, {
+      headers: { authorization: `Bearer ${d.token}` },
+    });
+    expect(css.headers.get("content-type")).toContain("text/css");
+    expect((await fetch(`${d.url}/ui`)).status).toBe(401);
+    expect((await fetch(`${d.url}/api/holds?token=${d.token}`)).status).toBe(401); // never for the API
+    await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "missing", arguments: {} },
+    });
+    await rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "echo", arguments: {} },
+    });
+    const tools = (await api(d, "/api/tools?since=1h&minCalls=1")) as {
+      tool: string;
+      failureRatePct: number;
+    }[];
+    expect(tools.map((t) => t.tool)).toEqual(["missing", "echo"]);
+    const errors = (await api(d, "/api/errors?since=1h")) as { tool: string; errorClass: string }[];
+    expect(errors).toMatchObject([{ tool: "missing", errorClass: "semantic" }]);
+    const report = (await api(d, "/api/report?since=1h")) as {
+      calls: number;
+      byServer: { server: string }[];
+    };
+    expect(report.calls).toBe(2);
+    expect(report.byServer[0]?.server).toBe("fake-notion");
+    expect((await api(d, "/api/report?since=soon")) as { error: string }).toMatchObject({
+      error: expect.stringContaining("--since"),
+    });
+  });
 });

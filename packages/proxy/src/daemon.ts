@@ -9,8 +9,16 @@
  * its own short-lived session.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
+import {
+  report as buildReport,
+  parseSince,
+  selectRows,
+  signatureStats,
+  toolStats,
+} from "./analysis.js";
 import { summarizeDeadLetter, summarizeHold } from "./control.js";
 import { Boundary } from "./core.js";
 import { type Decision, type Hold, HoldQueue } from "./holds.js";
@@ -27,6 +35,7 @@ import {
 } from "./registry.js";
 import type { Stores } from "./stores.js";
 import type { Session } from "./transport.js";
+import { APP_CSS, indexHtml } from "./ui/page.js";
 
 export interface DaemonOptions {
   registry: Registry;
@@ -267,10 +276,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const header = req.headers.authorization ?? "";
     if (header.slice(0, 7).toLowerCase() === "bearer " && tokenMatches(header.slice(7).trim()))
       return true;
-    // EventSource cannot set headers: the query form is accepted for streams only.
+    // EventSource cannot set headers, and the browser's first visit carries the token in the URL:
+    // the query form is accepted for streams and for the page itself, never for the API.
     const wantsStream =
       req.method === "GET" && (req.headers.accept ?? "").includes("text/event-stream");
-    return wantsStream && tokenMatches(url.searchParams.get("token"));
+    const isPage = req.method === "GET" && url.pathname === "/ui";
+    return (wantsStream || isPage) && tokenMatches(url.searchParams.get("token"));
   };
   const hostAllowed = (req: IncomingMessage): boolean => {
     if (!LOOPBACK_HOSTS.has(host)) return true;
@@ -433,7 +444,86 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
   };
 
+  const CSP =
+    "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'";
+  const appJs = (): string | undefined => {
+    try {
+      return readFileSync(fileURLToPath(new URL("./ui/app.js", import.meta.url)), "utf8");
+    } catch {
+      return undefined;
+    }
+  };
+  const handleUi = (req: IncomingMessage, res: ServerResponse, url: URL) => {
+    if (req.method !== "GET") return json(res, 405, { error: "GET only" });
+    const send = (type: string, body: string) => {
+      res.writeHead(200, {
+        "content-type": type,
+        "content-length": Buffer.byteLength(body),
+        "content-security-policy": CSP,
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+      });
+      res.end(body);
+    };
+    if (url.pathname === "/ui") return send("text/html; charset=utf-8", indexHtml(options.version));
+    if (url.pathname === "/ui/app.css") return send("text/css; charset=utf-8", APP_CSS);
+    if (url.pathname === "/ui/app.js") {
+      const js = appJs();
+      return js === undefined
+        ? json(res, 404, { error: "the UI script is missing from this build" })
+        : send("text/javascript; charset=utf-8", js);
+    }
+    return json(res, 404, { error: "not found" });
+  };
+
+  /** The 0.6 analysis over the daemon's own ledger, for the page. */
+  const analysisRows = (url: URL) => {
+    const sinceRaw = url.searchParams.get("since") ?? "7d";
+    const since = parseSince(sinceRaw);
+    const server = url.searchParams.get("server") ?? undefined;
+    const minRaw = Number(url.searchParams.get("minCalls") ?? "10");
+    const minCalls = Number.isFinite(minRaw) ? Math.max(1, Math.floor(minRaw)) : 10;
+    const from = new Date(since.getTime() - (Date.now() - since.getTime()));
+    const rows = options.stores
+      .readLedger()
+      .filter(
+        (r) =>
+          Date.parse(r.ts) >= from.getTime() &&
+          (!server || r.upstream === server || r.server === server),
+      );
+    return { rows, since, minCalls };
+  };
+
   const handleApi = async (req: IncomingMessage, res: ServerResponse, url: URL) => {
+    if (
+      req.method === "GET" &&
+      (url.pathname === "/api/tools" ||
+        url.pathname === "/api/errors" ||
+        url.pathname === "/api/report")
+    ) {
+      let a: ReturnType<typeof analysisRows>;
+      try {
+        a = analysisRows(url);
+      } catch (err) {
+        return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+      if (url.pathname === "/api/tools")
+        return json(
+          res,
+          200,
+          toolStats(selectRows(a.rows, { since: a.since }), {
+            since: a.since,
+            minCalls: a.minCalls,
+          }),
+        );
+      if (url.pathname === "/api/errors")
+        return json(
+          res,
+          200,
+          signatureStats(selectRows(a.rows, { since: a.since }), { since: a.since }),
+        );
+      return json(res, 200, buildReport(a.rows, { since: a.since, minCalls: a.minCalls }));
+    }
     const path = url.pathname;
     if (req.method === "GET" && path === "/api/health") {
       return json(res, 200, {
@@ -558,6 +648,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const declared = Number(req.headers["content-length"] ?? 0);
         if (declared > MAX_BODY)
           return json(res, 413, { error: "body too large" }, { connection: "close" });
+        if (url.pathname === "/ui" || url.pathname.startsWith("/ui/"))
+          return handleUi(req, res, url);
         const mcp = url.pathname.match(/^\/mcp\/([A-Za-z0-9_.-]+)\/?$/);
         if (mcp) return await handleMcp(req, res, mcp[1] ?? "");
         if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url);

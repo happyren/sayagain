@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-05
+
+### Added
+
+- `sayagain ui`: the operator page, served by the daemon at `/ui` (ADR-0008).
+  A live holds inbox with approve and reject (orphaned holds marked),
+  servers and daemon health, dead letters with replay and optional edited
+  arguments, a filterable ledger tail, and the 0.6 analysis as tables:
+  tools, errors, report, over a selectable window. Live updates arrive on
+  `/api/events`. No framework, no bundler, nothing loaded from a remote
+  origin; a strict Content Security Policy; the token is carried on the
+  query string once, moved into the tab's session storage, and sent as a
+  header from then on. The daemon accepts the query token for the page and
+  for event streams, never for the API.
+- `/api/tools`, `/api/errors`, `/api/report` with `since`, `server` and
+  `minCalls`, so the page never computes over the ledger itself.
+
 ## [0.6.0] - 2026-09-05
 
 ### Added

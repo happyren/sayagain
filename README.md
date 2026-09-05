@@ -16,8 +16,8 @@ operator between the agent and its tools who says it, so the agent never has
 to.
 
 > **Status: pre-alpha.** The `_meta` convention, design records and package
-> skeletons are here. The proxy runs (0.5: `wrap`, the daemon, holds, repair,
-> dead letters, one-command onboarding). Watch the repo or open a
+> skeletons are here. The proxy runs (0.7: `wrap`, the daemon, holds, repair,
+> dead letters, one-command onboarding, tool health, an operator page). Watch the repo or open a
 > Discussion.
 
 ## What it does
@@ -43,8 +43,9 @@ approval.
 
 ## Getting started
 
-Today, 0.5: one command wraps every server your hosts know about, and one
-command puts it back (see `docs/ROADMAP.md` for what follows).
+Today, 0.7: one command wraps every server your hosts know about, one puts
+it back, and `sayagain ui` shows what the boundary is doing (see
+`docs/ROADMAP.md` for what follows).
 
 ```bash
 npm install -g @sayagain/proxy       # Node 22.13+; provides the `sayagain` command (or: npx -y -p @sayagain/proxy sayagain ...)
@@ -79,6 +80,7 @@ sayagain errors create_page          # signatures, recovery paths, shape changes
 sayagain report                      # the weekly page from docs/measurement.md
 sayagain lint --all                  # grade every registered server's tool definitions
 sayagain serve --otlp http://127.0.0.1:4318/v1/traces   # or OTEL_EXPORTER_OTLP_ENDPOINT; a local collector on :4318 is found by itself (SAYAGAIN_OTLP=off never exports)
+sayagain ui                          # the same in a browser tab: a live holds inbox, servers, dead letters, ledger, tools, errors, report
 ```
 
 Options: `--hold destructive|always|never`, `--hold-wait <ms>`,

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src/ui-browser",
+    "outDir": "dist/ui",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "composite": true,
+    "sourceMap": false,
+    "tsBuildInfoFile": "dist/ui/.tsbuildinfo"
+  },
+  "include": ["src/ui-browser/**/*.ts"]
+}

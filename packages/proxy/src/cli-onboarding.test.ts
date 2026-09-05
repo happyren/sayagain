@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "./cli.js";
+import { startDaemon } from "./daemon.js";
+import { openStores } from "./stores.js";
 
 /** Drive the real command line with HOME and SAYAGAIN_HOME pointed at a scratch directory. */
 describe("cli onboarding", () => {
@@ -105,5 +107,23 @@ describe("cli onboarding", () => {
     out = "";
     expect(await main(["import", "--host", "claude-desktop", "--transport", "http"])).toBe(0);
     expect(out).toContain("does not accept HTTP entries");
+  });
+
+  it("ui --no-open prints the page URL with the token of the running daemon", async () => {
+    const daemon = await startDaemon({
+      registry: { servers: {} },
+      stores: openStores("memory"),
+      version: "t",
+      listen: "127.0.0.1:0",
+      log: () => {},
+    });
+    try {
+      expect(await main(["ui", "--no-open"])).toBe(0);
+      expect(out.trim()).toBe(
+        `http://127.0.0.1:${daemon.port}/ui?token=${encodeURIComponent(daemon.token)}`,
+      );
+    } finally {
+      await daemon.close();
+    }
   });
 });

@@ -52,7 +52,7 @@ import {
   saveRegistry,
   tokenPath,
 } from "./registry.js";
-import { daemonHealthy, runStdioShim, serveArgv, waitForDaemon } from "./shim.js";
+import { daemonHealthy, ensureDaemon, runStdioShim, serveArgv, waitForDaemon } from "./shim.js";
 import { defaultSqlitePath, openStores, type StoreKind } from "./stores.js";
 import { PROXY_VERSION } from "./version.js";
 import { wrap } from "./wrap.js";
@@ -80,6 +80,8 @@ const USAGE = `sayagain ${PROXY_VERSION}
       Register an upstream (stdio command, or --url for Streamable HTTP). --env K alone stores "\${K}",
       resolved from the daemon's environment at spawn; so does a \${VAR} inside --header or --env values.
   sayagain remove <name> | sayagain list | sayagain status | sayagain stop
+  sayagain ui [--no-open]
+      Open the operator page (holds inbox, servers, dead letters, ledger, tools, errors, report); starts the daemon if needed.
   sayagain hosts [--project] [--json]
       Which MCP hosts are configured on this machine (Claude Code, Cursor, Claude Desktop, VS Code) and what they hold.
   sayagain import --host <id>|all [--rewrite] [--dry-run] [--force] [--project] [--file <path>] [--transport stdio|http] [--command <path>] [--no-start]
@@ -549,6 +551,34 @@ export async function main(argv: string[]): Promise<number> {
 
   if (command === "stop") {
     process.stdout.write((await stopDaemon()) ? "stopping daemon\n" : "no daemon running\n");
+    return 0;
+  }
+
+  if (command === "ui") {
+    const opts = [...rest];
+    const noOpen = takeFlag(opts, "--no-open");
+    if (opts.length) throw new UsageError(`ui: unknown option ${opts[0]}`);
+    const info = await ensureDaemon({
+      autoStart: true,
+      startTimeoutMs: 10_000,
+      log: (l) => process.stderr.write(`${l}\n`),
+    });
+    if (!info)
+      throw new UsageError("ui: no daemon is running and none could be started (sayagain serve)");
+    const url = `http://${info.host}:${info.port}/ui?token=${encodeURIComponent(info.token)}`;
+    process.stdout.write(`${url}\n`);
+    if (noOpen) return 0;
+    const opener =
+      process.platform === "darwin"
+        ? ["open", url]
+        : process.platform === "win32"
+          ? ["cmd", "/c", "start", "", url]
+          : ["xdg-open", url];
+    const child = spawn(opener[0] as string, opener.slice(1), { stdio: "ignore", detached: true });
+    child.on("error", (err) =>
+      process.stderr.write(`could not open a browser (${err.message}); open the URL above\n`),
+    );
+    child.unref();
     return 0;
   }
 

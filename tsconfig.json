@@ -1,8 +1,17 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/sdk" },
-    { "path": "packages/proxy" },
-    { "path": "packages/lint" }
+    {
+      "path": "packages/sdk"
+    },
+    {
+      "path": "packages/proxy"
+    },
+    {
+      "path": "packages/lint"
+    },
+    {
+      "path": "packages/proxy/tsconfig.ui.json"
+    }
   ]
 }
