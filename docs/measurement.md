@@ -52,6 +52,17 @@ own ledger once it exists, **X** = a designed experiment.
 | M10 | Ended on failure | Sessions whose last tool call failed and was never retried. A proxy for abandonment. | T, L |
 | M11 | Tool latency | p50 and p95 from request to result, per tool. Sets the overhead budget for M15. | T, W, L |
 
+### Tool-health metrics (the learning loop, ADR-0007)
+
+| Id | Metric | Definition | Source |
+| -- | ------ | ---------- | ------ |
+| M17 | Turns to recover | Assistant turns between a failure and the next success of the same tool in the task, capped at 10 and reported with the unrecovered share. Median per tool and per error signature. The error-message quality proxy. | T, W, L |
+| M18 | Waste per 1K calls | Recovery cost summed over a tool's failures, divided by its calls, times 1,000. Ranks tools prone to being mis-called. Also annualised at the observed rate. | T, L |
+| M19 | Mis-call rate | Failures classed `coercible` or `semantic` divided by calls: the share that is the tool contract's fault rather than the environment's. | T, W, L |
+| M20 | Recovery path and shape change | Per error signature, the most common sequence of tools between failure and success, and the most common change in argument keys or types. Evidence for cross-tool dependencies and for learned coercions. | T, L |
+| M21 | Intervention lift | For each learned intervention, failure rate and M17 before and after on the same tool, with the sample size. Reverted automatically when lift is absent. | L |
+| M22 | Dead schema tokens | Schema tokens per turn spent on tools never successfully called in the window. | L |
+
 ### Intent metrics (experiment before Layer 1)
 
 | Id | Metric | Definition | Source |
@@ -103,6 +114,15 @@ Caveat: Claude Code transcripts mix built-in tools with MCP tools. Report
 both, but the product claim rests on the MCP subset and on the `Edit` and
 `Bash` failure classes that look like MCP failures (stale precondition,
 timeout).
+
+### 5.1a Tool-health report (today, zero build)
+
+The same analyzer prints a tool-health section: tools ranked by M18 with
+M17, M19 and the top error signatures, recovery paths and shape changes
+(M20). Signatures are masked error text and stay on the machine; the JSON
+output is for the operator, not for sharing. This is the Databricks
+"which tool errors recur most, and how many turns to recover" query run
+against your own history.
 
 ### 5.2 Wire tap for other agents (two weeks)
 
