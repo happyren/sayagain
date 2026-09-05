@@ -91,6 +91,8 @@ sayagain lint --registry --sample 400 # scan a seeded sample of 400 registry ser
                                      # they list without credentials, print the grade distribution and M16 with the rule-set version
 sayagain contribute                  # build the ADR-0009 shape document from your history, write and show it, send only after a y
                                      # (no index endpoint exists yet: without --endpoint the command stops after writing)
+sayagain serve --arm coinflip        # the A/B protocol: each host session lands in control (observe only) or treatment (the boundary)
+sayagain report --ab                 # both arms side by side with 95% intervals, against the pre-registered 2,000 calls per arm
 sayagain learn                       # what the loop learned from your ledger: coercions and hints, each with before and after numbers
                                      # (it advises; `learn --apply <id>` lets one coercion change read-only calls before they leave)
 ```

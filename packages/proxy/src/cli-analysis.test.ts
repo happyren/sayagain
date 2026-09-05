@@ -57,6 +57,67 @@ describe("cli analysis", () => {
     ...over,
   });
 
+  it("report --ab prints both arms and the verdict, and the arm options are validated", async () => {
+    const rows = [
+      row(1, {
+        arm: "control",
+        tool: "create_page",
+        toolClass: "write",
+        isError: true,
+        errorClass: "retryable",
+        errorSignature: "timeout",
+      }),
+      row(1, { arm: "control", tool: "create_page", toolClass: "write" }),
+      row(1, {
+        arm: "treatment",
+        tool: "create_page",
+        toolClass: "write",
+        status: "repaired",
+        repairs: [{ path: "/x", rule: "string-to-number" }],
+      }),
+      row(1, { arm: "treatment", tool: "create_page", toolClass: "write" }),
+      row(1, { tool: "echo" }),
+    ];
+    writeFileSync(join(dir, "ledger.jsonl"), rows.map((r) => `${JSON.stringify(r)}\n`).join(""));
+    expect(
+      await main(["report", "--ab", "--ledger", join(dir, "ledger.jsonl"), "--since", "7d"]),
+    ).toBe(0);
+    expect(out).toContain("Say Again A/B:");
+    expect(out).toContain("control      treatment");
+    expect(out).toContain("failure tax (primary, cost)");
+    expect(out).toContain("Verdict:");
+    expect(out).toContain("Rows outside the experiment (no arm): 1");
+    out = "";
+    expect(
+      await main([
+        "report",
+        "--ab",
+        "--json",
+        "--ledger",
+        join(dir, "ledger.jsonl"),
+        "--since",
+        "7d",
+      ]),
+    ).toBe(0);
+    const ab = JSON.parse(out) as {
+      arms: {
+        control: { calls: number };
+        treatment: { calls: number; boundary: { repaired: number } };
+      };
+      outside: number;
+    };
+    expect(ab.arms.control.calls).toBe(2);
+    expect(ab.arms.treatment.calls).toBe(2);
+    expect(ab.arms.treatment.boundary.repaired).toBe(1);
+    expect(ab.outside).toBe(1);
+    await expect(main(["serve", "--arm", "sometimes"])).rejects.toThrow(
+      /--arm must be control, treatment, coinflip or daily/,
+    );
+    await expect(main(["wrap", "--arm", "sometimes", "--", "node", "-e", "0"])).rejects.toThrow(
+      /--arm must be/,
+    );
+  });
+
   it("report, tools and errors read the store, honour --server by either name, and show the previous window", async () => {
     const rows: LedgerRow[] = [];
     for (let i = 0; i < 12; i++) rows.push(row(3, { tool: "search" }));

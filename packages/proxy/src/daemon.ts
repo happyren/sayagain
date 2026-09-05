@@ -19,6 +19,7 @@ import {
   signatureStats,
   toolStats,
 } from "./analysis.js";
+import { type Arm, type ArmMode, pickArm } from "./boundary.js";
 import { weeklyContribution } from "./contribute.js";
 import { summarizeDeadLetter, summarizeHold } from "./control.js";
 import { Boundary } from "./core.js";
@@ -63,6 +64,8 @@ export interface DaemonOptions {
   learnEveryMs?: number;
   /** How often the weekly contribution (ADR-0009) checks whether it is due. Default 1 hour; 0 disables the check. */
   contributeEveryMs?: number;
+  /** The A/B protocol (docs/measurement.md 5.4): how host sessions are assigned an arm. Default: no experiment. */
+  arm?: ArmMode;
 }
 
 export interface Daemon {
@@ -140,6 +143,7 @@ class HostSession implements Session {
   readonly waiters = new Map<string, { settle: (msg: JsonRpcMessage) => void }>();
   stream: ServerResponse | undefined;
   lastSeen = Date.now();
+  arm: Arm | undefined;
   constructor(readonly id: string) {}
   get bidirectional(): boolean {
     return this.stream !== undefined;
@@ -322,11 +326,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return h === "" || LOOPBACK_HOSTS.has(h);
   };
 
+  // Every session that can originate a call gets an arm when an experiment is running,
+  // including the sessionless POSTs some hosts send: a call with no arm would leak into treatment.
+  const armFor = (): Arm | undefined => (options.arm ? pickArm(options.arm) : undefined);
   const sessionFor = (id: string | undefined, create: boolean): HostSession | undefined => {
     if (!id) return undefined;
     let s = hostSessions.get(id);
     if (!s && create) {
       s = new HostSession(id);
+      s.arm = armFor();
+      if (s.arm) log(`sayagain: session ${id} in the ${s.arm} arm (${options.arm})`);
       hostSessions.set(id, s);
     }
     if (s) s.lastSeen = Date.now();
@@ -409,6 +418,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         send: () => undefined,
         bidirectional: false,
         ephemeral: true,
+        arm: armFor(),
       };
       boundary.attach(session);
       try {
@@ -436,6 +446,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         id: `http-${++sessionSeq}`,
         bidirectional: false,
         ephemeral: true,
+        arm: armFor(),
         send: (m: JsonRpcMessage) => {
           if (isResponse(m) && m.id !== null && m.id !== undefined && keyOfId(m.id) === wanted)
             settle(m);
@@ -630,6 +641,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         servers: Object.keys(options.registry.servers),
         ledger: options.stores.kind,
         otlp: options.otlp?.endpoint ?? null,
+        arm: options.arm ?? null,
       });
     }
     if (req.method === "GET" && path === "/api/servers") {

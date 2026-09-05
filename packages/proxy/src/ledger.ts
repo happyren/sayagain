@@ -47,6 +47,8 @@ export interface LedgerRow {
   replayOf?: string;
   /** Which budget a repair counted against: the client's task id, or a time window when none was given. */
   budget?: "task" | "window";
+  /** The A/B arm the call's session was in (docs/measurement.md 5.4); absent outside an experiment. */
+  arm?: "control" | "treatment";
 }
 
 export interface Ledger {

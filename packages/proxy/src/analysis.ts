@@ -646,6 +646,211 @@ export function report(
   return out;
 }
 
+/** One arm of the A/B protocol (docs/measurement.md 5.4), measured with the report's definitions. */
+export interface ArmStats {
+  arm: "control" | "treatment";
+  calls: number;
+  writes: number;
+  failures: number;
+  failureRatePct: number;
+  unacknowledged: number;
+  unacknowledgedPer1kWrites: number;
+  /** Recovery bytes summed over the arm's failures, divided by its calls: the failure tax per call. */
+  recoveryBytesPerCall: number;
+  recovery: {
+    recovered: number;
+    retryRatePct: number;
+    identicalRetryPct: number;
+    medianCalls: number;
+  };
+  boundary: {
+    retried: number;
+    repaired: number;
+    held: number;
+    rejected: number;
+    deadLettered: number;
+    deduplicated: number;
+  };
+}
+
+/** A difference between the arms, control minus treatment, with a 95% interval. */
+export interface ArmDiff {
+  control: number;
+  treatment: number;
+  delta: number;
+  low: number;
+  high: number;
+  /** The interval excludes zero. */
+  distinguishable: boolean;
+}
+
+export interface AbReport {
+  generatedAt: string;
+  window: { since: string; until: string; days: number };
+  /** The pre-registered minimum per arm before the numbers are read (docs/measurement.md 5.4). */
+  targetCallsPerArm: number;
+  /** Rows in the window that carry no arm: calls made outside the experiment. */
+  outside: number;
+  arms: { control: ArmStats; treatment: ArmStats };
+  differences: {
+    /** Primary, cost: the failure tax in bytes per call. */
+    recoveryBytesPerCall: ArmDiff;
+    /** Primary, risk: unacknowledged writes per 1,000 writes. */
+    unacknowledgedPer1kWrites: ArmDiff;
+    /** Secondary: the failure rate in percentage points. */
+    failureRatePct: ArmDiff;
+  };
+  verdict: string;
+}
+
+const Z = 1.96;
+
+/** Wilson interval for k of n, as a fraction. */
+const wilsonFrac = (k: number, n: number): { p: number; low: number; high: number } => {
+  if (!n) return { p: 0, low: 0, high: 0 };
+  const p = k / n;
+  const denom = 1 + (Z * Z) / n;
+  const centre = (p + (Z * Z) / (2 * n)) / denom;
+  const half = (Z * Math.sqrt((p * (1 - p)) / n + (Z * Z) / (4 * n * n))) / denom;
+  return { p, low: Math.max(0, centre - half), high: Math.min(1, centre + half) };
+};
+
+/** Newcombe's hybrid score interval for a difference of proportions (control minus treatment). */
+function proportionDiff(k1: number, n1: number, k2: number, n2: number, scale: number): ArmDiff {
+  const a = wilsonFrac(k1, n1);
+  const b = wilsonFrac(k2, n2);
+  const delta = a.p - b.p;
+  const low = delta - Math.sqrt((a.p - a.low) ** 2 + (b.high - b.p) ** 2);
+  const high = delta + Math.sqrt((a.high - a.p) ** 2 + (b.p - b.low) ** 2);
+  const r = (x: number) => +(scale * x).toFixed(scale >= 1000 ? 1 : 2);
+  return {
+    control: r(a.p),
+    treatment: r(b.p),
+    delta: r(delta),
+    low: r(low),
+    high: r(high),
+    distinguishable: n1 > 0 && n2 > 0 && (low > 0 || high < 0),
+  };
+}
+
+/** Welch interval for a difference of means over per-call series (control minus treatment). */
+function meanDiff(a: number[], b: number[]): ArmDiff {
+  const stats = (xs: number[]) => {
+    const n = xs.length;
+    const mean = n ? xs.reduce((s, x) => s + x, 0) / n : 0;
+    const variance = n > 1 ? xs.reduce((s, x) => s + (x - mean) ** 2, 0) / (n - 1) : 0;
+    return { n, mean, variance };
+  };
+  const x = stats(a);
+  const y = stats(b);
+  const delta = x.mean - y.mean;
+  const se = x.n && y.n ? Math.sqrt(x.variance / x.n + y.variance / y.n) : Number.POSITIVE_INFINITY;
+  const r = (v: number) => Math.round(v);
+  const low = Number.isFinite(se) ? delta - Z * se : Number.NEGATIVE_INFINITY;
+  const high = Number.isFinite(se) ? delta + Z * se : Number.POSITIVE_INFINITY;
+  return {
+    control: r(x.mean),
+    treatment: r(y.mean),
+    delta: r(delta),
+    low: Number.isFinite(low) ? r(low) : 0,
+    high: Number.isFinite(high) ? r(high) : 0,
+    distinguishable: Number.isFinite(se) && x.n > 1 && y.n > 1 && (low > 0 || high < 0),
+  };
+}
+
+/** The A/B protocol's page: both arms with the report's definitions, and the differences with intervals. */
+export function abReport(
+  allRows: LedgerRow[],
+  opts: AnalysisOptions & { since: Date; until?: Date; targetCallsPerArm?: number },
+): AbReport {
+  const until = opts.until ?? new Date();
+  const target = opts.targetCallsPerArm ?? 2000;
+  const rows = selectRows(allRows, { ...opts, until });
+  const inWin = (r: LedgerRow) => inWindow(r, opts.since);
+  const outside = finalRows(rows).filter((r) => inWin(r) && r.arm === undefined).length;
+  const series: Record<"control" | "treatment", number[]> = { control: [], treatment: [] };
+  const arm = (which: "control" | "treatment"): ArmStats => {
+    const own = rows.filter((r) => r.arm === which);
+    const rep = report(own, { ...opts, until });
+    const finals = finalRows(own).filter((r) => inWin(r) && r.status !== "deduplicated");
+    const outcomes = finals.filter((r) => r.status !== "held");
+    const byReceipt = new Map(
+      recoveries(own, { ...opts, since: opts.since }).map((x) => [x.row.receipt, x.bytes]),
+    );
+    series[which] = outcomes.map((r) => byReceipt.get(r.receipt) ?? 0);
+    const failures = rep.byServer.reduce((a, s) => a + s.failures, 0);
+    return {
+      arm: which,
+      calls: rep.calls,
+      writes: rep.writes,
+      failures,
+      failureRatePct: pct(failures, rep.calls),
+      unacknowledged: rep.unacknowledged.count,
+      unacknowledgedPer1kWrites: rep.northStar.unacknowledgedWritesPer1kWrites,
+      recoveryBytesPerCall: rep.calls
+        ? Math.round(rep.northStar.failureTaxBytesPer1kCalls / 1000)
+        : 0,
+      recovery: {
+        recovered: rep.recovery.recovered,
+        retryRatePct: rep.recovery.retryRatePct,
+        identicalRetryPct: rep.recovery.identicalRetryPct,
+        medianCalls: rep.recovery.medianCalls,
+      },
+      boundary: {
+        retried: rep.boundary.retriesResolved,
+        repaired: rep.boundary.repairsResolved,
+        held: rep.boundary.held.approved,
+        rejected: rep.boundary.held.rejected,
+        deadLettered: rep.boundary.deadLettered,
+        deduplicated: rep.boundary.deduplicated,
+      },
+    };
+  };
+  const control = arm("control");
+  const treatment = arm("treatment");
+  const differences = {
+    recoveryBytesPerCall: meanDiff(series.control, series.treatment),
+    unacknowledgedPer1kWrites: proportionDiff(
+      control.unacknowledged,
+      control.writes,
+      treatment.unacknowledged,
+      treatment.writes,
+      1000,
+    ),
+    failureRatePct: proportionDiff(
+      control.failures,
+      control.calls,
+      treatment.failures,
+      treatment.calls,
+      100,
+    ),
+  };
+  const short = Math.max(0, target - Math.min(control.calls, treatment.calls));
+  const cost = differences.recoveryBytesPerCall;
+  const risk = differences.unacknowledgedPer1kWrites;
+  const say = (d: ArmDiff, unit: string) =>
+    d.distinguishable
+      ? d.delta > 0
+        ? `treatment lowers it by ${Math.abs(d.delta)} ${unit} (95% ${d.low} to ${d.high})`
+        : `treatment raises it by ${Math.abs(d.delta)} ${unit} (95% ${d.low} to ${d.high})`
+      : `not distinguishable from zero yet (${d.delta} ${unit}, 95% ${d.low} to ${d.high})`;
+  const verdict = `${short ? `${short} more calls in the smaller arm before the pre-registered ${target} per arm. ` : `Both arms passed the pre-registered ${target} calls. `}Failure tax per call: ${say(cost, "bytes")}. Unacknowledged writes: ${say(risk, "per 1K writes")}.`;
+  const windowMs = until.getTime() - opts.since.getTime();
+  return {
+    generatedAt: new Date().toISOString(),
+    window: {
+      since: opts.since.toISOString(),
+      until: until.toISOString(),
+      days: +(windowMs / 86_400_000).toFixed(1),
+    },
+    targetCallsPerArm: target,
+    outside,
+    arms: { control, treatment },
+    differences,
+    verdict,
+  };
+}
+
 /** "7d", "24h", "90m", "2w", or an ISO date, into a Date. */
 export function parseSince(text: string, now: Date = new Date()): Date {
   const m = text.match(/^(\d+)\s*([mhdw])$/i);

@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
  * with the host on this process's own stdin and stdout.
  */
 import type { Readable, Writable } from "node:stream";
+import { type ArmMode, pickArm } from "./boundary.js";
 import { type DeadLetterSummary, startControlServer, summarizeDeadLetter } from "./control.js";
 import { Boundary } from "./core.js";
 import { DeadLetterStore } from "./deadletter.js";
@@ -17,6 +18,8 @@ import { StdioUpstream } from "./upstream-stdio.js";
 import { PROXY_VERSION } from "./version.js";
 
 export interface WrapOptions {
+  /** The A/B protocol (docs/measurement.md 5.4): the arm this process runs in. Default: no experiment. */
+  arm?: ArmMode;
   /** Export one span per call to an OTLP/HTTP collector. */
   otlp?: OtlpExporter;
   /** The learning loop's store; default: ~/.sayagain/learned.json when it exists. */
@@ -93,9 +96,12 @@ export function wrap(options: WrapOptions): Wrapped {
   if (options.replayTimeoutMs !== undefined) coreOptions.replayTimeoutMs = options.replayTimeoutMs;
   const boundary = new Boundary(coreOptions);
 
+  const arm = options.arm ? pickArm(options.arm) : undefined;
+  if (arm) log(`sayagain: this wrap runs in the ${arm} arm (${options.arm})`);
   const session = {
     id: `stdio-${process.pid}`,
     send: (msg: unknown) => output.write(`${JSON.stringify(msg)}\n`),
+    ...(arm ? { arm } : {}),
   };
   boundary.attach(session);
 

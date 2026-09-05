@@ -181,6 +181,21 @@ feed the logs to the same analyzer with `--tap`.
 - Report the confidence interval, not only the point estimate. With the
   variance seen in run-to-run token totals, expect to need the full sample.
 
+Amendment, 2026-09-06 (0.13.0, ADR-0011): the arms are inside the
+boundary. `sayagain serve --arm coinflip` assigns each host session to
+control or treatment by coin (`--arm daily` assigns every session of a
+UTC day the same arm, so a day can be joined to a transcript audit); the
+control arm forwards every call as it came and records it, with no hold,
+dedupe, retry, repair, learned hint, description augmentation or guidance
+text. Every ledger row carries its arm. `sayagain report --ab` prints both
+arms with the definitions of section 3 and the differences with 95%
+intervals (Newcombe for rates, Welch for the per-call tax). The ledger
+measures bytes, not tokens, so the primary cost outcome in this
+implementation is recovery bytes per call (the wire's failure tax), with
+M9 unacknowledged writes per 1,000 writes as the primary risk outcome;
+M15b in tokens comes from `sayagain audit` per arm-day when `--arm daily`
+is used. The pre-registered minimum stays at 2,000 calls per arm.
+
 ### 5.5 Registry scan (whitepaper launch)
 
 Run `@sayagain/lint` over every server in the public registry that

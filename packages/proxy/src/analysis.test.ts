@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  abReport,
   duplicateWrites,
   finalRows,
   parseSince,
@@ -273,6 +274,97 @@ describe("analysis", () => {
       minCalls: 1,
     });
     expect(only.calls).toBe(1);
+  });
+
+  it("compares the arms of the A/B protocol with intervals and a verdict", () => {
+    const rows: LedgerRow[] = [];
+    let t = 0;
+    // Control: 40 calls, 8 failures each costing a retry (two rows of 300 bytes), 4 unacknowledged writes.
+    for (let i = 0; i < 40; i++) {
+      const failed = i % 5 === 0;
+      rows.push(
+        row({
+          tool: "create_page",
+          toolClass: "write",
+          at: t++,
+          session: `c${i % 4}`,
+          arm: "control",
+          isError: failed,
+          ...(failed
+            ? { errorClass: i % 10 === 0 ? "retryable" : "coercible", errorSignature: "boom" }
+            : {}),
+        }),
+      );
+      if (failed)
+        rows.push(
+          row({
+            tool: "create_page",
+            toolClass: "write",
+            at: t++,
+            session: `c${i % 4}`,
+            arm: "control",
+          }),
+        );
+    }
+    // Treatment: 40 calls, 1 failure, the rest repaired by the boundary; no unacknowledged writes.
+    for (let i = 0; i < 40; i++)
+      rows.push(
+        row({
+          tool: "create_page",
+          toolClass: "write",
+          at: t++,
+          session: `t${i % 4}`,
+          arm: "treatment",
+          ...(i === 3 ? { isError: true, errorClass: "semantic", errorSignature: "gone" } : {}),
+          ...(i % 5 === 0 && i !== 3
+            ? {
+                status: "repaired" as const,
+                repairs: [{ path: "/limit", rule: "string-to-number" }],
+              }
+            : {}),
+        }),
+      );
+    rows.push(row({ tool: "echo", at: t++, session: "x" })); // outside the experiment
+    const r = abReport(rows, {
+      since: new Date(t0 - 1000),
+      until: new Date(t0 + 1_000_000),
+      targetCallsPerArm: 30,
+    });
+    expect(r.outside).toBe(1);
+    expect(r.arms.control).toMatchObject({ calls: 48, writes: 48, failures: 8, unacknowledged: 4 });
+    expect(r.arms.treatment).toMatchObject({
+      calls: 40,
+      writes: 40,
+      failures: 1,
+      unacknowledged: 0,
+    });
+    expect(r.arms.treatment.boundary.repaired).toBe(8);
+    expect(r.arms.control.recoveryBytesPerCall).toBeGreaterThan(
+      r.arms.treatment.recoveryBytesPerCall,
+    );
+    const d = r.differences;
+    expect(d.failureRatePct.delta).toBeGreaterThan(0);
+    expect(d.failureRatePct.low).toBeLessThanOrEqual(d.failureRatePct.delta);
+    expect(d.failureRatePct.high).toBeGreaterThanOrEqual(d.failureRatePct.delta);
+    expect(d.unacknowledgedPer1kWrites).toMatchObject({ control: 83.3, treatment: 0 });
+    expect(d.recoveryBytesPerCall.delta).toBeGreaterThan(0);
+    expect(d.recoveryBytesPerCall.distinguishable).toBe(true);
+    expect(r.verdict).toContain("Both arms passed the pre-registered 30 calls");
+    expect(r.verdict).toContain("Failure tax per call: treatment lowers it by");
+    const early = abReport(rows.slice(0, 10), {
+      since: new Date(t0 - 1000),
+      until: new Date(t0 + 1_000_000),
+    });
+    expect(early.verdict).toMatch(
+      /^\d+ more calls in the smaller arm before the pre-registered 2000 per arm/,
+    );
+    expect(early.differences.recoveryBytesPerCall.distinguishable).toBe(false);
+    const empty = abReport([], { since: new Date(t0 - 1000), until: new Date(t0 + 1000) });
+    expect(empty.arms.control.calls).toBe(0);
+    expect(empty.differences.unacknowledgedPer1kWrites).toMatchObject({
+      delta: 0,
+      distinguishable: false,
+    });
   });
 
   it("parses durations and dates, and diffs shapes", () => {
