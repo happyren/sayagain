@@ -1,0 +1,505 @@
+/**
+ * The Tool Reliability Index as a static artefact (ADR-0010): from a registry scan (`lint
+ * --registry --out`) and, where they exist, contributed shape documents (ADR-0009), build a
+ * site of per-server pages, per-tool README badges and one JSON file. Everything on it is
+ * public registry data or an aggregate over shapes; no contributor id, no session, no value.
+ */
+import { type grade as gradeOf, RULES } from "@sayagain/lint";
+import { suggestionFor } from "./analysis.js";
+import type { ShapeDocument } from "./contribute.js";
+import type { RegistryScan, ScannedServer, ScannedTool } from "./registry-scan.js";
+
+export type Grade = ReturnType<typeof gradeOf>;
+export const GRADE_SCORE: Record<Grade, number> = { A: 100, B: 80, C: 60, D: 40, F: 20 };
+const GRADE_COLOUR: Record<Grade, string> = {
+  A: "#2e8b57",
+  B: "#7cb342",
+  C: "#dfb317",
+  D: "#fe7d37",
+  F: "#e05d44",
+};
+/** What a finding costs a grade (`grade()` in @sayagain/lint): information costs nothing. */
+const SEVERITY_WEIGHT: Record<string, number> = { error: 3, warning: 1, info: 0 };
+
+export interface RuntimeScore {
+  calls: number;
+  failures: number;
+  failureRatePct: number;
+  unacknowledgedWrites: number;
+  /** 100 minus the failure rate, on the contributed calls. */
+  score: number;
+  dominantErrorClass?: string;
+  /** Contributed calls and failures per model family. */
+  families: Record<string, { calls: number; failures: number }>;
+  /** The most-recorded resolution other than `none` across the tool's contributed errors. */
+  resolution?: string;
+  /** The fix a maintainer can make to the definition. */
+  suggestion?: string;
+  contributions: number;
+}
+
+export interface IndexedTool {
+  name: string;
+  /** Unique within the server: the badge's file name. */
+  slug: string;
+  grade: Grade;
+  score: number;
+  findings: { rule: string; severity: string; message: string; path?: string }[];
+  runtime?: RuntimeScore;
+}
+
+export interface IndexedServer {
+  name: string;
+  /** Unique across the index: the page's and the badge's file name. */
+  slug: string;
+  version: string;
+  url?: string;
+  outcome: ScannedServer["outcome"];
+  invalidTools: number;
+  tools: IndexedTool[];
+  /** Mean of the tools' static scores; undefined when no tool was graded. */
+  score?: number;
+  grade?: Grade;
+  grades: Record<Grade, number>;
+  /** The two changes that would move the score most, across the server's tools. */
+  fixes: Fix[];
+}
+
+export interface Fix {
+  rule: string;
+  severity: string;
+  summary: string;
+  /** How many of the server's tools it applies to. */
+  tools: number;
+}
+
+export interface ReliabilityIndex {
+  generatedAt: string;
+  version: string;
+  ruleSet: string;
+  scan: {
+    generatedAt: string;
+    listed: number;
+    withRemote: number;
+    probed: number;
+    m16: RegistryScan["m16"];
+  };
+  contributions: { documents: number; sessions: number; shapes: number };
+  servers: IndexedServer[];
+}
+
+/** Lowercase letters, digits and single dashes; never empty. */
+export const slugOf = (name: string): string => {
+  let slug = "";
+  let dash = false;
+  for (const ch of name.toLowerCase()) {
+    if (/[a-z0-9]/.test(ch)) {
+      if (dash && slug) slug += "-";
+      slug += ch;
+      dash = false;
+    } else dash = true;
+  }
+  return slug || "server";
+};
+
+/** Slugs that stay distinct: a second `x` becomes `x-2`. */
+class Slugs {
+  private readonly seen = new Map<string, number>();
+  take(name: string): string {
+    const base = slugOf(name);
+    const n = (this.seen.get(base) ?? 0) + 1;
+    this.seen.set(base, n);
+    return n === 1 ? base : `${base}-${n}`;
+  }
+}
+
+const gradeFromScore = (score: number): Grade =>
+  score >= 90 ? "A" : score >= 70 ? "B" : score >= 50 ? "C" : score >= 30 ? "D" : "F";
+
+/** Aggregate the contributed shapes for one server and tool, across documents and families. */
+function runtimeFor(shapes: ShapeDocument["shapes"], documents: number): RuntimeScore | undefined {
+  let calls = 0;
+  let failures = 0;
+  let unack = 0;
+  const families: RuntimeScore["families"] = {};
+  const byClass: Record<string, number> = {};
+  const byResolution: Record<string, number> = {};
+  for (const s of shapes) {
+    calls += s.calls;
+    failures += Math.min(s.failures, s.calls);
+    unack += s.unacknowledgedWrites;
+    const f = families[s.modelFamily] ?? { calls: 0, failures: 0 };
+    f.calls += s.calls;
+    f.failures += Math.min(s.failures, s.calls);
+    families[s.modelFamily] = f;
+    for (const e of s.errors) {
+      byClass[e.class] = (byClass[e.class] ?? 0) + e.count;
+      if (e.resolution !== "none")
+        byResolution[e.resolution] = (byResolution[e.resolution] ?? 0) + e.count;
+    }
+  }
+  if (!calls) return undefined; // no data is not a score of zero
+  const dominant = Object.entries(byClass).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const resolution = Object.entries(byResolution).sort((a, b) => b[1] - a[1])[0]?.[0];
+  return {
+    calls,
+    failures,
+    failureRatePct: +((100 * failures) / calls).toFixed(1),
+    unacknowledgedWrites: unack,
+    score: Math.round(100 * (1 - failures / calls)),
+    ...(dominant ? { dominantErrorClass: dominant } : {}),
+    families,
+    ...(resolution ? { resolution } : {}),
+    ...(dominant ? { suggestion: suggestionFor(dominant, "") } : {}),
+    contributions: documents,
+  };
+}
+
+/** The two rules whose findings cost the server's grades most; information never moves a grade. */
+function fixesFor(tools: ScannedTool[]): Fix[] {
+  const weight = new Map<string, { severity: string; tools: number; weight: number }>();
+  for (const t of tools) {
+    const seen = new Set<string>();
+    for (const f of t.findings) {
+      if (seen.has(f.rule)) continue;
+      seen.add(f.rule);
+      const w = weight.get(f.rule) ?? { severity: f.severity, tools: 0, weight: 0 };
+      w.tools++;
+      w.weight += SEVERITY_WEIGHT[f.severity] ?? 0;
+      weight.set(f.rule, w);
+    }
+  }
+  return [...weight.entries()]
+    .filter(([, w]) => w.weight > 0)
+    .sort((a, b) => b[1].weight - a[1].weight || b[1].tools - a[1].tools)
+    .slice(0, 2)
+    .map(([rule, w]) => ({
+      rule,
+      severity: w.severity,
+      summary: RULES.find((r) => r.id === rule)?.summary ?? rule,
+      tools: w.tools,
+    }));
+}
+
+const lastSegment = (name: string): string => (name.split("/").pop() ?? name).toLowerCase();
+
+export function buildIndex(
+  scan: RegistryScan,
+  contributions: ShapeDocument[],
+  opts: { version: string; now?: Date } = { version: "dev" },
+): ReliabilityIndex {
+  // Shapes by "server tool". Contributions name a server as the host saw it: the registry name,
+  // or the key the host's configuration gave it, which is usually the registry name's last
+  // segment. A last segment names a server only when one scanned server has it.
+  const shapesByKey = new Map<string, ShapeDocument["shapes"]>();
+  const docsByKey = new Map<string, Set<number>>();
+  contributions.forEach((doc, i) => {
+    for (const s of doc.shapes) {
+      const key = `${s.server.toLowerCase()} ${s.tool}`;
+      const list = shapesByKey.get(key);
+      if (list) list.push(s);
+      else shapesByKey.set(key, [s]);
+      const docs = docsByKey.get(key) ?? new Set<number>();
+      docs.add(i);
+      docsByKey.set(key, docs);
+    }
+  });
+  const segmentOwners = new Map<string, number>();
+  for (const s of scan.servers) {
+    const seg = lastSegment(s.name);
+    segmentOwners.set(seg, (segmentOwners.get(seg) ?? 0) + 1);
+  }
+  const slugs = new Slugs();
+  const servers: IndexedServer[] = scan.servers.map((s) => {
+    const grades: Record<Grade, number> = { A: 0, B: 0, C: 0, D: 0, F: 0 };
+    const toolSlugs = new Slugs();
+    const names = [s.name.toLowerCase()];
+    const seg = lastSegment(s.name);
+    if (segmentOwners.get(seg) === 1 && seg !== s.name.toLowerCase()) names.push(seg);
+    const tools: IndexedTool[] = s.tools.map((t) => {
+      grades[t.grade]++;
+      const keys = names.map((n) => `${n} ${t.name}`).filter((k) => shapesByKey.has(k));
+      const shapes = keys.flatMap((k) => shapesByKey.get(k) ?? []);
+      const docs = new Set(keys.flatMap((k) => [...(docsByKey.get(k) ?? [])]));
+      const runtime = runtimeFor(shapes, docs.size);
+      return {
+        name: t.name,
+        slug: toolSlugs.take(t.name),
+        grade: t.grade,
+        score: GRADE_SCORE[t.grade],
+        findings: t.findings,
+        ...(runtime ? { runtime } : {}),
+      };
+    });
+    const score = tools.length
+      ? Math.round(tools.reduce((a, t) => a + t.score, 0) / tools.length)
+      : undefined;
+    return {
+      name: s.name,
+      slug: slugs.take(s.name),
+      version: s.version,
+      ...(s.url ? { url: s.url } : {}),
+      outcome: s.outcome,
+      invalidTools: s.invalidTools ?? 0,
+      tools,
+      ...(score !== undefined ? { score, grade: gradeFromScore(score) } : {}),
+      grades,
+      fixes: fixesFor(s.tools),
+    };
+  });
+  servers.sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || a.name.localeCompare(b.name));
+  return {
+    generatedAt: (opts.now ?? new Date()).toISOString(),
+    version: opts.version,
+    ruleSet: scan.ruleSet,
+    scan: {
+      generatedAt: scan.generatedAt,
+      listed: scan.selection.listed,
+      withRemote: scan.selection.withRemote,
+      probed: scan.selection.chosen,
+      m16: scan.m16,
+    },
+    contributions: {
+      documents: contributions.length,
+      sessions: contributions.reduce((a, d) => a + d.sessions, 0),
+      shapes: contributions.reduce((a, d) => a + d.shapes.length, 0),
+    },
+    servers,
+  };
+}
+
+const esc = (s: unknown): string =>
+  String(s).replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
+  );
+const num = (n: unknown): string => (typeof n === "number" && Number.isFinite(n) ? String(n) : "0");
+
+/** A flat README badge, shields-style, self-contained. */
+export function badgeSvg(label: string, value: string, grade: Grade): string {
+  const lw = Math.round(6 * label.length + 12);
+  const vw = Math.round(6.5 * value.length + 12);
+  const w = lw + vw;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="20" role="img" aria-label="${esc(label)}: ${esc(value)}">
+<title>${esc(label)}: ${esc(value)}</title>
+<rect width="${lw}" height="20" fill="#555"/><rect x="${lw}" width="${vw}" height="20" fill="${GRADE_COLOUR[grade]}"/>
+<g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
+<text x="${lw / 2}" y="14">${esc(label)}</text><text x="${lw + vw / 2}" y="14">${esc(value)}</text>
+</g></svg>
+`;
+}
+
+const CSS = `
+:root { --bg: #f6f7f9; --panel: #fff; --line: #e1e4ea; --text: #1a1d24; --muted: #5f6775; --accent: #148a68; --bad: #b83b3b; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0f1115; --panel: #161a22; --line: #262c38; --text: #e6e8ee; --muted: #9aa3b5; --accent: #5ac8a6; --bad: #f08a8a; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px; font: 14px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+main { max-width: 1040px; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 4px; } h1 span { color: var(--muted); font-weight: 400; }
+h2 { font-size: 15px; margin: 24px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+p.lead { color: var(--muted); margin: 0 0 16px; }
+a { color: var(--accent); }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.card h3 { margin: 0 0 6px; font-size: 12px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .04em; }
+.card .big { font-size: 28px; font-weight: 600; margin: 0; }
+.card p { margin: 4px 0 0; color: var(--muted); }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; } td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: 0; }
+.grade { display: inline-block; min-width: 22px; text-align: center; border-radius: 4px; padding: 1px 4px; color: #fff; font-weight: 600; }
+code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+ul.findings { margin: 4px 0 0 18px; padding: 0; color: var(--muted); } footer { color: var(--muted); margin-top: 24px; font-size: 12px; }
+`;
+
+const gradePill = (g: Grade): string =>
+  `<span class="grade" style="background:${GRADE_COLOUR[g]}">${g}</span>`;
+
+/**
+ * A link from a page `depth` directories below the root to `path`: absolute under a base URL,
+ * else relative, so the site works at any path (a GitHub Pages project site included).
+ */
+const href = (base: string, depth: number, path: string): string =>
+  base ? `${base}/${path}` : `${"../".repeat(depth)}${path}`;
+
+const page = (
+  title: string,
+  body: string,
+  depth: number,
+  base: string,
+  index: ReliabilityIndex,
+): string => `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)}</title><style>${CSS}</style></head>
+<body><main>
+${body}
+<footer>Tool Reliability Index, built ${esc(index.generatedAt.slice(0, 10))} by sayagain ${esc(index.version)}, rule set ${esc(index.ruleSet)}. Static scores come from <code>@sayagain/lint</code> over the tool definitions each server publishes; runtime scores from contributed shapes (counts and classes, never arguments or results). <a href="${esc(href(base, depth, "index.html"))}">Index</a> · <a href="https://github.com/happyren/sayagain">sayagain</a></footer>
+</main></body></html>
+`;
+
+const describeRuntime = (r: RuntimeScore): string =>
+  `${r.calls} contributed calls, ${r.failureRatePct}% failed${r.dominantErrorClass ? `, most often ${esc(r.dominantErrorClass)}` : ""}${r.resolution ? `; what worked: ${esc(r.resolution)}` : ""}${r.unacknowledgedWrites ? `; ${r.unacknowledgedWrites} writes without a known outcome` : ""} (${Object.entries(
+    r.families,
+  )
+    .map(([f, x]) => `${esc(f)} ${x.calls}`)
+    .join(", ")}; ${r.contributions} contribution${r.contributions === 1 ? "" : "s"})`;
+
+/** Why a server has no score, in the words the maintainer needs. */
+export function ungradedReason(server: IndexedServer): string {
+  switch (server.outcome) {
+    case "ok":
+      return server.invalidTools
+        ? `listed ${server.invalidTools} definition${server.invalidTools === 1 ? "" : "s"} the linter could not read`
+        : "listed no gradable tool";
+    case "auth":
+      return "wants credentials before it lists its tools";
+    case "refused":
+      return "answered the probe with an error";
+    case "unreachable":
+      return "did not answer the probe";
+    case "not-mcp":
+      return "answered with something other than MCP";
+    case "no-tools":
+      return "listed no tools";
+    case "skipped":
+      return "points at a private address and was not probed";
+  }
+}
+
+/** Every file of the site: path relative to the output directory, content. */
+export function renderIndexSite(index: ReliabilityIndex, base = ""): Map<string, string> {
+  const files = new Map<string, string>();
+  const graded = index.servers.filter((s) => s.score !== undefined);
+  const withRuntime = index.servers.filter((s) => s.tools.some((t) => t.runtime));
+  const rows = graded
+    .map(
+      (s) =>
+        `<tr><td><a href="${esc(href(base, 0, `servers/${s.slug}.html`))}">${esc(s.name)}</a> <code>${esc(s.version)}</code></td><td class="n">${s.tools.length}</td><td class="n">${num(s.score)}</td><td>${gradePill(s.grade as Grade)}</td><td>${(
+          ["A", "B", "C", "D", "F"] as const
+        )
+          .map((g) => (s.grades[g] ? `${g}&nbsp;${s.grades[g]}` : ""))
+          .filter(Boolean)
+          .join(" ")}</td><td>${s.tools.some((t) => t.runtime) ? "yes" : ""}</td></tr>`,
+    )
+    .join("\n");
+  files.set(
+    "index.html",
+    page(
+      "Tool Reliability Index",
+      `<h1>Tool Reliability Index <span>${esc(index.scan.generatedAt.slice(0, 10))}</span></h1>
+<p class="lead">Per public MCP server: a static score from the linter over the tool definitions it publishes, and where contributors have shared shapes, a runtime score. ${graded.length} servers graded from ${num(index.scan.probed)} probed of ${num(index.scan.withRemote)} with a Streamable HTTP remote (${num(index.scan.listed)} listed). ${withRuntime.length} with runtime data from ${index.contributions.documents} contribution${index.contributions.documents === 1 ? "" : "s"}.</p>
+<section class="cards">
+  <div class="card"><h3>tools without documented parameter constraints</h3><p class="big">${num(index.scan.m16.pct)}%</p><p>M16, 95% interval ${num(index.scan.m16.low)} to ${num(index.scan.m16.high)}, n = ${num(index.scan.m16.n)} tools, rule set ${esc(index.ruleSet)}</p></div>
+  <div class="card"><h3>servers graded</h3><p class="big">${graded.length}</p><p>${(["A", "B", "C", "D", "F"] as const).map((g) => `${g} ${graded.filter((s) => s.grade === g).length}`).join(" · ")}</p></div>
+  <div class="card"><h3>runtime data</h3><p class="big">${withRuntime.length}</p><p>servers with contributed shapes; ${index.contributions.sessions} sessions, ${index.contributions.shapes} shapes</p></div>
+</section>
+<h2>Servers</h2>
+<table><tr><th>server</th><th class="n">tools</th><th class="n">score</th><th>grade</th><th>tools by grade</th><th>runtime</th></tr>
+${rows || "<tr><td>none graded</td></tr>"}
+</table>
+<h2>Method</h2>
+<p class="lead">A tool's static score is its linter grade (A 100, B 80, C 60, D 40, F 20); a server's is the mean over its tools, graded again at 90, 70, 50 and 30. The linter checks names, descriptions, parameter descriptions and constraints, <code>required</code>, <code>additionalProperties</code>, output, and annotations; the catalogue is in <code>@sayagain/lint</code>. A runtime score is 100 minus the failure rate on contributed calls; it counts every failure, the environment's included, has no minimum sample and no interval, and comes from whichever contributors and model families ran the tool: read it beside its call count. The servers here are the ones a scan probed: a seeded sample of those with a Streamable HTTP remote, not the whole registry. Badges: <code>badges/&lt;server&gt;.svg</code> and <code>badges/&lt;server&gt;/&lt;tool&gt;.svg</code>. Data: <a href="${esc(href(base, 0, "index.json"))}">index.json</a>.</p>`,
+      0,
+      base,
+      index,
+    ),
+  );
+  for (const s of index.servers) {
+    if (s.score === undefined) continue;
+    const toolRows = s.tools
+      .map(
+        (t) =>
+          `<tr><td><code>${esc(t.name)}</code><br><img alt="badge" src="${esc(href(base, 1, `badges/${s.slug}/${t.slug}.svg`))}"></td><td>${gradePill(t.grade)} ${t.score}</td><td>${t.findings.length ? `<ul class="findings">${t.findings.map((f) => `<li><code>${esc(f.rule)}</code> ${esc(f.message)}</li>`).join("")}</ul>` : "no findings"}</td><td>${t.runtime ? `${t.runtime.score} <span style="color:var(--muted)">${describeRuntime(t.runtime)}${t.runtime.suggestion ? `<br>suggestion: ${esc(t.runtime.suggestion)}` : ""}</span>` : ""}</td></tr>`,
+      )
+      .join("\n");
+    files.set(
+      `servers/${s.slug}.html`,
+      page(
+        `${s.name}: Tool Reliability Index`,
+        `<h1>${esc(s.name)} <span>${esc(s.version)}</span></h1>
+<p class="lead"><a href="${esc(href(base, 1, "index.html"))}">Index</a> · ${s.tools.length} tools · score ${num(s.score)} ${gradePill(s.grade as Grade)} · badge <code>${esc(href(base, 1, `badges/${s.slug}.svg`))}</code>${s.url ? ` · <code>${esc(s.url)}</code>` : ""}</p>
+<h2>Two fixes</h2>
+${s.fixes.length ? `<ol>${s.fixes.map((f) => `<li><strong>${esc(f.summary)}</strong> <span style="color:var(--muted)">(${esc(f.rule)}, ${esc(f.severity)}, ${f.tools} of ${s.tools.length} tools)</span></li>`).join("")}</ol>` : "<p>Nothing moves the score: no error or warning across the tools. Informational findings, if any, are listed per tool.</p>"}
+<h2>Tools</h2>
+<table><tr><th>tool</th><th>static</th><th>findings</th><th>runtime</th></tr>
+${toolRows}
+</table>`,
+        1,
+        base,
+        index,
+      ),
+    );
+    files.set(
+      `badges/${s.slug}.svg`,
+      badgeSvg("sayagain", `${s.grade} ${s.score}`, s.grade as Grade),
+    );
+    for (const t of s.tools)
+      files.set(
+        `badges/${s.slug}/${t.slug}.svg`,
+        badgeSvg(t.name.slice(0, 40), `${t.grade} ${t.score}`, t.grade),
+      );
+  }
+  const { servers, ...head } = index;
+  files.set(
+    "index.json",
+    `${JSON.stringify(
+      {
+        ...head,
+        servers: servers.map((s) => ({
+          name: s.name,
+          slug: s.slug,
+          version: s.version,
+          outcome: s.outcome,
+          ...(s.score !== undefined ? { score: s.score, grade: s.grade } : {}),
+          fixes: s.fixes,
+          tools: s.tools.map((t) => ({
+            name: t.name,
+            slug: t.slug,
+            grade: t.grade,
+            score: t.score,
+            findings: t.findings.map((f) => f.rule),
+            ...(t.runtime ? { runtime: t.runtime } : {}),
+          })),
+        })),
+      },
+      null,
+      1,
+    )}\n`,
+  );
+  return files;
+}
+
+/** The message to a maintainer: the score and two fixes, nothing else. */
+export function fixesText(index: ReliabilityIndex, server: IndexedServer, base = ""): string {
+  const lines = [
+    `${server.name} ${server.version} on the Tool Reliability Index (${index.scan.generatedAt.slice(0, 10)}, rule set ${index.ruleSet}):`,
+    server.score === undefined
+      ? `  not graded: the server ${ungradedReason(server)}`
+      : `  score ${server.score} (${server.grade}) over ${server.tools.length} tools: ${(
+          ["A", "B", "C", "D", "F"] as const
+        )
+          .filter((g) => server.grades[g])
+          .map((g) => `${g} ${server.grades[g]}`)
+          .join(", ")}`,
+  ];
+  if (server.fixes.length) {
+    lines.push("  two fixes that move the score most:");
+    for (const [i, f] of server.fixes.entries())
+      lines.push(
+        `    ${i + 1}. ${f.summary} (${f.rule}; ${f.tools} of ${server.tools.length} tools)`,
+      );
+  } else if (server.score !== undefined)
+    lines.push("  nothing moves the score: no error or warning across the tools");
+  const runtime = server.tools.filter((t) => t.runtime);
+  if (runtime.length)
+    lines.push(
+      `  runtime, from contributed shapes: ${runtime.map((t) => `${t.name} ${t.runtime?.failureRatePct}% failed on ${t.runtime?.calls} calls${t.runtime?.dominantErrorClass ? ` (${t.runtime.dominantErrorClass})` : ""}`).join("; ")}`,
+    );
+  if (server.score !== undefined)
+    lines.push(
+      `  page: ${href(base, 0, `servers/${server.slug}.html`)}   badge: ${href(base, 0, `badges/${server.slug}.svg`)}${base ? "" : "   (paths relative to the index)"}`,
+    );
+  lines.push("  method: https://github.com/happyren/sayagain/blob/main/docs/registry-scan.md");
+  return `${lines.join("\n")}\n`;
+}

@@ -49,7 +49,7 @@ export const PROWORD: Readonly<Record<Status, string>> = {
   "dead-lettered": "UNABLE",
 };
 
-/** Repair budget before a call is dead-lettered (spec section 8). */
+/** Repair budget before a call is dead-lettered (spec section 9). */
 export const REPAIR_BUDGET = { perCall: 1, perTask: 3 } as const;
 
 /** Tool classification used by the hold policy (ADR-0004). */

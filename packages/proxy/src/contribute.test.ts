@@ -194,6 +194,13 @@ describe("contribute", () => {
     expect(() =>
       assertShapeDocumentSafe(
         mutate((d) => {
+          (d.shapes[0] as Loose["shapes"][number]).failures = 999;
+        }),
+      ),
+    ).toThrow(/failures exceeds calls/);
+    expect(() =>
+      assertShapeDocumentSafe(
+        mutate((d) => {
           (d.shapes[0] as Loose["shapes"][number]).server = "bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a";
         }),
       ),

@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
@@ -29,6 +36,7 @@ import {
   stopDaemon,
 } from "./client-api.js";
 import {
+  assertShapeDocumentSafe,
   buildShapeDocument,
   checkEndpoint,
   contributeSettings,
@@ -70,6 +78,7 @@ import {
   tokenPath,
 } from "./registry.js";
 import { renderRegistryScan, scanRegistry } from "./registry-scan.js";
+import { buildIndex, fixesText, renderIndexSite } from "./reliability-index.js";
 import { daemonHealthy, ensureDaemon, runStdioShim, serveArgv, waitForDaemon } from "./shim.js";
 import { defaultSqlitePath, openStores, type StoreKind } from "./stores.js";
 import {
@@ -159,6 +168,13 @@ const USAGE = `sayagain ${PROXY_VERSION}
       parameter constraints) with the rule-set version. The page and --json name no server; the progress log on
       stderr does. --out writes every probed server (registry name, version, remote URL, outcome, status, error
       text) and every graded tool with its findings, all of it public registry data.
+  sayagain index build --from <scan.json> [--contributions <dir>] [--out <dir>] [--base-url <url>]
+      The Tool Reliability Index as a static site (ADR-0010): from the scan file that lint --registry --out
+      wrote and the contributed shape documents in <dir> (your own copies; default ~/.sayagain/contributions),
+      index.html, a page and a badge per graded server, a badge per tool, index.json, into --out (default
+      ~/.sayagain/index). Public registry data and aggregates only; nothing is sent.
+  sayagain index fixes <server> --from <scan.json> [--contributions <dir>] [--base-url <url>]
+      The message for a maintainer: their score and the two changes that move it most. Printed, never sent.
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
   sayagain holds [--json]
   sayagain approve <receipt> | sayagain reject <receipt>
@@ -1286,6 +1302,70 @@ export async function main(argv: string[]): Promise<number> {
     saveRegistry(registry);
     process.stdout.write(
       `sent: the index answered ${receipt.status}${receipt.receipt ? `, receipt ${receipt.receipt}` : ""}${receipt.url ? `\nyour servers on the index: ${receipt.url}` : ""}\n`,
+    );
+    return 0;
+  }
+
+  if (command === "index") {
+    const sub = rest[0];
+    const opts = rest.slice(1);
+    if (sub !== "build" && sub !== "fixes")
+      throw new UsageError("index: expected build or fixes <server>");
+    const from = takeOption(opts, "--from");
+    const contributionsDir = takeOption(opts, "--contributions") ?? homePath("contributions");
+    const outDir = takeOption(opts, "--out") ?? homePath("index");
+    let baseUrl = takeOption(opts, "--base-url") ?? "";
+    while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1); // no regex: registry-fed input
+    const target = sub === "fixes" ? opts.shift() : undefined;
+    if (opts.length) throw new UsageError(`index: unknown option ${opts[0]}`);
+    if (!from)
+      throw new UsageError("index: --from <scan.json> is required (lint --registry --out)");
+    if (sub === "fixes" && !target) throw new UsageError("index fixes: expected a server name");
+    let scan: Parameters<typeof buildIndex>[0];
+    try {
+      scan = JSON.parse(readFileSync(resolve(from), "utf8")) as Parameters<typeof buildIndex>[0];
+    } catch (err) {
+      throw new UsageError(
+        `index: cannot read ${from}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!Array.isArray(scan.servers) || !scan.selection || !scan.m16)
+      throw new UsageError(`index: ${from} is not a registry scan (lint --registry --out)`);
+    const contributions: Parameters<typeof buildIndex>[1] = [];
+    if (existsSync(contributionsDir))
+      for (const f of readdirSync(contributionsDir)
+        .filter((x) => x.endsWith(".json"))
+        .sort()) {
+        try {
+          const doc: unknown = JSON.parse(readFileSync(resolve(contributionsDir, f), "utf8"));
+          assertShapeDocumentSafe(doc);
+          contributions.push(doc);
+        } catch (err) {
+          process.stderr.write(
+            `index: skipping ${f}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      }
+    const index = buildIndex(scan, contributions, { version: PROXY_VERSION });
+    if (sub === "fixes") {
+      const wanted = (target as string).toLowerCase();
+      const server = index.servers.find(
+        (s) => s.name.toLowerCase() === wanted || s.slug === wanted,
+      );
+      if (!server) throw new UsageError(`index fixes: no server ${target} in ${from}`);
+      process.stdout.write(fixesText(index, server, baseUrl));
+      return 0;
+    }
+    const site = renderIndexSite(index, baseUrl);
+    for (const [path, content] of site) {
+      const file = resolve(outDir, path);
+      mkdirSync(resolve(file, ".."), { recursive: true });
+      writeFileSync(file, content);
+    }
+    const graded = index.servers.filter((s) => s.score !== undefined).length;
+    const runtime = index.servers.filter((s) => s.tools.some((t) => t.runtime)).length;
+    process.stdout.write(
+      `index: ${graded} servers graded, ${runtime} with runtime data from ${contributions.length} contribution${contributions.length === 1 ? "" : "s"}; ${site.size} files written to ${resolve(outDir)}\n`,
     );
     return 0;
   }

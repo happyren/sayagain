@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1.6                                      |
+| Status         | Draft v0.1.7                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -51,7 +51,7 @@ mechanism: "record the customer's refund so the invoice closes" rather than
 A boundary MAY use intent for: repair hints when a call fails, ledger
 entries, operator display on hold and replay, and comparison against
 task-level intent (section 4). A boundary MUST NOT treat this value as
-trusted for policy decisions on its own; see section 8.
+trusted for policy decisions on its own; see section 9.
 
 ### 3.2 `sh.sayagain/expect` (string or object)
 
@@ -258,7 +258,49 @@ Most hosts build `tools/call` from the model's tool-use block and cannot add
 Precedence when both are present: native `_meta` wins over shim-captured
 values.
 
-## 8. Security considerations
+## 8. Tool declarations
+
+Two keys a server MAY set in a tool definition's `_meta` (MCP allows
+reverse-DNS keys there). They describe the tool, not a call, so a boundary
+reads them from `tools/list`. Neither changes what the server does.
+
+### 8.1 `sh.sayagain/idempotency` (object)
+
+```json
+{ "key": "request_id" }
+```
+
+`key` names the argument whose value identifies the logical operation: two
+calls with the same value are the same operation. A boundary MAY use that
+argument as the idempotency key of 3.4 when the client sent none. A tool
+with `idempotentHint: true` needs no declaration.
+
+### 8.2 `sh.sayagain/compensation` (object)
+
+```json
+{ "tool": "delete_page", "arguments": { "page_id": "$result.id" } }
+```
+
+The call that undoes this one: a tool name on the same server and an
+argument template. A template value is a literal, `$arguments.<name>` (an
+argument of the original call) or `$result.<path>` (a field of its
+structured result, dotted). When the effect cannot be undone:
+
+```json
+{ "none": "an email cannot be unsent" }
+```
+
+Running a compensation is an operator action, or the policy of a unit of
+commitment the client declared (a later document). A boundary MUST NOT run
+one automatically for a single call, and MUST NOT run one on another
+server than the one that declared it.
+
+Note: `@sayagain/lint` reports a tool that is neither read-only nor
+idempotent and carries no `sh.sayagain/compensation` key as informational
+(`annotations/compensation`). That is a product convention, not part of
+this document's conformance.
+
+## 9. Security considerations
 
 - Per-call intent is model-generated text and may be adversarial. It is
   input to repair heuristics and the ledger, not an authorization signal.
@@ -273,19 +315,20 @@ values.
 - Repair budget: at most one repair per call and three per task before
   dead-lettering, unless the operator configures otherwise.
 
-## 9. Conformance
+## 10. Conformance
 
 A boundary conforms to this document at **Level 0** if it emits 5.1 and 5.2
 on every response and honours 3.4. It conforms at **Level 1** if it also
 implements 3.1, 3.3, 5.3, 5.4 and section 6. Drift detection (section 4)
 and the schema shim (section 7) are optional features.
 
-## 10. Changelog
+## 11. Changelog
 
 - v0.1 (2026-09-04): initial draft.
 - v0.1.1 (2026-09-04): added 5.5, the boundary announcement on `initialize`.
 - v0.1.2 (2026-09-05): `sh.sayagain/duplicate-of` on deduplicated responses; `held.decision` on rejected and later-approved calls.
 - v0.1.3 (2026-09-05): `sh.sayagain/replay-of`; guidance sentence appended to failed results; dead-lettered semantics clarified.
-- v0.1.5 (2026-09-05): receipt and status on JSON-RPC error responses via `error.data`; `held.mode`; cancellation of held calls; `repaired` status emitted when arguments were changed and the call succeeded.
+- v0.1.4 (2026-09-05): receipt and status on JSON-RPC error responses via `error.data`; `held.mode`; cancellation of held calls; `repaired` status emitted when arguments were changed and the call succeeded.
 - v0.1.5 (2026-09-05): `boundary.ledger` enumerated and `boundary.hold` added to 5.5.
 - v0.1.6 (2026-09-05): `repair.rule` may be `learned:<rule>` for a coercion the boundary derived from its own ledger (5.4).
+- v0.1.7 (2026-09-05): section 8, tool declarations: `sh.sayagain/idempotency` and `sh.sayagain/compensation` in a tool's `_meta`; former sections 8 to 10 are now 9 to 11.

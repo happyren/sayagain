@@ -1,0 +1,69 @@
+name: Tool Reliability Index
+
+# The Tool Reliability Index as a static artefact (ADR-0010): scan a sample of the public
+# registry, build the site, keep both as workflow artifacts. Publishing to GitHub Pages and the
+# weekly schedule are switched on by repository variables, so hosting stays a decision. A CI
+# build has no contribution documents (the endpoint of ADR-0009 decision 3 does not exist yet),
+# so its pages carry static scores only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: How many servers with a Streamable HTTP remote to probe (a seeded random sample)
+        default: "400"
+      seed:
+        description: Seed for the sample
+        default: "20260905"
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.event_name != 'schedule' || vars.SAYAGAIN_INDEX_SCHEDULE == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+      - name: Scan the registry
+        shell: bash
+        run: >
+          node packages/proxy/dist/cli.js lint --registry
+          --sample ${{ inputs.sample || '400' }} --seed ${{ inputs.seed || '20260905' }}
+          --concurrency 8 --timeout 10s --out scan.json | tee scan.txt
+      - name: Build the site
+        run: node packages/proxy/dist/cli.js index build --from scan.json --contributions contributions --out site --base-url ""
+      - uses: actions/upload-artifact@v6
+        with:
+          name: reliability-index
+          path: |
+            site
+            scan.json
+            scan.txt
+      - uses: actions/upload-pages-artifact@v4
+        if: vars.SAYAGAIN_INDEX_PAGES == 'true'
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: vars.SAYAGAIN_INDEX_PAGES == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

@@ -6,6 +6,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-05
+
+### Added
+
+- `sayagain index build`: the Tool Reliability Index as a static site
+  (ADR-0010) from a registry scan and the contributed shape documents:
+  `index.html` with the headline number and every graded server, a page
+  and an SVG badge per server, a badge per tool, and `index.json`. A tool's
+  static score is its linter grade (A 100 to F 20), a server's the mean;
+  a runtime score, where shapes exist, is 100 minus the failure rate on
+  contributed calls with the dominant error class, per-family counts, the
+  resolution that worked and a suggestion. Public registry data and
+  aggregates only. `sayagain index fixes <server>` prints the maintainer's
+  message: the score and the two fixes that move it most.
+- The `Index` workflow scans a seeded sample and builds the site on
+  demand; publishing to GitHub Pages and the weekly schedule are switched
+  on by the repository variables `SAYAGAIN_INDEX_PAGES` and
+  `SAYAGAIN_INDEX_SCHEDULE`.
+- Spec v0.1.7: section 8, tool declarations. `sh.sayagain/idempotency`
+  names the argument that identifies the operation;
+  `sh.sayagain/compensation` names the call that undoes the tool's effect,
+  or that none can. `@sayagain/lint` reports a tool that is neither
+  read-only nor idempotent and declares no compensation
+  (`annotations/compensation`, informational: grades and M16 do not move;
+  rule set 2026-09-05.1). The SEP draft is `docs/sep-draft.md`; the data
+  post draft is `docs/data-post.md`.
+
 ## [0.11.0] - 2026-09-05
 
 ### Added
