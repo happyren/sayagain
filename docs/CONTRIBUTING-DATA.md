@@ -16,10 +16,10 @@ Per public MCP tool it carries:
 
 | Field | Content |
 | ----- | ------- |
-| `server`, `serverVersion`, `tool` | The names the server publishes about itself. Lowercased server name. |
-| `schemaHash` | SHA-256 of the tool's input schema, first 16 hex digits. Present when the source carried the schema (Codex rollouts, the boundary's own tool list). |
+| `server`, `tool` | The server's name from `initialize` (ledger) or the name your host's configuration gives the server (transcripts), lowercased; and the tool's name. A server named by an opaque id is left out (below). `serverVersion` is reserved and not filled in yet. |
+| `schemaHash` | SHA-256 of the tool's input schema, first 16 hex digits. Present when the source carried the schema (Codex rollouts today). |
 | `toolClass` | `read-only`, `idempotent-write`, `write`, `destructive`: from the tool's annotations, else from the verb in its name. |
-| `modelFamily` | `claude`, `gpt`, `gemini`, `open-weight`, `unknown`. Coarse by construction. |
+| `modelFamily` | `claude`, `gpt`, `gemini`, `open-weight`, `unknown`. Coarse by construction; always `unknown` from the ledger, which does not see the model. |
 | `intentCategory` | `read`, `search`, `create`, `update`, `delete`, `execute`, `unknown`, derived from the tool's name and class. Never from intent text. |
 | `calls`, `failures`, `unacknowledgedWrites`, `duplicateWrites` | Counts (M1, M8, M9 in `measurement.md`). |
 | `errors[].class` | `coercible`, `retryable`, `semantic`, `blocked`, `other`. |
@@ -56,9 +56,10 @@ other key to your contributions.
 ## Sending
 
 - `sayagain contribute` sends nothing by default. It writes the document,
-  prints it, prints a one-line summary, and asks. Non-interactive runs need
-  `--yes`. The first contribution from a machine also needs
-  `--accept-terms 2026-09-05`.
+  prints it in full (pipe it through a pager when long), prints a one-line
+  summary, and asks. Non-interactive runs need `--yes`. The first
+  contribution from a machine also needs `--accept-terms 2026-09-05`.
+  `--json` prints the document alone and never sends.
 - The endpoint is the one you name with `--endpoint <https url>` (kept in
   `config.json`). Until the Tool Reliability Index has a public endpoint
   (ADR-0009, decision 3, pending), there is none, and the command stops

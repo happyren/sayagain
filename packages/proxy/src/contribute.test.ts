@@ -138,6 +138,7 @@ describe("contribute", () => {
     expect(edit).toMatchObject({ calls: 1, failures: 0, unacknowledgedWrites: 1, errors: [] });
     // The UUID-named connector stays home.
     expect(doc.shapes.some((s) => s.server === "bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a")).toBe(false);
+    expect(doc.shapes.some((s) => s.server === "private-connector")).toBe(false);
     const bash = doc.shapes.find((s) => s.tool === "Bash");
     expect(bash).toMatchObject({ unacknowledgedWrites: 1, intentCategory: "execute" });
     const json = JSON.stringify(doc);

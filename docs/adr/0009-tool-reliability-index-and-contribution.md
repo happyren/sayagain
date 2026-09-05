@@ -33,7 +33,7 @@ else is sent, and the client shows the document in full before sending.
       "server": "notion",
       "serverVersion": "1.4.2",
       "tool": "create_page",
-      "schemaHash": "sha256:5b1e0c...16 hex",
+      "schemaHash": "5b1e0c9a7d3e2f41",
       "toolClass": "write",
       "modelFamily": "claude",
       "intentCategory": "create",
@@ -176,13 +176,18 @@ Two more places where wording, not code, drifts from the pitch:
   the rule, so the change is auditable.
 - `sayagain contribute` and `sayagain audit` are Phase 0 deliverables; the
   index endpoint and its data policy are Phase 1.
-- 0.10 ships both. Two details settled in the code: `schemaHash` and
-  `serverVersion` are optional, present when the source carried them (Codex
-  rollouts list tool schemas; Claude Code transcripts do not); transcript
-  rows carry two error classes the boundary never writes, `interrupt` and
-  `no-result`, which count as unknown outcomes (M9) and not as failures
-  (M1). The wire contract for the endpoint is a draft in
-  `docs/CONTRIBUTING-DATA.md` until decision 3 is taken.
+- 0.10 ships both. Details settled in the code: `schemaHash` is optional,
+  present when the source carried the schema (Codex rollouts list tool
+  schemas; Claude Code transcripts and the ledger do not yet);
+  `serverVersion` is reserved and never filled in; a server named by an
+  opaque id (UUID, long hex) is a private connector and is left out;
+  transcript rows carry two error classes the boundary never writes,
+  `interrupt` and `no-result`, which count as unknown outcomes (M9) and not
+  as failures (M1). Two departures from the consent flow above: the
+  document is printed unpaged (pipe it), and the operator page does not
+  yet show the weekly switch (`sayagain contribute --status` does). The
+  wire contract for the endpoint is a draft in `docs/CONTRIBUTING-DATA.md`
+  until decision 3 is taken.
 - `docs/telemetry.md` (ADR-0005) is superseded by the shape schema above
   for anything that leaves the machine; the OTLP export (0.6) is the
   operator's own collector and is unaffected.

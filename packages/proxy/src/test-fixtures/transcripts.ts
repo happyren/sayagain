@@ -237,6 +237,14 @@ export function writeCursorFixture(root: string): { withResults: string; without
       ]),
     ].join(""),
   );
+  // Not a transcript: Cursor keeps other JSON lines under a project too.
+  writeFileSync(
+    join(root, "SECRET-project", "notes.jsonl"),
+    line({
+      role: "assistant",
+      message: { content: [{ type: "tool_use", id: "x", name: "read_file", input: {} }] },
+    }),
+  );
   const withoutResults = join(s2, "s2.jsonl");
   writeFileSync(
     withoutResults,

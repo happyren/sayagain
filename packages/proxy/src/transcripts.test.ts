@@ -83,6 +83,7 @@ describe("transcripts", () => {
     expect(again?.argsHash).toBe(fixed?.argsHash);
     expect(by(s.calls, "Edit")[0]).toMatchObject({ outcome: "no-result", toolClass: "write" });
     expect(by(s.calls, "Bash")[0]).toMatchObject({ outcome: "interrupt", toolClass: "write" });
+    expect(by(s.calls, "get_item")[0]).toMatchObject({ server: "private-connector", isMcp: true }); // the UUID stays home
     const pages = by(s.calls, "get_page");
     expect(pages).toHaveLength(2);
     expect(pages.map((c) => c.tokens)).toEqual([100, 100]); // one turn, two calls
@@ -183,7 +184,7 @@ describe("transcripts", () => {
     writeCodexFixture(codex);
     writeCursorFixture(cursor);
     const scan = scanTranscripts({ dirs: { "claude-code": claude, codex, cursor } });
-    expect(scan.files).toEqual({ "claude-code": 1, codex: 1, cursor: 2 });
+    expect(scan.files).toEqual({ "claude-code": 1, codex: 1, cursor: 2 }); // the stray .jsonl outside agent-transcripts is skipped
     expect(scan.sessions.map((s) => s.source).sort()).toEqual([
       "claude-code",
       "codex",

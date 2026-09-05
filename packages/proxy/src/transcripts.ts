@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type { ToolClass } from "@sayagain/sdk";
 import { hashArgs, shapeOf } from "./boundary.js";
 import { classifyError, type ErrorClass } from "./errors.js";
@@ -189,6 +189,14 @@ function outcomeOf(
   return { outcome: "error", errorClass: classifyError(text), signature: signatureOf(text) };
 }
 
+/** A server named by a UUID or a long hex id is someone's private connector, not a public server. */
+export const OPAQUE_NAME =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{20,}$/i;
+/** What an opaque server name becomes in every output, so the id itself never leaves the file. */
+export const PRIVATE_CONNECTOR = "private-connector";
+export const publicServerName = (name: string): string =>
+  OPAQUE_NAME.test(name) ? PRIVATE_CONNECTOR : name;
+
 /** `mcp__server__tool` (Claude Code), `mcp_server_tool` (Cursor) or a plain built-in name. */
 function splitToolName(
   name: string,
@@ -196,12 +204,17 @@ function splitToolName(
 ): { server: string; tool: string; isMcp: boolean } {
   if (name.startsWith("mcp__")) {
     const parts = name.split("__");
-    return { server: parts[1] ?? "mcp", tool: parts.slice(2).join("__") || name, isMcp: true };
+    return {
+      server: publicServerName(parts[1] ?? "mcp"),
+      tool: parts.slice(2).join("__") || name,
+      isMcp: true,
+    };
   }
   if (name.startsWith("mcp_")) {
     const rest = name.slice(4);
     const i = rest.indexOf("_");
-    if (i > 0) return { server: rest.slice(0, i), tool: rest.slice(i + 1), isMcp: true };
+    if (i > 0)
+      return { server: publicServerName(rest.slice(0, i)), tool: rest.slice(i + 1), isMcp: true };
   }
   return { server: host, tool: name, isMcp: false };
 }
@@ -497,7 +510,7 @@ function readCodexSession(file: string): TranscriptSession {
       s.resultsRecorded = true;
       const inv = obj(p.invocation);
       if (!inv) continue;
-      const server = str(inv.server) || "mcp";
+      const server = publicServerName(str(inv.server) || "mcp");
       const tool = str(inv.tool);
       const call = newCall(ts, tool, inv.arguments, "codex", model);
       call.server = server;
@@ -577,9 +590,7 @@ function* walk(dir: string, depth = 0): Generator<string> {
 
 /** Cursor keeps transcripts under `<project>/agent-transcripts/`; other files in ~/.cursor/projects are not sessions. */
 const isSessionFile = (file: string, source: TranscriptSource): boolean =>
-  source !== "cursor" ||
-  file.includes(`${"agent-transcripts"}`) ||
-  basename(file).endsWith(".jsonl");
+  source !== "cursor" || file.split(sep).includes("agent-transcripts");
 
 export interface ScanOptions {
   sources?: TranscriptSource[];

@@ -186,17 +186,20 @@ export function runAudit(
   }
 
   const caveats: string[] = [];
-  const unrecorded = sessions.filter((s) => !s.resultsRecorded && s.calls.length).length;
-  if (unrecorded)
+  const unrecordedSessions = sessions.filter((s) => !s.resultsRecorded && s.calls.length);
+  const unrecorded = unrecordedSessions.length;
+  if (unrecorded) {
+    const from = [...new Set(unrecordedSessions.map((s) => s.source))].join(", ");
     caveats.push(
-      `${unrecorded} session file${unrecorded === 1 ? "" : "s"} carr${unrecorded === 1 ? "ies" : "y"} tool calls but no tool results (Cursor writes them elsewhere); those outcomes are unrecorded and count as calls only.`,
+      `${unrecorded} session file${unrecorded === 1 ? "" : "s"} (${from}) carr${unrecorded === 1 ? "ies" : "y"} tool calls but no tool results; those calls count as calls with no outcome: neither failures nor unacknowledged writes.`,
     );
+  }
   const cursor = bySource.get("cursor");
   if (cursor?.calls && !cursor.tokens)
     caveats.push("Cursor transcripts carry no token usage, so the cost numbers exclude them.");
   if (defaultedWrites)
     caveats.push(
-      `${defaultedWrites} MCP call${defaultedWrites === 1 ? "" : "s"} to tools without a read verb were classed write, as the boundary would without annotations; M8 and M9 include them.`,
+      `${defaultedWrites} MCP call${defaultedWrites === 1 ? "" : "s"} to tools whose name carries no recognised verb were classed write, as the boundary does for a tool without annotations; M8 and M9 include them.`,
     );
   if (defaultedBuiltins)
     caveats.push(
@@ -313,9 +316,6 @@ export function renderAuditText(a: Audit): string {
     .sort((x, y) => y[1] - x[1])
     .map(([k, v]) => `${k} ${pct(v, r.calls)}%`)
     .join(", ");
-  out.push(
-    `Spend in window: ${tok(a.tokens)}, ${money(a.usd)} API-equivalent${fam ? ` (${fam})` : ""}`,
-  );
   out.push("");
   out.push("North star (risk, then cost)");
   out.push(
@@ -323,6 +323,9 @@ export function renderAuditText(a: Audit): string {
   );
   out.push(
     `  failure tax        ${money(a.failureTax.usdPer1kCalls)} per 1K calls; ${money(a.failureTax.usd)} in the window = ${a.failureTax.shareOfSpendPct}% of spend, ${a.failureTax.shareOfTokensPct}% of tokens; annualised at this rate ${money(a.failureTax.annualisedUsd, 0)}`,
+  );
+  out.push(
+    `  (spend in window: ${tok(a.tokens)}, ${money(a.usd)} API-equivalent${fam ? `; ${fam}` : ""})`,
   );
   out.push("");
   out.push("Failures by server (M1 rate, M7 addressable share)");
@@ -473,14 +476,15 @@ export function renderAuditHtml(a: Audit): string {
 <title>Say Again audit ${esc(when(a.window.since))} to ${esc(when(a.window.until))}</title><style>${CSS}</style></head>
 <body><main>
 <h1>Say Again audit <span>${esc(when(a.window.since))} to ${esc(when(a.window.until))} UTC, ${esc(span)}</span></h1>
-<p class="lead">${lead}. Spend ${esc(tok(a.tokens))}, ${esc(money(a.usd))} API-equivalent${fam ? ` (${esc(fam)})` : ""}.</p>
+<p class="lead">${lead}.</p>
 <h2>North star, risk first</h2>
 <section class="cards">
   <div class="card risk"><h3>unacknowledged writes</h3><p class="big">${esc(r.northStar.unacknowledgedWritesPer1kWrites)}</p><p>per 1K writes without a known outcome (${esc(r.unacknowledged.count)} of ${esc(r.writes)})</p></div>
   <div class="card cost"><h3>failure tax</h3><p class="big">${esc(money(a.failureTax.usdPer1kCalls))}</p><p>per 1K calls; ${esc(money(a.failureTax.usd))} in the window, ${esc(a.failureTax.shareOfSpendPct)}% of spend; annualised ${esc(money(a.failureTax.annualisedUsd, 0))}</p></div>
   <div class="card"><h3>calls</h3><p class="big">${esc(f(r.calls))}</p><p>${esc(f(r.writes))} writes, ${esc(f(failures))} failures (${esc(pct(failures, r.calls))}%)</p></div>
-  <div class="card"><h3>recovery</h3><p class="big">${esc(r.recovery.medianCalls)}</p><p>median calls to recover; ${esc(money(a.recoveryCost.medianUsd, 4))} median per failure, ${esc(r.recovery.retryRatePct)}% retried (${esc(r.recovery.identicalRetryPct)}% identical)</p></div>
+  <div class="card"><h3>recovery</h3><p class="big">${esc(r.recovery.medianCalls)}</p><p>median calls to recover; ${esc(money(a.recoveryCost.medianUsd, 4))} median per failure (mean ${esc(money(a.recoveryCost.meanUsd, 4))}), ${esc(r.recovery.retryRatePct)}% retried (${esc(r.recovery.identicalRetryPct)}% identical)</p></div>
 </section>
+<p class="lead">Spend in window: ${esc(tok(a.tokens))}, ${esc(money(a.usd))} API-equivalent${fam ? ` (${esc(fam)})` : ""}.</p>
 <h2>Failures by server (M1, M7)</h2>
 <table>${head(["server", "calls", "failure rate", "addressable", "classes"], [false, true, true, true])}
 ${serverRows}
@@ -488,7 +492,7 @@ ${serverRows}
 <h2>Writes (M8, M9)</h2>
 <table>${head(["metric", "count", "tools"], [false, true])}
 ${row(["duplicates: the same write repeated with the same arguments within five calls", esc(`${r.duplicates.count} (${r.duplicates.per1kWrites} per 1K writes)`), esc(named(r.duplicates.tools).trim())], [false, true])}
-${row(["unacknowledged: interrupted, timed out, or no result recorded", esc(String(r.unacknowledged.count)), esc(named(r.unacknowledged.tools).trim())], [false, true])}
+${row(["unacknowledged: interrupted, timed out, or missing its result in a file that records results", esc(String(r.unacknowledged.count)), esc(named(r.unacknowledged.tools).trim())], [false, true])}
 ${row(["sessions that ended on a failure (M10)", esc(`${a.sessionsEndedOnFailure.count} of ${a.sessionsEndedOnFailure.sessions} (${a.sessionsEndedOnFailure.pct}%)`), ""], [false, true])}
 </table>
 ${moved}

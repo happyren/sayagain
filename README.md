@@ -16,7 +16,7 @@ operator between the agent and its tools who says it, so the agent never has
 to.
 
 > **Status: pre-alpha.** The `_meta` convention, design records and package
-> skeletons are here. The proxy runs (0.9: `wrap`, the daemon, holds, repair,
+> skeletons are here. The proxy runs (0.10: `wrap`, the daemon, holds, repair,
 > dead letters, one-command onboarding, tool health, an operator page, a
 > learning loop). Watch the repo or open a
 > Discussion.
@@ -44,9 +44,10 @@ approval.
 
 ## Getting started
 
-Today, 0.7: one command wraps every server your hosts know about, one puts
-it back, and `sayagain ui` shows what the boundary is doing (see
-`docs/ROADMAP.md` for what follows).
+Today, 0.10: one command wraps every server your hosts know about, one puts
+it back, `sayagain ui` shows what the boundary is doing, and `sayagain audit`
+reports on the history your agents already have (see `docs/ROADMAP.md` for
+what follows).
 
 ```bash
 npm install -g @sayagain/proxy       # Node 22.13+; provides the `sayagain` command (or: npx -y -p @sayagain/proxy sayagain ...)

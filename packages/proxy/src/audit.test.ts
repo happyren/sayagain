@@ -64,7 +64,9 @@ describe("audit", () => {
     expect(a.report.northStar.unacknowledgedWritesPer1kWrites).toBeGreaterThan(0);
     expect(a.sessionsEndedOnFailure).toMatchObject({ sessions: 4 });
     expect(a.classing).toEqual({ defaultedWrites: 0, defaultedBuiltins: 0 });
-    expect(a.caveats.some((c) => c.includes("no tool results"))).toBe(true);
+    expect(
+      a.caveats.some((c) => c.includes("(cursor) carries tool calls but no tool results")),
+    ).toBe(true);
     expect(a.caveats.some((c) => c.includes("Cursor transcripts carry no token usage"))).toBe(true);
     expect(a.tools.length).toBeGreaterThan(0);
     const notion = a.tools.find((t) => t.server === "notion" && t.tool === "create_page");
@@ -73,6 +75,8 @@ describe("audit", () => {
     expect(notion?.topSignature?.errorClass).toBe("coercible");
 
     const text = renderAuditText(a);
+    expect(text).toContain("private-connector/get_item");
+    expect(text).not.toContain("bf7c680d");
     expect(text).toContain("North star (risk, then cost)");
     expect(text.indexOf("unacknowledged")).toBeLessThan(text.indexOf("failure tax"));
     expect(text).toContain("Failures by server (M1 rate, M7 addressable share)");

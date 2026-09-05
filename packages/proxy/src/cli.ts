@@ -139,11 +139,12 @@ const USAGE = `sayagain ${PROXY_VERSION}
       The one page from docs/measurement.md over your own transcripts (Claude Code, Codex, Cursor), risk first:
       unacknowledged writes, the failure tax in dollars, failures by server, duplicates, recovery, the tools most
       prone to mis-calls. Writes a shareable HTML page (names, counts and masked signatures; never arguments).
-  sayagain contribute [--source ledger|claude-code|codex|cursor] [--dir <path>] [--since 30d] [--yes]
-                      [--accept-terms <version>] [--endpoint <url>] [--json]
+  sayagain contribute [--source ledger|claude-code|codex|cursor] [--dir <path>] [--ledger <path>] [--since 30d]
+                      [--yes] [--accept-terms <version>] [--endpoint <url>] [--json]
       Build the contributed-shape document of ADR-0009 (tool names, counts, error classes, argument shapes,
       hashed signatures; nothing else), write it to ~/.sayagain/contributions, print it, and send it only after
       a y to the endpoint you name. No endpoint is configured yet: without one the command stops after writing.
+      --json prints the document alone and never sends.
   sayagain contribute --status | --weekly on|off | --forget
       Show the contributor id and settings; let the daemon send weekly (endpoint and accepted terms required);
       rotate the id and ask the index to delete the old one's data.
