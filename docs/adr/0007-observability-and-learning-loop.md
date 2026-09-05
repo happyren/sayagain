@@ -94,7 +94,9 @@ number does not move. In order of cost:
 1. **Learned coercion.** When a signature's most common shape change is a
    type conversion (array to comma-separated string, string to integer,
    ISO date normalisation), the boundary applies it deterministically for
-   that tool and records `sayagain.repair.rule = learned:<signature-id>`.
+   that tool and records `sayagain.repair.rule = learned:<rule>` (the
+   intervention's id stays in the local store, where `sayagain learn`
+   shows it with its numbers).
    This is the Databricks fix, applied at the boundary without touching the
    server.
 2. **Description augmentation.** The boundary appends learned facts to the

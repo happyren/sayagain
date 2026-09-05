@@ -583,8 +583,9 @@ describe("daemon", () => {
     const m = meta(call.body);
     expect(m["sh.sayagain/status"]).toBe("repaired");
     expect(m["sh.sayagain/repair"]).toMatchObject({
-      changes: [{ path: "/limit", rule: "learned:coerce:fake/strict/limit:string-number" }],
+      changes: [{ path: "/limit", rule: "learned:string-to-number" }],
     });
+    expect(JSON.stringify(m["sh.sayagain/repair"])).not.toContain("via");
     expect((call.body.result as Obj).isError).toBeUndefined();
     const rows = (await api(d, "/api/ledger?tail=1")) as {
       status: string;
@@ -593,7 +594,7 @@ describe("daemon", () => {
     }[];
     expect(rows[0]).toMatchObject({
       status: "repaired",
-      repairs: [{ rule: "learned:coerce:fake/strict/limit:string-number" }],
+      repairs: [{ rule: "learned:string-to-number" }],
     });
     expect(rows[0]?.attempts).toBeUndefined(); // one attempt: the failure never happened
     const list = await rpc(d, "fake", { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });

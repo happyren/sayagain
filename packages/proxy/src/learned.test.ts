@@ -86,6 +86,7 @@ describe("learned", () => {
       state: "active",
     });
     expect(coerce.fact).toBe("`limit` is a number, not a string.");
+    expect(coerce.signatures).toEqual(["Invalid params: limit must be a number"]);
     expect(coerce.errorHint).toContain("passing `limit` as a number");
     const hint = out.find((i) => i.kind === "hint") as Intervention;
     expect(hint.fact).toContain("Call `get_page` first");
@@ -97,10 +98,14 @@ describe("learned", () => {
     const coerce = deriveInterventions(evidence()).find((i) => i.kind === "coerce") as Intervention;
     expect(applyLearnedCoercions({ limit: "10", other: "x" }, [coerce])).toEqual({
       arguments: { limit: 10, other: "x" },
-      changes: [{ path: "/limit", rule: `learned:${coerce.id}`, from: "10", to: 10 }],
+      changes: [
+        { path: "/limit", rule: "learned:string-to-number", via: coerce.id, from: "10", to: 10 },
+      ],
     });
     expect(applyLearnedCoercions({ limit: 10 }, [coerce])).toBeNull();
     expect(applyLearnedCoercions({ limit: "ten" }, [coerce])).toBeNull();
+    expect(applyLearnedCoercions({ limit: "007" }, [coerce])).toBeNull(); // an identifier, not a number
+    expect(applyLearnedCoercions({ limit: "12345678901234567890" }, [coerce])).toBeNull(); // lossy
     expect(applyLearnedCoercions({ limit: "10" }, [{ ...coerce, state: "reverted" }])).toBeNull();
   });
 
@@ -154,6 +159,9 @@ describe("learned", () => {
       expect(second.reverted.map((i) => i.id)).toEqual([coerce.id]);
       expect(again.get(coerce.id)?.reason).toContain("no lift after 20 calls");
       expect(again.coercionsFor("fake", "strict", "fake-notion")).toEqual([]);
+      expect(again.get(coerce.id)?.reason).toContain("this failure was 50% of calls before");
+      expect(again.setState(coerce.id, "disabled", "disabled by the operator")).toBe(true);
+      expect(again.get(coerce.id)?.reason).toMatch(/^disabled by the operator; earlier: no lift/);
       expect(again.setState(coerce.id, "active")).toBe(true);
       expect(again.coercionsFor("fake", "strict", "fake-notion")).toHaveLength(1);
       expect(again.setState("nope", "disabled")).toBe(false);
@@ -161,6 +169,16 @@ describe("learned", () => {
       expect(report).toContain("# Tool definition report: fake-notion");
       expect(report).toContain("## strict: Invalid params: limit must be a number");
       expect(report).toContain("Say Again applies: string-to-number on /limit");
+      // Evidence counts the specific change, not the signature: one type change among three recoveries is not enough.
+      const mixed = evidence().map((r, k) =>
+        k % 5 === 1 && k > 1 ? { ...r, argShape: ["limit:string"] } : r,
+      );
+      expect(deriveInterventions(mixed).filter((i) => i.kind === "coerce")).toEqual([]);
+      // A diff that also added a key teaches nothing.
+      const added = evidence().map((r, k) =>
+        k % 5 === 1 ? { ...r, argShape: ["limit:number", "title:string"] } : r,
+      );
+      expect(deriveInterventions(added).filter((i) => i.kind === "coerce")).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

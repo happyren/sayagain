@@ -4,23 +4,18 @@
  * not help. Two kinds:
  *
  * - `coerce`: a signature's usual shape change was a type conversion, so the
- *   boundary applies that conversion to matching arguments before a safe
- *   call leaves, and offers it as a repair after a failure on any tool.
- * - `hint`: a fact backed by a recovery path or shape change, appended to
- *   the tool's description in `tools/list` and to the error the model sees
- *   when the same signature recurs.
+ *   boundary applies that conversion to matching arguments before a
+ *   read-only call leaves, and offers it as a repair after a failure on any
+ *   tool (a write then waits behind a hold, as every repair does).
+ * - `hint`: a not-found failure whose usual recovery began with another
+ *   tool, appended as a sentence to the tool's description in `tools/list`
+ *   and to the error the model sees when the same signature recurs.
  *
  * Nothing here reads argument values: shapes, signatures and tool names only.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import {
-  finalRows,
-  recoveries,
-  type SignatureStats,
-  selectRows,
-  signatureStats,
-} from "./analysis.js";
+import { finalRows, recoveries, selectRows, signatureStats } from "./analysis.js";
 import { homePath } from "./home.js";
 import type { LedgerRow } from "./ledger.js";
 import type { RepairChange } from "./repair.js";
@@ -34,6 +29,7 @@ export type CoercionRule =
 
 export interface Lift {
   calls: number;
+  /** Failures with one of the intervention's own signatures. */
   failures: number;
   failureRatePct: number;
   medianCallsToRecover: number;
@@ -44,8 +40,9 @@ export interface Intervention {
   kind: "coerce" | "hint";
   server: string;
   tool: string;
-  /** The masked signature the evidence came from. */
+  /** The masked signatures the evidence came from; the first is the one the loop saw first. */
   signature: string;
+  signatures: string[];
   errorClass: string;
   /** coerce: the argument and the conversion. */
   path?: string;
@@ -67,12 +64,14 @@ export interface Intervention {
 export interface LearnedFile {
   version: 1;
   updatedAt: string;
+  /** Occurrences a pattern needs before it becomes an intervention. Default 3. */
+  minEvidence?: number;
   interventions: Intervention[];
 }
 
 export const defaultLearnedPath = (): string => homePath("learned.json");
 
-/** Facts appended to a tool description are delimited and attributed, and capped in length. */
+/** Facts appended to a tool description are delimited and attributed, and capped in length, prefix included. */
 export const AUGMENT_PREFIX = "[Say Again learned]";
 export const AUGMENT_CAP = 200;
 
@@ -85,16 +84,26 @@ const CONVERSIONS: Record<string, CoercionRule> = {
   "number->array": "scalar-to-array",
 };
 
+const NOT_FOUND = /not found|no such|does not exist/i;
+
 const typeOf = (v: unknown): string =>
   Array.isArray(v) ? "array" : v === null ? "null" : typeof v;
+const article = (type: string): string => (/^[aeiou]/i.test(type) ? `an ${type}` : `a ${type}`);
 
-/** Apply one conversion to a value, or return undefined when it does not apply. */
+/** Apply one conversion to a value, or return undefined when it does not apply or would change its meaning. */
 export function convert(value: unknown, rule: CoercionRule): unknown {
   switch (rule) {
-    case "string-to-number":
-      return typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value.trim())
-        ? Number(value)
+    case "string-to-number": {
+      if (typeof value !== "string") return undefined;
+      const s = value.trim();
+      // No leading zeros, no exponents, and the number must print back as the same text: "007", "1e3"
+      // and "12345678901234567890" are identifiers or lossy, not numbers to coerce.
+      if (!/^-?(0|[1-9]\d*)(\.\d+)?$/.test(s)) return undefined;
+      const n = Number(s);
+      return String(n) === s && (Number.isInteger(n) ? Number.isSafeInteger(n) : true)
+        ? n
         : undefined;
+    }
     case "string-to-boolean":
       return typeof value === "string" && /^(true|false)$/i.test(value.trim())
         ? value.trim().toLowerCase() === "true"
@@ -129,31 +138,29 @@ export function applyLearnedCoercions(
     if (typeOf(value) !== r.from) continue;
     const next = convert(value, r.rule);
     if (next === undefined) continue;
-    changes.push({ path: r.path, rule: `learned:${r.id}`, from: value, to: next });
+    changes.push({ path: r.path, rule: `learned:${r.rule}`, via: r.id, from: value, to: next });
     out[key] = next;
   }
   return changes.length ? { arguments: out, changes } : null;
 }
 
-/** The description a client sees: the upstream's own text, then the learned block. */
+/** The description a client sees: the upstream's own text, then the learned block, capped as a whole. */
 export function augmentDescription(description: unknown, facts: string[]): string | undefined {
   const base = typeof description === "string" ? description.trimEnd() : "";
-  if (!facts.length) return typeof description === "string" ? description : undefined;
+  const original = typeof description === "string" ? description : undefined;
+  if (!facts.length) return original;
+  const room = AUGMENT_CAP - AUGMENT_PREFIX.length - 1;
   let block = "";
   for (const f of facts) {
     const next = block ? `${block} ${f}` : f;
-    if (next.length > AUGMENT_CAP) break;
+    if (next.length > room) continue; // this fact does not fit; a shorter one still may
     block = next;
   }
-  if (!block) return typeof description === "string" ? description : undefined;
+  if (!block) return original;
   return base ? `${base}\n\n${AUGMENT_PREFIX} ${block}` : `${AUGMENT_PREFIX} ${block}`;
 }
 
-const slug = (s: string): string =>
-  s
-    .replace(/[^A-Za-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 40);
+const slug = (s: string): string => s.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const short = (s: string): string => {
   let h = 5381;
   for (const c of s) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0;
@@ -167,59 +174,81 @@ export function deriveInterventions(
 ): Intervention[] {
   const minEvidence = opts.minEvidence ?? 3;
   const now = (opts.now ?? new Date()).toISOString();
-  const out: Intervention[] = [];
+  const byId = new Map<string, Intervention>();
+  const add = (i: Intervention) => {
+    const existing = byId.get(i.id);
+    if (!existing) byId.set(i.id, i);
+    else {
+      existing.evidence += i.evidence;
+      for (const s of i.signatures)
+        if (!existing.signatures.includes(s)) existing.signatures.push(s);
+    }
+  };
   for (const s of signatureStats(rows)) {
-    if (s.count < minEvidence) continue;
     const base = {
       server: s.server,
       tool: s.tool,
       signature: s.signature,
+      signatures: [s.signature],
       errorClass: s.errorClass,
-      evidence: s.count,
       learnedAt: now,
       activatedAt: now,
       state: "active" as const,
     };
-    const changed = s.topShapeChange?.match(/changed ([^;]+)/)?.[1] ?? "";
-    for (const part of changed
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean)) {
-      const m = part.match(/^([^:]+):([a-z]+)->([a-z]+)$/);
-      const [, name, fromType, toType] = m ?? [];
-      if (!name || !fromType || !toType) continue;
-      const rule = CONVERSIONS[`${fromType}->${toType}`];
-      if (!rule || s.errorClass !== "coercible") continue;
-      const path = `/${name}`;
-      const id = `coerce:${slug(s.server)}/${slug(s.tool)}${path}:${fromType}-${toType}`;
-      const fact = `\`${name}\` is a ${toType}, not a ${fromType}.`;
-      out.push({
-        ...base,
-        id,
-        kind: "coerce",
-        path,
-        from: fromType,
-        to: toType,
-        rule,
-        fact,
-        errorHint: `Say Again: last time this failed it was fixed by passing \`${name}\` as a ${toType} instead of a ${fromType}.`,
-      });
-    }
-    if (s.errorClass === "semantic" && s.topRecoveryPath && s.topRecoveryPath !== "(retry only)") {
-      const first = s.topRecoveryPath.split(" > ")[0]?.trim();
-      if (first && first !== s.tool) {
-        const id = `hint:${slug(s.server)}/${slug(s.tool)}:precondition:${short(s.signature)}`;
-        out.push({
+    // A type change is evidence only when it was the whole fix: a diff that also added or removed a
+    // key says the model changed more than a type.
+    const diff = s.topShapeChange ?? "";
+    if (
+      s.errorClass === "coercible" &&
+      s.topShapeChangeCount >= minEvidence &&
+      /^changed /.test(diff)
+    ) {
+      for (const part of diff
+        .slice("changed ".length)
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)) {
+        const m = part.match(/^([^:]+):([a-z]+)->([a-z]+)$/);
+        const [, name, fromType, toType] = m ?? [];
+        if (!name || !fromType || !toType) continue;
+        const rule = CONVERSIONS[`${fromType}->${toType}`];
+        if (!rule) continue;
+        const path = `/${name}`;
+        add({
           ...base,
-          id,
-          kind: "hint",
-          fact: `Call \`${first}\` first; \`${s.tool}\` fails with "${s.signature.slice(0, 60)}" otherwise.`,
-          errorHint: `Say Again: last time this was fixed by calling \`${first}\` first.`,
+          id: `coerce:${slug(s.server)}/${slug(s.tool)}${path}:${fromType}-${toType}`,
+          kind: "coerce",
+          path,
+          from: fromType,
+          to: toType,
+          rule,
+          fact: `\`${name}\` is ${article(toType)}, not ${article(fromType)}.`,
+          errorHint: `Say Again: last time this failed it was fixed by passing \`${name}\` as ${article(toType)} instead of ${article(fromType)}.`,
+          evidence: s.topShapeChangeCount,
         });
       }
     }
+    // A precondition is evidence only for not-found failures whose recovery started elsewhere.
+    if (
+      s.errorClass === "semantic" &&
+      NOT_FOUND.test(s.signature) &&
+      s.topRecoveryPath &&
+      s.topRecoveryPath !== "(retry only)" &&
+      s.topRecoveryPathCount >= minEvidence
+    ) {
+      const first = s.topRecoveryPath.split(" > ")[0]?.trim();
+      if (first && first !== s.tool)
+        add({
+          ...base,
+          id: `hint:${slug(s.server)}/${slug(s.tool)}:first-${slug(first)}:${short(s.signature)}`,
+          kind: "hint",
+          fact: `Call \`${first}\` first; \`${s.tool}\` fails with a not-found error otherwise.`,
+          errorHint: `Say Again: last time this was fixed by calling \`${first}\` first.`,
+          evidence: s.topRecoveryPathCount,
+        });
+    }
   }
-  return out;
+  return [...byId.values()];
 }
 
 const medianCalls = (recs: { calls: number }[]): number => {
@@ -228,18 +257,25 @@ const medianCalls = (recs: { calls: number }[]): number => {
   return xs[Math.floor(xs.length / 2)] ?? 0;
 };
 
+/**
+ * The tool's numbers over [since, until): calls, failures with the intervention's own signatures,
+ * their rate, and the median calls to recover. Recovery windows run over the whole history, so a
+ * failure just before a boundary is not cut short.
+ */
 function liftOver(rows: LedgerRow[], i: Intervention, since: Date | undefined, until: Date): Lift {
-  const scoped = selectRows(rows, { until }).filter(
+  const scoped = rows.filter(
     (r) => r.tool === i.tool && (r.upstream === i.server || r.server === i.server),
   );
-  const finals = finalRows(scoped).filter(
-    (r) =>
-      r.status !== "deduplicated" &&
-      r.status !== "held" &&
-      (since === undefined || Date.parse(r.ts) >= since.getTime()),
+  const inSpan = (r: LedgerRow) =>
+    Date.parse(r.ts) < until.getTime() &&
+    (since === undefined || Date.parse(r.ts) >= since.getTime());
+  const finals = finalRows(selectRows(scoped)).filter(
+    (r) => r.status !== "deduplicated" && r.status !== "held" && inSpan(r),
   );
-  const failures = finals.filter((r) => r.isError);
-  const recs = recoveries(scoped, since ? { since } : {}).filter((x) => x.row.tool === i.tool);
+  const failures = finals.filter((r) => r.isError && i.signatures.includes(r.errorSignature ?? ""));
+  const recs = recoveries(selectRows(scoped)).filter(
+    (x) => inSpan(x.row) && i.signatures.includes(x.row.errorSignature ?? ""),
+  );
   return {
     calls: finals.length,
     failures: failures.length,
@@ -261,12 +297,27 @@ export function measureLift(
 /** Calls after activation before the loop judges an intervention. */
 export const REVERT_MIN_CALLS = 20;
 
+const isIntervention = (x: unknown): x is Intervention => {
+  if (typeof x !== "object" || x === null) return false;
+  const i = x as Record<string, unknown>;
+  return (
+    typeof i.id === "string" &&
+    (i.kind === "coerce" || i.kind === "hint") &&
+    typeof i.server === "string" &&
+    typeof i.tool === "string" &&
+    typeof i.signature === "string" &&
+    ["active", "disabled", "reverted"].includes(String(i.state))
+  );
+};
+
 export class LearnedStore {
   private file: LearnedFile = {
     version: 1,
     updatedAt: new Date(0).toISOString(),
     interventions: [],
   };
+  private loadedMtime = 0;
+  private checkedAt = 0;
   constructor(readonly path: string = defaultLearnedPath()) {
     this.load();
   }
@@ -274,10 +325,35 @@ export class LearnedStore {
   load(): void {
     if (!existsSync(this.path)) return;
     try {
-      const parsed = JSON.parse(readFileSync(this.path, "utf8")) as LearnedFile;
-      if (parsed && Array.isArray(parsed.interventions)) this.file = parsed;
+      const parsed = JSON.parse(readFileSync(this.path, "utf8")) as Partial<LearnedFile>;
+      if (parsed && Array.isArray(parsed.interventions)) {
+        const interventions = parsed.interventions.filter(isIntervention).map((i) => ({
+          ...i,
+          signatures:
+            Array.isArray(i.signatures) && i.signatures.length ? i.signatures : [i.signature],
+        }));
+        this.file = {
+          version: 1,
+          updatedAt: parsed.updatedAt ?? new Date(0).toISOString(),
+          ...(parsed.minEvidence !== undefined ? { minEvidence: parsed.minEvidence } : {}),
+          interventions,
+        };
+      }
+      this.loadedMtime = statSync(this.path).mtimeMs;
     } catch {
       // a torn file is not a reason to crash the daemon; the next update rewrites it
+    }
+  }
+
+  /** Re-read the file when another process (the CLI, another daemon) changed it. Cheap: one stat, at most every few seconds. */
+  maybeReload(minIntervalMs = 5000): void {
+    const now = Date.now();
+    if (now - this.checkedAt < minIntervalMs) return;
+    this.checkedAt = now;
+    try {
+      if (existsSync(this.path) && statSync(this.path).mtimeMs !== this.loadedMtime) this.load();
+    } catch {
+      // unreadable right now; keep what we have
     }
   }
 
@@ -287,10 +363,19 @@ export class LearnedStore {
     const tmp = `${this.path}.${process.pid}.tmp`;
     writeFileSync(tmp, `${JSON.stringify(this.file, null, 2)}\n`, { mode: 0o600 });
     renameSync(tmp, this.path);
+    try {
+      this.loadedMtime = statSync(this.path).mtimeMs;
+    } catch {
+      // fine
+    }
   }
 
   get updatedAt(): string {
     return this.file.updatedAt;
+  }
+
+  get minEvidence(): number {
+    return this.file.minEvidence ?? 3;
   }
 
   list(): Intervention[] {
@@ -301,52 +386,52 @@ export class LearnedStore {
     return this.file.interventions.find((i) => i.id === id);
   }
 
-  private matches(i: Intervention, server: string, tool: string): boolean {
+  private matches(i: Intervention, server: string, tool: string, upstream?: string): boolean {
     return (
       i.state === "active" &&
       i.tool === tool &&
-      (i.server === server || i.server === serverAlias(server))
+      (i.server === server || (upstream !== undefined && i.server === upstream))
     );
   }
 
-  /** Active coercions for a tool. `server` may be the registry name or the upstream's own. */
+  /** Active coercions for a tool. `server` is the registry name; `upstream` the server's own name. */
   coercionsFor(server: string, tool: string, upstream?: string): Intervention[] {
     return this.file.interventions.filter(
-      (i) =>
-        i.kind === "coerce" &&
-        (this.matches(i, server, tool) ||
-          (upstream !== undefined && this.matches(i, upstream, tool))),
+      (i) => i.kind === "coerce" && this.matches(i, server, tool, upstream),
     );
   }
 
   /** Facts to append to a tool's description. */
   factsFor(server: string, tool: string, upstream?: string): string[] {
     return this.file.interventions
-      .filter(
-        (i) =>
-          i.fact &&
-          (this.matches(i, server, tool) ||
-            (upstream !== undefined && this.matches(i, upstream, tool))),
-      )
+      .filter((i) => i.fact && this.matches(i, server, tool, upstream))
       .map((i) => i.fact as string);
   }
 
-  /** The sentence to append to an error whose signature the loop has seen fixed before. */
-  hintFor(server: string, tool: string, signature: string, upstream?: string): string | undefined {
+  /** The sentence to append to an error whose signature the loop has seen fixed before, unless that fix was already applied to the call. */
+  hintFor(
+    server: string,
+    tool: string,
+    signature: string,
+    upstream?: string,
+    applied: string[] = [],
+  ): string | undefined {
     return this.file.interventions.find(
       (i) =>
         i.errorHint &&
-        i.signature === signature &&
-        (this.matches(i, server, tool) ||
-          (upstream !== undefined && this.matches(i, upstream, tool))),
+        i.signatures.includes(signature) &&
+        !applied.includes(i.id) &&
+        this.matches(i, server, tool, upstream),
     )?.errorHint;
   }
 
+  /** Operator switch. Disabling keeps the automatic verdict in the reason, so the audit trail survives. */
   setState(id: string, state: Intervention["state"], reason?: string): boolean {
     const i = this.get(id);
     if (!i) return false;
+    const earlier = i.state === "reverted" && i.reason ? `; earlier: ${i.reason}` : "";
     i.state = state;
-    if (reason !== undefined) i.reason = reason;
+    if (reason !== undefined) i.reason = `${reason}${earlier}`;
     else delete i.reason;
     if (state === "active") i.activatedAt = new Date().toISOString();
     return true;
@@ -360,13 +445,17 @@ export class LearnedStore {
     rows: LedgerRow[],
     opts: { minEvidence?: number; now?: Date } = {},
   ): { added: Intervention[]; reverted: Intervention[] } {
+    this.maybeReload(0);
+    if (opts.minEvidence !== undefined) this.file.minEvidence = opts.minEvidence;
     const now = opts.now ?? new Date();
     const added: Intervention[] = [];
     const reverted: Intervention[] = [];
-    for (const candidate of deriveInterventions(rows, { ...opts, now })) {
+    for (const candidate of deriveInterventions(rows, { minEvidence: this.minEvidence, now })) {
       const existing = this.get(candidate.id);
       if (existing) {
         existing.evidence = candidate.evidence;
+        for (const s of candidate.signatures)
+          if (!existing.signatures.includes(s)) existing.signatures.push(s);
         continue;
       }
       this.file.interventions.push(candidate);
@@ -379,20 +468,17 @@ export class LearnedStore {
       if (
         i.state === "active" &&
         after.calls >= REVERT_MIN_CALLS &&
-        after.failureRatePct >= before.failureRatePct &&
-        before.calls > 0
+        before.calls > 0 &&
+        after.failureRatePct >= before.failureRatePct
       ) {
         i.state = "reverted";
-        i.reason = `no lift after ${after.calls} calls: failure rate ${before.failureRatePct}% before, ${after.failureRatePct}% after`;
+        i.reason = `no lift after ${after.calls} calls: this failure was ${before.failureRatePct}% of calls before, ${after.failureRatePct}% after`;
         reverted.push(i);
       }
     }
     return { added, reverted };
   }
 }
-
-/** Registry names and upstream names are both accepted; nothing to alias for now. */
-const serverAlias = (server: string): string => server;
 
 /** A tool definition report for the upstream's maintainers, in the issue template's shape. */
 export function upstreamReport(
@@ -421,16 +507,18 @@ export function upstreamReport(
       `- Occurrences: ${s.count} (${s.errorClass}); median ${s.medianCallsToRecover} calls to recover; ${s.unrecovered} never recovered.`,
     );
     if (s.topShapeChange)
-      lines.push(`- What fixed it: the arguments changed (${s.topShapeChange}).`);
-    if (s.topRecoveryPath) lines.push(`- Recovery path: ${s.topRecoveryPath}.`);
-    const applied = store.list().filter((i) => i.tool === s.tool && i.signature === s.signature);
-    for (const i of applied)
       lines.push(
-        `- Say Again ${i.state === "active" ? "applies" : `tried (${i.state})`}: ${i.kind === "coerce" ? `${i.rule} on ${i.path}` : i.fact}${i.after ? `; failure rate ${i.before?.failureRatePct ?? "?"}% before, ${i.after.failureRatePct}% after (${i.after.calls} calls)` : ""}.`,
+        `- What fixed it: the arguments changed (${s.topShapeChange}), ${s.topShapeChangeCount} time(s).`,
+      );
+    if (s.topRecoveryPath)
+      lines.push(`- Recovery path: ${s.topRecoveryPath}, ${s.topRecoveryPathCount} time(s).`);
+    for (const i of store
+      .list()
+      .filter((x) => x.tool === s.tool && x.signatures.includes(s.signature)))
+      lines.push(
+        `- Say Again ${i.state === "active" ? "applies" : `tried (${i.state})`}: ${i.kind === "coerce" ? `${i.rule} on ${i.path}` : i.fact}${i.after ? `; this failure was ${i.before?.failureRatePct ?? "?"}% of calls before, ${i.after.failureRatePct}% after (${i.after.calls} calls)` : ""}.`,
       );
     lines.push(`- Suggestion: ${s.suggestion}`, "");
   }
   return `${lines.join("\n")}\n`;
 }
-
-export type { SignatureStats };

@@ -96,7 +96,12 @@ export async function daemonToolsList(name: string): Promise<unknown[] | null> {
   if (!d) return null;
   const res = await daemonFetch(d, `/mcp/${encodeURIComponent(name)}`, {
     method: "POST",
-    body: JSON.stringify({ jsonrpc: "2.0", id: "lint", method: "tools/list", params: {} }),
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "lint",
+      method: "tools/list",
+      params: { _meta: { "sh.sayagain/plain": true } },
+    }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string | { message?: string } };
@@ -116,35 +121,44 @@ export async function daemonToolsList(name: string): Promise<unknown[] | null> {
 
 /** The daemon's learning-loop state, or null when no daemon is live. */
 export async function daemonLearn(
-  action?: { update?: true } | { id: string; state: "revert" | "enable" },
+  action?: { update: true; minEvidence?: number } | { id: string; state: "disable" | "enable" },
 ): Promise<{ updatedAt: string; interventions: unknown[] } | { id: string; state: string } | null> {
   const d = await liveDaemon();
   if (!d) return null;
+  const parse = async (res: Response): Promise<unknown> => {
+    if (!res.ok)
+      throw new Error(
+        ((await res.json().catch(() => ({}))) as { error?: string }).error ??
+          `daemon answered ${res.status}`,
+      );
+    return res.json();
+  };
   if (!action)
-    return (await (await daemonFetch(d, "/api/learn")).json()) as {
+    return (await parse(await daemonFetch(d, "/api/learn"))) as {
       updatedAt: string;
       interventions: unknown[];
     };
-  if (!("id" in action))
-    return (await (await daemonFetch(d, "/api/learn/update", { method: "POST" })).json()) as {
+  if (!("id" in action)) {
+    const query = action.minEvidence !== undefined ? `?minEvidence=${action.minEvidence}` : "";
+    return (await parse(await daemonFetch(d, `/api/learn/update${query}`, { method: "POST" }))) as {
       updatedAt: string;
       interventions: unknown[];
     };
-  const res = await daemonFetch(d, `/api/learn/${encodeURIComponent(action.id)}/${action.state}`, {
-    method: "POST",
-  });
-  if (!res.ok)
-    throw new Error(
-      ((await res.json()) as { error?: string }).error ?? `daemon answered ${res.status}`,
-    );
-  return (await res.json()) as { id: string; state: string };
+  }
+  return (await parse(
+    await daemonFetch(d, `/api/learn/${encodeURIComponent(action.id)}/${action.state}`, {
+      method: "POST",
+    }),
+  )) as { id: string; state: string };
 }
 
 /** The daemon's tool definition report for a server, or null when no daemon is live. */
 export async function daemonLearnReport(server: string): Promise<string | null> {
   const d = await liveDaemon();
   if (!d) return null;
-  return (await daemonFetch(d, `/api/learn/report/${encodeURIComponent(server)}`)).text();
+  const res = await daemonFetch(d, `/api/learn/report/${encodeURIComponent(server)}`);
+  if (!res.ok) throw new Error(`daemon answered ${res.status} for the report`);
+  return res.text();
 }
 
 /** The daemon's ledger tail, or null when no daemon is live. */

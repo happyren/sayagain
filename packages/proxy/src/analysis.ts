@@ -49,7 +49,11 @@ export interface SignatureStats {
   unrecovered: number;
   wasteBytes: number;
   topRecoveryPath: string | undefined;
+  /** How many recoveries took that path. */
+  topRecoveryPathCount: number;
   topShapeChange: string | undefined;
+  /** How many recoveries made that change. */
+  topShapeChangeCount: number;
   suggestion: string;
 }
 
@@ -456,7 +460,9 @@ export function toolStats(rows: LedgerRow[], opts: AnalysisOptions = {}): ToolSt
           unrecovered: s.unrecovered,
           wasteBytes: s.waste,
           topRecoveryPath: top(s.paths),
+          topRecoveryPathCount: s.paths[top(s.paths) ?? ""] ?? 0,
           topShapeChange: top(s.shapes),
+          topShapeChangeCount: s.shapes[top(s.shapes) ?? ""] ?? 0,
           suggestion: suggestionFor(s.cls, signature),
         }))
         .sort((x, y) => y.wasteBytes - x.wasteBytes),

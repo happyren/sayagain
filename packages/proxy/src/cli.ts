@@ -77,6 +77,7 @@ const USAGE = `sayagain ${PROXY_VERSION}
       --no-repair              disable deterministic argument repair
       --no-rewrite-errors      do not append guidance to failures
       --otlp <url>|off         export one span per call (default: $OTEL_EXPORTER_OTLP_ENDPOINT, else a local collector on :4318; serve remembers it in config.json; SAYAGAIN_OTLP=off disables machine-wide)
+      --no-learn               ignore ~/.sayagain/learned.json (the loop's coercions and hints)
   sayagain serve [--listen 127.0.0.1:7777] [--store jsonl|sqlite] [--db <path>] [--otlp <url>|off] [--detach]
       Run the daemon: one virtual server per registered upstream at /mcp/<name>, plus the control API.
       The bearer token is in ~/.sayagain/token. SAYAGAIN_HOME moves every file elsewhere.
@@ -108,8 +109,8 @@ const USAGE = `sayagain ${PROXY_VERSION}
   sayagain learn [--update] [--min-evidence 3] [--json]
       What the loop has learned from your own ledger: coercions applied before a call leaves, facts appended to
       tool descriptions and errors; each with its before and after numbers, reverted by itself when it does not help.
-  sayagain learn --revert <id> | --enable <id> | --report <server>
-      Disable or re-enable one intervention; or print a tool definition report to file against the upstream.
+  sayagain learn --disable <id> | --enable <id> | --report <server>
+      Switch one intervention off or on (a wrap picks the change up within seconds); or print a tool definition report.
   sayagain lint <name>|--all [--file <tools.json>] [--fail-below A|B|C|D] [--json]
       Grade a server's tool definitions with @sayagain/lint (starts the upstream through the daemon if needed).
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
@@ -299,6 +300,7 @@ export async function main(argv: string[]): Promise<number> {
     const noRepair = takeFlag(opts, "--no-repair");
     const noRewrite = takeFlag(opts, "--no-rewrite-errors");
     const wrapOtlp = takeOption(opts, "--otlp");
+    const noLearn = takeFlag(opts, "--no-learn");
     const classes = parseClassOverrides(takeAll(opts, "--class"));
     if (opts.length) throw new UsageError(`wrap: unknown option ${opts[0]}`);
     if (hold !== undefined && hold !== "destructive" && hold !== "always" && hold !== "never")
@@ -321,6 +323,7 @@ export async function main(argv: string[]): Promise<number> {
     };
     if (upstreamName !== undefined) wrapOptions.upstreamName = upstreamName;
     const wrapOtlpEndpoint = await resolveOtlpEndpoint(wrapOtlp);
+    if (noLearn) wrapOptions.learned = false;
     if (wrapOtlpEndpoint) {
       wrapOptions.otlp = new OtlpExporter({
         endpoint: wrapOtlpEndpoint,
@@ -874,7 +877,7 @@ export async function main(argv: string[]): Promise<number> {
     const opts = [...rest];
     const json = takeFlag(opts, "--json");
     const update = takeFlag(opts, "--update");
-    const revert = takeOption(opts, "--revert");
+    const revert = takeOption(opts, "--disable") ?? takeOption(opts, "--revert");
     const enable = takeOption(opts, "--enable");
     const reportFor = takeOption(opts, "--report");
     const minEvidence = takeNumber(opts, "--min-evidence");
@@ -889,7 +892,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     if (revert || enable) {
       const id = (revert ?? enable) as string;
-      const state = revert ? "revert" : "enable";
+      const state = revert ? "disable" : "enable";
       const viaDaemon = await daemonLearn({ id, state });
       if (viaDaemon) {
         process.stdout.write(`${id}: ${(viaDaemon as { state: string }).state}\n`);
@@ -910,18 +913,26 @@ export async function main(argv: string[]): Promise<number> {
     }
     let interventions: Intervention[];
     let updatedAt: string;
-    const viaDaemon = await daemonLearn(update ? { update: true } : undefined);
+    const viaDaemon = await daemonLearn(
+      update
+        ? {
+            update: true,
+            ...(minEvidence !== undefined ? { minEvidence: Math.max(1, minEvidence) } : {}),
+          }
+        : undefined,
+    );
     if (viaDaemon && "interventions" in viaDaemon) {
       interventions = viaDaemon.interventions as Intervention[];
       updatedAt = viaDaemon.updatedAt;
     } else {
       const store = new LearnedStore();
-      if (update || !store.list().length) {
-        const { added, reverted } = store.reconcile(
+      // Only --update writes the file: listing must never switch the loop on for a wrap.
+      if (update) {
+        store.reconcile(
           await loadRowsSince(new Date(0)),
           minEvidence !== undefined ? { minEvidence: Math.max(1, minEvidence) } : {},
         );
-        if (added.length || reverted.length || update) store.save();
+        store.save();
       }
       interventions = store.list();
       updatedAt = store.updatedAt;
@@ -947,7 +958,7 @@ export async function main(argv: string[]): Promise<number> {
       );
     }
     process.stdout.write(
-      "\nsayagain learn --revert <id> turns one off; --enable <id> turns it back on; --report <server> writes the upstream report\n",
+      "\nsayagain learn --disable <id> turns one off; --enable <id> turns it back on; --report <server> writes the upstream report\n",
     );
     return 0;
   }

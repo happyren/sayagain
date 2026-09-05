@@ -200,6 +200,10 @@ what the client sent.
 apply `model` repair (side-model regeneration) to a tool it has classified
 as non-read-only without first holding the call.
 
+A rule MAY be prefixed `learned:` (for example `learned:string-to-number`)
+when the boundary derived the coercion from its own ledger rather than
+from the tool's schema; the change is otherwise reported the same way.
+
 ### 5.5 `sh.sayagain/boundary` (object)
 
 Present on the `initialize` result when a boundary is in the path. A

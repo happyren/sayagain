@@ -171,9 +171,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const tokenBuf = Buffer.from(token);
   const holds = new HoldQueue();
   const learned = options.learned ?? new LearnedStore();
-  const relearn = () => {
+  const relearn = (minEvidence?: number) => {
     try {
-      const { added, reverted } = learned.reconcile(options.stores.readLedger());
+      // Ninety days is plenty of evidence and keeps the pass cheap; older rows are history.
+      const from = Date.now() - 90 * 86_400_000;
+      const rows = options.stores.readLedger().filter((r) => Date.parse(r.ts) >= from);
+      const { added, reverted } = learned.reconcile(
+        rows,
+        minEvidence !== undefined ? { minEvidence } : {},
+      );
       if (added.length || reverted.length || learned.list().length) learned.save();
       for (const i of added)
         log(
@@ -561,10 +567,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (req.method === "GET" && path === "/api/learn")
       return json(res, 200, { updatedAt: learned.updatedAt, interventions: learned.list() });
     if (req.method === "POST" && path === "/api/learn/update") {
-      relearn();
+      const minRaw = url.searchParams.get("minEvidence");
+      const minEvidence = minRaw === null ? undefined : Number(minRaw);
+      if (minEvidence !== undefined && (!Number.isInteger(minEvidence) || minEvidence < 1))
+        return json(res, 400, { error: "minEvidence must be a positive integer" });
+      relearn(minEvidence);
       return json(res, 200, { updatedAt: learned.updatedAt, interventions: learned.list() });
     }
-    const learnState = path.match(/^\/api\/learn\/([^/]+)\/(revert|enable)$/);
+    const learnState = path.match(/^\/api\/learn\/([^/]+)\/(disable|revert|enable)$/);
     if (req.method === "POST" && learnState) {
       const id = decodeURIComponent(learnState[1] ?? "");
       const ok = learned.setState(

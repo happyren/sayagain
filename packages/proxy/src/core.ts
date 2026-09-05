@@ -89,6 +89,10 @@ type FailureAction = "retry" | "repair" | "hold" | "final";
 
 const MAX_START_BACKOFF_MS = 30_000;
 
+/** A tools/list whose _meta asks for the upstream's own descriptions (the linter does). */
+const plainRequested = (msg: JsonRpcRequest): boolean =>
+  (msg.params?._meta as Record<string, unknown> | undefined)?.["sh.sayagain/plain"] === true;
+
 export class Boundary extends EventEmitter {
   readonly name: string;
   readonly holds: HoldQueue;
@@ -104,6 +108,8 @@ export class Boundary extends EventEmitter {
   private readonly settles = new Map<string, (r: Remembered | null) => void>();
   private readonly heldById = new Map<string, PendingCall>();
   private readonly heldByClient = new Map<string, PendingCall>();
+  /** tools/list requests that asked for the upstream\'s descriptions without the learned block. */
+  private readonly plainLists = new Set<string>();
   private readonly repairBudget = new Map<string, number>();
   private readonly replayWaiters = new Map<
     string,
@@ -524,6 +530,8 @@ export class Boundary extends EventEmitter {
         return;
       }
       if (mapped.method === "tools/list") this.state.toolsListIds.add(keyOf(upstreamId));
+      if (mapped.method === "tools/list" && plainRequested(mapped))
+        this.plainLists.add(keyOf(upstreamId));
       this.sendUpstream(`${JSON.stringify(mapped)}\n`);
       return;
     }
@@ -724,19 +732,25 @@ export class Boundary extends EventEmitter {
     await this.untilWarm();
     if (!this.classifier.warm) this.warmClassifier();
     const toolClass = this.classifier.classOf(tool);
-    // A learned coercion changes the arguments before a safe call leaves; a write keeps the
-    // 0.3 rule (arguments change only after a failure, and then behind a hold).
+    // A learned coercion changes the arguments before a read-only call leaves. Any other class keeps
+    // the 0.3 rule: arguments change only after a failure, and a write's then wait behind a hold.
     let outgoing = msg;
     let learned: ReturnType<typeof applyLearnedCoercions> = null;
-    if (this.opts.learned && (toolClass === "read-only" || toolClass === "idempotent-write")) {
+    if (this.opts.learned && toolClass === "read-only") {
+      this.opts.learned.maybeReload();
       const rules = this.opts.learned.coercionsFor(this.name, tool, this.state.upstreamName);
       if (rules.length) learned = applyLearnedCoercions(msg.params?.arguments, rules);
       if (learned)
         outgoing = { ...msg, params: { ...(msg.params ?? {}), arguments: learned.arguments } };
     }
-    const text = `${JSON.stringify(outgoing)}\n`;
+    const text = `${JSON.stringify(outgoing)}
+`;
     const call = describeCall(outgoing, text, toolClass, Buffer.byteLength(text));
-    if (learned) call.repairs = learned.changes;
+    if (learned) {
+      call.preCoercions = learned.changes;
+      // Dedupe and identical-retry detection compare what the client sent, not what left.
+      call.clientArgsHash = hashArgs(msg.params?.arguments);
+    }
     const routed = this.idMap.get(keyOf(msg.id));
     if (routed && !routed.session.ephemeral) call.session = routed.session.id;
     call.server = this.name;
@@ -1036,8 +1050,8 @@ export class Boundary extends EventEmitter {
       shim: false,
       hold: this.policy.hold,
       rewriteErrors: this.policy.rewriteErrors,
-      learnedHint: (tool: string, signature: string) =>
-        this.opts.learned?.hintFor(this.name, tool, signature, this.state.upstreamName),
+      learnedHint: (tool: string, signature: string, applied: string[]) =>
+        this.opts.learned?.hintFor(this.name, tool, signature, this.state.upstreamName, applied),
     };
     const { message, swallow, row, tools, probed, remember, call } = rewriteServerMessage(
       msg,
@@ -1075,7 +1089,14 @@ export class Boundary extends EventEmitter {
       }
     }
     if (swallow) return;
-    if (tools !== undefined && this.opts.learned) this.augmentTools(message);
+    if (tools !== undefined && this.opts.learned) {
+      const plain =
+        "id" in msg &&
+        msg.id !== null &&
+        msg.id !== undefined &&
+        this.plainLists.delete(keyOf(msg.id));
+      if (!plain) this.augmentTools(message);
+    }
     this.deliver(message);
   }
 

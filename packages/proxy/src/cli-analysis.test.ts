@@ -176,6 +176,9 @@ describe("cli analysis", () => {
       `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`,
     );
     expect(await main(["learn"])).toBe(0);
+    expect(out).toContain("nothing learned yet"); // listing never derives; only --update writes the file
+    out = "";
+    expect(await main(["learn", "--update"])).toBe(0);
     expect(out).toContain("active   coerce:fake-notion/strict/limit:string-number");
     expect(out).toContain("string-to-number on /limit");
     out = "";

@@ -404,7 +404,7 @@ async function renderLearn(): Promise<void> {
   <p>${esc(i.kind === "coerce" ? `${i.rule} on ${i.path}` : (i.fact ?? ""))}</p>
   <pre>${esc(i.signature)}</pre>
   <p class="suggestion">${lift(i)}${i.reason ? ` &middot; ${esc(i.reason)}` : ""}</p>
-  <footer>${i.state === "active" ? `<button data-learn="revert" class="secondary">Turn off</button>` : `<button data-learn="enable">Turn on</button>`} <code>${esc(i.id)}</code></footer>
+  <footer>${i.state === "active" ? `<button data-learn="disable" class="secondary">Turn off</button>` : `<button data-learn="enable">Turn on</button>`} <code>${esc(i.id)}</code></footer>
 </article>`,
       )
       .join("");
@@ -495,7 +495,7 @@ document.addEventListener("click", (ev) => {
   const learn = t.closest<HTMLElement>("[data-learn]");
   if (learn) {
     const id = learn.closest<HTMLElement>("[data-id]")?.dataset.id ?? "";
-    const action = learn.dataset.learn === "enable" ? "enable" : "revert";
+    const action = learn.dataset.learn === "enable" ? "enable" : "disable";
     void busy(learn, () =>
       api(`/api/learn/${encodeURIComponent(id)}/${action}`, { method: "POST" }).then(() =>
         renderLearn(),
@@ -528,6 +528,7 @@ events.addEventListener(
   () => void (current === "deadletters" && renderDeadLetters()),
 );
 events.addEventListener("row", () => void (current === "ledger" && loadLedger().catch(report)));
+events.addEventListener("learned", () => void (current === "learn" && renderLearn().catch(report)));
 events.onerror = () => {
   // The browser reconnects on its own after a dropped connection, but not after a refused one.
   $("#status").textContent =
