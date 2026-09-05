@@ -260,7 +260,7 @@ export function buildShapeDocument(allRows: LedgerRow[], opts: BuildOptions): Sh
   }
   const maxErrors = opts.maxErrors ?? 10;
   const shapes: Shape[] = [...groups.entries()]
-    .filter(([, g]) => g.calls > 0)
+    .filter(([, g]) => g.calls > 0 && !OPAQUE_NAME.test(g.server))
     .map(([k, g]) => ({
       server: g.server.toLowerCase(),
       tool: g.tool,
@@ -328,6 +328,9 @@ const SHAPE_CHANGE =
   /^(added|removed|changed) [^\s/\\]{1,400}(; (added|removed|changed) [^\s/\\]{1,400})*$/;
 const ENUM_WORD = /^[a-z-]{1,24}$/;
 const HEX16 = /^[0-9a-f]{16}$/;
+/** A server named by a UUID or a long hex id is someone's private connector, not a public server. */
+export const OPAQUE_NAME =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{20,}$/i;
 
 function onlyKeys(o: unknown, allowed: string[], where: string): Record<string, unknown> {
   if (typeof o !== "object" || o === null || Array.isArray(o))
@@ -377,6 +380,8 @@ function assertErrorSafe(rawErr: unknown, where: string): void {
 function assertShapeSafe(raw: unknown, where: string): void {
   const s = onlyKeys(raw, KEYS.shape, where);
   shortName(s.server, `${where}.server`);
+  if (OPAQUE_NAME.test(String(s.server)))
+    throw new Error(`contribution: ${where}.server is an opaque id, not a public server`);
   shortName(s.tool, `${where}.tool`);
   if (s.serverVersion !== undefined) shortName(s.serverVersion, `${where}.serverVersion`, 64);
   if (s.schemaHash !== undefined && !HEX16.test(String(s.schemaHash)))

@@ -10,7 +10,7 @@ export const SECRETS = ["SECRET", "example.com/private", "/Users/k/"];
 const at = (s: number): string => new Date(T0 + s * 1000).toISOString();
 const line = (o: unknown): string => `${JSON.stringify(o)}\n`;
 
-/** A Claude Code session: eight calls, one coercible failure, a duplicate write, an interrupt, a missing result. */
+/** A Claude Code session: nine calls, one coercible failure, a duplicate write, an interrupt, a missing result, a UUID-named connector. */
 export function writeClaudeCodeFixture(root: string): string {
   const dir = join(root, "-Users-k-projects-SECRET-proj");
   mkdirSync(dir, { recursive: true });
@@ -95,7 +95,13 @@ export function writeClaudeCodeFixture(root: string): string {
         usage(100, 50),
       ),
       result(14, "u8", "created again SECRET"),
-      assistant(15, "r9", [{ type: "text", text: "done SECRET" }], usage(100, 20)),
+      assistant(
+        15,
+        "r9",
+        [use("u9", "mcp__bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a__get_item", { id: "SECRET-3" })],
+        usage(100, 20),
+      ),
+      result(16, "u9", "item SECRET-3"),
     ].join(""),
   );
   return file;

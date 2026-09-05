@@ -136,6 +136,8 @@ describe("contribute", () => {
     expect(notion?.errors[0]?.recoveryPath).toBeUndefined();
     const edit = doc.shapes.find((s) => s.server === "claude-code" && s.tool === "Edit");
     expect(edit).toMatchObject({ calls: 1, failures: 0, unacknowledgedWrites: 1, errors: [] });
+    // The UUID-named connector stays home.
+    expect(doc.shapes.some((s) => s.server === "bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a")).toBe(false);
     const bash = doc.shapes.find((s) => s.tool === "Bash");
     expect(bash).toMatchObject({ unacknowledgedWrites: 1, intentCategory: "execute" });
     const json = JSON.stringify(doc);
@@ -187,6 +189,13 @@ describe("contribute", () => {
       ),
     ).toThrow(/argShape must be key:type/);
     expect(() => assertShapeDocumentSafe({ ...doc, contributor: "kaixiang" })).toThrow(/c_ id/);
+    expect(() =>
+      assertShapeDocumentSafe(
+        mutate((d) => {
+          (d.shapes[0] as Loose["shapes"][number]).server = "bf7c680d-5fdc-5ef4-b4a0-abadb619bf0a";
+        }),
+      ),
+    ).toThrow(/opaque id/);
   });
 
   it("writes the document under the home directory with owner-only permissions", () => {

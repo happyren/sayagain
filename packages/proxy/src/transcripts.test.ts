@@ -57,9 +57,9 @@ describe("transcripts", () => {
     const s = readSession(file, "claude-code");
     expect(s.source).toBe("claude-code");
     expect(s.resultsRecorded).toBe(true);
-    expect(s.calls).toHaveLength(8);
+    expect(s.calls).toHaveLength(9);
     expect(s.tokens).toEqual({ input: 1850, cacheRead: 5000, cacheCreate: 0, output: 470 });
-    expect(s.families).toEqual({ claude: 8 });
+    expect(s.families).toEqual({ claude: 9 });
     const read = by(s.calls, "Read")[0] as TranscriptCall;
     expect(read).toMatchObject({
       server: "claude-code",
@@ -140,7 +140,7 @@ describe("transcripts", () => {
   it("turns a session into ledger rows the analysis understands", () => {
     const s = readSession(writeClaudeCodeFixture(root), "claude-code");
     const { rows, extras } = sessionRows(s);
-    expect(rows).toHaveLength(8);
+    expect(rows).toHaveLength(9);
     expect(rows.every((r) => r.session === s.id && r.method === "tools/call")).toBe(true);
     const edit = rows.find((r) => r.tool === "Edit");
     expect(edit).toMatchObject({ isError: true, errorClass: "no-result", status: "executed" });
@@ -161,7 +161,7 @@ describe("transcripts", () => {
     });
     expect(recs[0]?.rows.map((r) => r.tool)).toEqual(["create_page", "create_page"]);
     const r = report(rows, { since: new Date(T0 - 1000), until: new Date(T0 + 60_000) });
-    expect(r.calls).toBe(8);
+    expect(r.calls).toBe(9);
     expect(r.writes).toBe(5);
     expect(r.unacknowledged).toMatchObject({ count: 2 }); // the Edit with no result, the interrupted Bash
     expect(r.northStar.unacknowledgedWritesPer1kWrites).toBe(400);
@@ -172,7 +172,7 @@ describe("transcripts", () => {
       classes: { coercible: 1 },
     });
     expect(r.byServer.find((x) => x.server === "claude-code")?.failures).toBe(0);
-    expect(r.northStar.failureTaxBytesPer1kCalls).toBe(Math.round((1000 * 300) / 8)); // tokens of the two create_page turns
+    expect(r.northStar.failureTaxBytesPer1kCalls).toBe(Math.round((1000 * 300) / 9)); // tokens of the two create_page turns
   });
 
   it("scans the three hosts' directories, honouring overrides and the since cut-off", () => {

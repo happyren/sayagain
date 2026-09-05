@@ -202,6 +202,10 @@ export function runAudit(
     caveats.push(
       `${defaultedBuiltins} call${defaultedBuiltins === 1 ? "" : "s"} to host-internal tools (agents, plans, todos) were counted read-only.`,
     );
+  if (rep.previous)
+    caveats.push(
+      "The previous window covers only session files modified since twice the window ago, so its numbers can be partial.",
+    );
   caveats.push(
     "Dollar figures are API-equivalent at list prices; a subscription pays differently. Built-in host tools are included; the product claim rests on the MCP subset (docs/measurement.md 5.1).",
   );
@@ -282,7 +286,13 @@ const f = (n: number, d = 0): string =>
     : "n/a";
 const money = (n: number, d = 2): string => `$${f(n, d)}`;
 const tok = (n: number): string =>
-  n >= 1e6 ? `${f(n / 1e6, 1)}M tokens` : n >= 1e3 ? `${f(n / 1e3, 1)}K tokens` : `${f(n)} tokens`;
+  n >= 1e9
+    ? `${f(n / 1e9, 1)}B tokens`
+    : n >= 1e6
+      ? `${f(n / 1e6, 1)}M tokens`
+      : n >= 1e3
+        ? `${f(n / 1e3, 1)}K tokens`
+        : `${f(n)} tokens`;
 const when = (iso: string): string => iso.slice(0, 10);
 const named = (xs: { tool: string; count: number }[]): string =>
   xs.length ? `  ${xs.map((t) => `${t.tool} ${t.count}`).join(", ")}` : "";
