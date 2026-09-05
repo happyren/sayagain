@@ -20,7 +20,8 @@ jobs:
           base="${{ github.event.pull_request.base.sha }}"
           head="${{ github.event.pull_request.head.sha }}"
           missing=0
-          for sha in $(git rev-list "$base..$head"); do
+          # Merge commits (e.g. "update branch" from GitHub) carry no sign-off and are not contributions.
+          for sha in $(git rev-list --no-merges "$base..$head"); do
             # Bots do not certify the DCO; their bumps are reviewed like any other change.
             if git show -s --format=%an "$sha" | grep -qE '\[bot\]$'; then continue; fi
             if ! git show -s --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
