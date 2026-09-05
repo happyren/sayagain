@@ -9,5 +9,6 @@
 | [0005](0005-argument-free-telemetry.md) | Shared telemetry never carries arguments or content | Accepted |
 | [0006](0006-onboarding-and-transparency.md) | One virtual server per upstream, one-command onboarding, identity preserved end to end | Accepted |
 | [0007](0007-observability-and-learning-loop.md) | Per-call spans, error signatures, mis-call ranking, and measured interventions that improve the next call | Accepted |
+- [ADR-0008](0008-web-ui.md): the web UI is served by the daemon, with no framework and no build step.
 
 Template: [0000-template.md](0000-template.md).
