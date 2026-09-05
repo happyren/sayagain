@@ -195,12 +195,13 @@ const when = (iso: string): string => iso.slice(0, 16).replace("T", " ");
 function renderReport(r: Report): string {
   const out: string[] = [];
   const was = (prev: string | undefined) => (prev === undefined ? "" : `  (was ${prev})`);
+  const hours = (Date.parse(r.window.until) - Date.parse(r.window.since)) / 3_600_000;
   const span =
     r.window.days >= 1
       ? r.window.days === 1
         ? "1 day"
         : `${r.window.days} days`
-      : `${Math.round(r.window.days * 24)} hours`;
+      : `${Math.max(1, Math.round(hours))} hour${Math.round(hours) === 1 ? "" : "s"}`;
   const failures = r.byServer.reduce((a, s) => a + s.failures, 0);
   out.push(
     `Say Again report: ${when(r.window.since)} to ${when(r.window.until)} UTC (${span}), ${r.calls} calls, ${r.writes} writes`,
