@@ -731,13 +731,14 @@ function proportionDiff(k1: number, n1: number, k2: number, n2: number, scale: n
   const high = delta + Math.sqrt((a.high - a.p) ** 2 + (b.p - b.low) ** 2);
   const r = (x: number) => +(scale * x).toFixed(scale >= 1000 ? 1 : 2);
   const estimable = n1 > 0 && n2 > 0;
+  // The flag is read off the bounds as printed, so the verdict and the interval never disagree.
   return {
     control: r(a.p),
     treatment: r(b.p),
     delta: r(delta),
     low: estimable ? r(low) : null,
     high: estimable ? r(high) : null,
-    distinguishable: estimable && (low > 0 || high < 0),
+    distinguishable: estimable && (r(low) > 0 || r(high) < 0),
   };
 }
 
@@ -766,7 +767,7 @@ function meanDiff(a: number[], b: number[]): ArmDiff {
     delta: r(delta),
     low: estimable ? r(low) : null,
     high: estimable ? r(high) : null,
-    distinguishable: estimable && (low > 0 || high < 0),
+    distinguishable: estimable && (r(low) > 0 || r(high) < 0),
   };
 }
 

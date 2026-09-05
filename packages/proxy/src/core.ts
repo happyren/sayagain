@@ -1077,7 +1077,9 @@ export class Boundary extends EventEmitter {
       "id" in msg && msg.id !== null && msg.id !== undefined
         ? this.idMap.get(keyOf(msg.id))?.session.arm
         : undefined;
-    const control = pending?.arm === "control" || armOfResponse === "control";
+    // The call's own arm decides; the session's is the fallback for responses with no pending call
+    // (tools/list), so a daily session that crosses midnight mid-call keeps the arm its row carries.
+    const control = pending ? pending.arm === "control" : armOfResponse === "control";
     const opts = {
       version: this.opts.version,
       ledgerKind: this.opts.ledgerKind,

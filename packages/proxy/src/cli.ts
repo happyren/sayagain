@@ -147,9 +147,10 @@ const USAGE = `sayagain ${PROXY_VERSION}
       The weekly page from docs/measurement.md section 6, from the ledger alone, with the previous window for comparison.
       --server takes the registry name or the upstream's own name. Rows come from the running daemon, else the store.
   sayagain report --ab [--since 30d] [--json]
-      The A/B protocol's page (docs/measurement.md 5.4): both arms side by side, the failure tax per call and
-      the unacknowledged writes with 95% intervals, and the verdict against the pre-registered 2,000 calls per
-      arm. Rows without an arm (calls outside the experiment) are counted and left out.
+      The A/B protocol's page (docs/measurement.md 5.4): both arms side by side, then the differences with 95%
+      intervals, risk first (unacknowledged writes per 1K writes, the failure tax in bytes per call, the failure
+      rate), and the verdict against the pre-registered minimum of two weeks or 2,000 calls per arm, whichever
+      is later. Rows without an arm (calls outside the experiment) are counted and left out.
   sayagain learn [--update] [--min-evidence 3] [--json]
       What the loop has learned from your own ledger: coercions offered as repairs, facts appended to tool
       descriptions and errors; each with its before and after numbers, reverted by itself when it does not help.

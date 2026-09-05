@@ -78,10 +78,10 @@ export interface LearnedFile {
 
 export const defaultLearnedPath = (): string => homePath("learned.json");
 
-/** Facts appended to a tool description are delimited and attributed, and capped in length, prefix included. */
 /** The loop never sees the control arm: its rows have no coercion applied, so they would measure the loop's absence. */
 const treated = (rows: LedgerRow[]): LedgerRow[] => rows.filter((r) => r.arm !== "control");
 
+/** Facts appended to a tool description are delimited and attributed, and capped in length, prefix included. */
 export const AUGMENT_PREFIX = "[Say Again learned]";
 export const AUGMENT_CAP = 200;
 
