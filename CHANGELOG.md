@@ -6,6 +6,53 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-05
+
+### Added
+
+- `sayagain tools`: tools ranked by the waste their failures cause per
+  thousand calls (recovery traffic in bytes, the wire's stand-in for
+  tokens), with failure and mis-call rates, identical-retry share, median
+  calls to recover, unrecovered share, latency, and what the boundary did
+  (retried, repaired, held, dead-lettered, deduplicated). `--since 7d`
+  (or `--weekly`), `--server` (registry name or the upstream's own name),
+  `--min-calls`, `--ledger <path>`, `--json`; latency and first/last seen
+  in the text output too.
+- `sayagain errors [tool]`: failures grouped by masked signature with count,
+  class, first and last seen, median calls to recover, the most common
+  recovery path and argument-shape change, and a suggestion (ADR-0007).
+- `sayagain report`: the weekly page from `docs/measurement.md` section 6,
+  from the ledger alone: the north-star pair (failure tax per 1K calls,
+  unacknowledged writes per 1K writes), M1 and M7 by server, M8 duplicates
+  and M9 with the tools involved, M5 and M17 recovery, M15 boundary
+  outcomes, the top signatures, and what moved against the previous window.
+- OTLP export: one span per call over OTLP/HTTP JSON with GenAI and
+  `sayagain.*` attributes and hold, dead-letter and replay events.
+  `serve --otlp <url>` and `wrap --otlp <url>`; otherwise
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (and `_HEADERS`), otherwise a local
+  collector on port 4318 when one answers; `--otlp off` disables it and
+  `SAYAGAIN_OTLP=off` disables it machine-wide. `serve --otlp` is remembered
+  in `config.json`, so a daemon the shim restarts keeps exporting; `wrap`
+  flushes its last spans before exiting. Error
+  signatures and task ids leave as 64-bit hashes (grouping keys, not
+  secrets) unless the exporter is built with `signatures: true`; argument
+  values never leave. A local collector is adopted only when it answers an
+  empty traces request, not merely because something owns the port.
+- `sayagain lint <name>|--all|--file tools.json [--fail-below <grade>]`:
+  grades tool definitions with `@sayagain/lint` through the daemon's
+  `tools/list` (starting the upstream if needed); exits 1 when a server
+  could not be read or a tool grades below the threshold.
+- Ledger rows carry the host `session` the call came from (one-shot HTTP
+  requests without a session id are pooled by task, then by upstream), which
+  is what orders calls for recovery analysis, and the registry `server`
+  name beside the upstream's own. `/api/ledger?since=<iso>[&tail=n]`
+  returns rows from a time.
+
+### Deferred from the roadmap row
+
+- The GitHub Action for `@sayagain/lint`, the public registry scan (M16),
+  and the transcript analyzer reading wire-tap logs.
+
 ## [0.5.1] - 2026-09-05
 
 ### Removed

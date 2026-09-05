@@ -324,10 +324,17 @@ export async function runStdioShim(options: ShimOptions): Promise<number> {
 
   const lines = new LineSplitter();
   const inflight = new Set<Promise<void>>();
+  // Requests run concurrently, except that everything waits for an initialize in flight: its reply
+  // carries the session id the later requests must present.
+  let gate: Promise<void> = Promise.resolve();
   const feed = (line: string) => {
     const msg = parseMessage(line);
     if (!msg || Array.isArray(msg)) return;
-    const p = send(line, msg).finally(() => inflight.delete(p));
+    const isInit = isRequest(msg) && msg.method === "initialize";
+    const p = (isInit ? send(line, msg) : gate.then(() => send(line, msg))).finally(() =>
+      inflight.delete(p),
+    );
+    if (isInit) gate = p.catch(() => undefined);
     inflight.add(p);
   };
   options.input.on("data", (c: Buffer | string) => {

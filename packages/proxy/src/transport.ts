@@ -9,6 +9,8 @@ export interface Session {
    * A stdio host can; a one-shot HTTP POST cannot. Undefined means yes.
    */
   readonly bidirectional?: boolean;
+  /** A one-shot session (one HTTP request): its id says nothing about the host, so rows do not carry it. */
+  readonly ephemeral?: boolean;
 }
 
 export interface Upstream {

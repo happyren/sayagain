@@ -15,6 +15,7 @@ import { summarizeDeadLetter, summarizeHold } from "./control.js";
 import { Boundary } from "./core.js";
 import { type Decision, type Hold, HoldQueue } from "./holds.js";
 import { isRequest, isResponse, type JsonRpcMessage, keyOfId, parseMessage } from "./jsonrpc.js";
+import type { OtlpExporter } from "./otlp.js";
 import {
   loadRegistry,
   type Registry,
@@ -43,6 +44,8 @@ export interface DaemonOptions {
   sessionIdleMs?: number;
   /** Called after /api/shutdown has closed the daemon; the CLI exits the process here. */
   onShutdown?: () => void;
+  /** Export one span per call to an OTLP/HTTP collector. */
+  otlp?: OtlpExporter;
 }
 
 export interface Daemon {
@@ -242,7 +245,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       },
     };
     const b = new Boundary(coreOptions);
-    b.on("row", (row) => emitEvent("row", row));
+    b.on("row", (row) => {
+      options.otlp?.record(row);
+      emitEvent("row", row);
+    });
     b.on("hold", (hold: Hold) => {
       persistHold(hold);
       emitEvent("hold", summarizeHold(hold, process.pid));
@@ -358,6 +364,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         id: `http-${++sessionSeq}`,
         send: () => undefined,
         bidirectional: false,
+        ephemeral: true,
       };
       boundary.attach(session);
       try {
@@ -384,6 +391,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       session = {
         id: `http-${++sessionSeq}`,
         bidirectional: false,
+        ephemeral: true,
         send: (m: JsonRpcMessage) => {
           if (isResponse(m) && m.id !== null && m.id !== undefined && keyOfId(m.id) === wanted)
             settle(m);
@@ -434,6 +442,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         pid: process.pid,
         servers: Object.keys(options.registry.servers),
         ledger: options.stores.kind,
+        otlp: options.otlp?.endpoint ?? null,
       });
     }
     if (req.method === "GET" && path === "/api/servers") {
@@ -503,12 +512,25 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         });
       return json(res, 200, (await b.replay(receipt, args)) ?? { error: "not found" });
     }
-    if (req.method === "GET" && path === "/api/ledger")
+    if (req.method === "GET" && path === "/api/ledger") {
+      const sinceRaw = url.searchParams.get("since");
+      if (sinceRaw) {
+        const since = Date.parse(sinceRaw);
+        if (Number.isNaN(since)) return json(res, 400, { error: "since must be an ISO date" });
+        const matching = options.stores.readLedger().filter((r) => Date.parse(r.ts) >= since);
+        const tailRaw = url.searchParams.get("tail");
+        return json(
+          res,
+          200,
+          tailRaw === null ? matching : matching.slice(-clampTail(tailRaw, matching.length)),
+        );
+      }
       return json(
         res,
         200,
         options.stores.readLedger(clampTail(url.searchParams.get("tail"), 100)),
       );
+    }
     if (req.method === "GET" && path === "/api/events") {
       const beat = startSse(res);
       sseClients.add(res);
@@ -603,6 +625,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       closed = (async () => {
         clearInterval(idleSweep);
         await Promise.all([...boundaries.values()].map((b) => b.close()));
+        await options.otlp?.close();
         const streams = [...sseClients, ...[...hostSessions.values()].map((s) => s.stream)];
         sseClients.clear();
         for (const res of streams) res?.end();

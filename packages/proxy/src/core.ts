@@ -594,7 +594,12 @@ export class Boundary extends EventEmitter {
 
   private abandon(call: PendingCall, reason: string): void {
     this.state.pending.delete(keyOf(call.id));
-    const failure: Failure = { errorClass: "retryable", signature: reason, text: reason };
+    // A failure the boundary itself produced; the signature says so, so reports can set it apart.
+    const failure: Failure = {
+      errorClass: "retryable",
+      signature: `sayagain: ${reason}`,
+      text: reason,
+    };
     const row = failedAttemptRow(call, this.state.upstreamName, failure, 0, Date.now());
     row.status = "dead-lettered";
     this.record(row);
@@ -717,6 +722,9 @@ export class Boundary extends EventEmitter {
     if (!this.classifier.warm) this.warmClassifier();
     const text = `${JSON.stringify(msg)}\n`;
     const call = describeCall(msg, text, this.classifier.classOf(tool), Buffer.byteLength(text));
+    const routed = this.idMap.get(keyOf(msg.id));
+    if (routed && !routed.session.ephemeral) call.session = routed.session.id;
+    call.server = this.name;
 
     // DISREGARD: one identity per call; a concurrent duplicate waits for the first result,
     // off the session's chain so it does not block the host's later calls.
@@ -798,6 +806,8 @@ export class Boundary extends EventEmitter {
     if (action === "repair") {
       const repaired = repairArguments(call.arguments, this.classifier.schemaOf(call.tool));
       if (!repaired) return false;
+      // The attempt row describes what failed: the shape before the repair.
+      const attemptRow = failedAttemptRow(call, this.state.upstreamName, failure, bytes, now);
       call.repairs = repaired.changes;
       call.arguments = repaired.arguments;
       call.argShape = shapeOf(repaired.arguments);
@@ -814,7 +824,7 @@ export class Boundary extends EventEmitter {
       }
       this.state.pending.delete(keyOf(call.id));
       call.lastFailure = failure;
-      this.record(failedAttemptRow(call, this.state.upstreamName, failure, bytes, now));
+      this.record(attemptRow);
       this.park(
         call,
         `arguments repaired (${repaired.changes.map((c) => `${c.path} ${c.rule}`).join(", ")}); approve to send`,

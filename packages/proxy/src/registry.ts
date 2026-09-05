@@ -34,7 +34,7 @@ export interface ServerConfig {
 
 export interface Registry {
   servers: Record<string, ServerConfig>;
-  daemon?: { listen?: string; store?: Exclude<StoreKind, "memory">; db?: string };
+  daemon?: { listen?: string; store?: Exclude<StoreKind, "memory">; db?: string; otlp?: string };
 }
 
 export interface DaemonInfo {

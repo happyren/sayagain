@@ -141,6 +141,8 @@ describe("daemon", () => {
       { session: init.session ?? "" },
     );
     expect(meta(call.body)["sh.sayagain/status"]).toBe("executed");
+    const withSession = (await api(d, "/api/ledger?tail=1")) as { session?: string }[];
+    expect(withSession[0]?.session).toBe(init.session); // a host that presented Mcp-Session-Id is one stream
     const list = await rpc(d, "fake", { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
     expect(((list.body.result as Obj).tools as unknown[]).length).toBeGreaterThan(3);
     expect(
@@ -226,8 +228,23 @@ describe("daemon", () => {
     expect(decided.decided).toBe(true);
     const done = await pending;
     expect(meta(done.body)["sh.sayagain/held"]).toMatchObject({ decision: "approve" });
-    const ledger = (await api(d, "/api/ledger?tail=5")) as { tool: string; status: string }[];
+    const ledger = (await api(d, "/api/ledger?tail=5")) as {
+      tool: string;
+      status: string;
+      session?: string;
+      server?: string;
+    }[];
     expect(ledger.some((r) => r.tool === "delete_page" && r.status === "executed")).toBe(true);
+    // A one-shot POST has no stable session, so its rows carry none; the registry name is always there.
+    expect(ledger.every((r) => r.server === "fake" && r.session === undefined)).toBe(true);
+    const since = (await api(
+      d,
+      `/api/ledger?since=${encodeURIComponent(new Date(Date.now() - 60_000).toISOString())}&tail=1`,
+    )) as unknown[];
+    expect(since).toHaveLength(1);
+    expect(await api(d, "/api/ledger?since=garbage")).toMatchObject({
+      error: expect.stringContaining("ISO"),
+    });
     expect((await api(d, "/api/ledger?tail=0")) as unknown[]).toEqual([]);
   });
 

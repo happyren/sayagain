@@ -25,6 +25,10 @@ export interface HeldInfo {
 }
 
 export interface PendingCall {
+  /** The host session that sent it, when it has a stable identity. */
+  session?: string;
+  /** The registry name of the boundary handling it. */
+  server?: string;
   id: JsonRpcId;
   receipt: string;
   tool: string;
@@ -263,6 +267,8 @@ export function baseRow(
     responseBytes,
   };
   if (call.task !== undefined) row.task = call.task;
+  if (call.session !== undefined) row.session = call.session;
+  if (call.server !== undefined) row.server = call.server;
   if (call.held) row.held = { ...call.held };
   if (call.attempts > 1) row.attempts = call.attempts;
   if (call.repairs.length) row.repairs = call.repairs.map((c) => ({ path: c.path, rule: c.rule }));

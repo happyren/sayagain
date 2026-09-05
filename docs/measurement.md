@@ -34,7 +34,7 @@ Everything below is a measure of one of those two claims.
 Units are per 1,000 tool calls unless stated. "Source" says where the number
 comes from: **T** = Claude Code transcripts (`scripts/baseline/claude-code-baseline.mjs`),
 **W** = MCP wire tap (`scripts/baseline/mcp-tap.mjs`), **L** = the proxy's
-own ledger once it exists, **X** = a designed experiment.
+own ledger (`sayagain report`, `tools`, `errors`; recovery cost in bytes on the wire), **X** = a designed experiment.
 
 ### Problem metrics
 

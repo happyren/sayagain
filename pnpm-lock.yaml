@@ -25,6 +25,9 @@ importers:
 
   packages/proxy:
     dependencies:
+      '@sayagain/lint':
+        specifier: workspace:*
+        version: link:../lint
       '@sayagain/sdk':
         specifier: workspace:*
         version: link:../sdk
