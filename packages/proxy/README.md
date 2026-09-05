@@ -13,10 +13,15 @@ are dead-lettered and can be replayed with the agent's original intent.
 ```bash
 npm install -g @sayagain/proxy        # or: npx -p @sayagain/proxy sayagain ...
 
-# Register upstreams, start the daemon, point hosts at it.
+# One command wraps every server your hosts know about; one puts it back.
+sayagain hosts
+sayagain import --host all --rewrite
+sayagain eject --host all
+
+# Or by hand: register upstreams, start the daemon, point hosts at it.
 sayagain add notion -- npx -y @notionhq/notion-mcp-server
 sayagain serve --detach
-#   host entry: "notion": { "command": "sayagain", "args": ["stdio", "notion"] }
+#   host entry: "notion": { "command": "~/.sayagain/bin/sayagain", "args": ["stdio", "notion"] }
 
 # Or wrap one stdio server in place, no daemon.
 sayagain wrap -- npx -y @notionhq/notion-mcp-server

@@ -6,6 +6,55 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-05
+
+### Added
+
+- `sayagain hosts`: the MCP hosts configured on this machine (Claude Code
+  with its user, local and project scopes, Cursor, Claude Desktop, VS
+  Code), their config files, how many servers each holds and how many
+  already go through Say Again.
+- `sayagain import --host <id>|all [--rewrite]`: registers every server a
+  host knows about and, with `--rewrite`, points the host's entries at Say
+  Again under the same keys, so the agent still sees "notion". The entries
+  point at `~/.sayagain/bin/sayagain`, a launcher that every onboarding
+  command and every daemon start rewrites with the current Node.js and
+  package paths, so host files never change when either moves. A backup
+  goes to `~/.sayagain/backups` (never overwritten); the write is atomic,
+  keeps the file's mode and indentation, follows symlinks, and leaves every
+  other key, non-object entry and VS Code `inputs` alone (comments are not
+  kept, and the tool says so). Entries that already go through Say Again,
+  legacy SSE entries, and entries with host variables the boundary cannot
+  resolve (`${input:...}`, `${workspaceFolder}`, `${VAR:-default}`) are
+  skipped with a reason; `${env:X}` becomes `${X}`. After a rewrite the
+  daemon is started from the current shell so it inherits the PATH and
+  exported tokens the upstreams expect (`--no-start` skips that). `--dry-run`
+  shows the plan and touches nothing; `--project` includes the project files
+  in the current directory; `--transport http` writes daemon URLs with the
+  bearer token for hosts that accept them; `--command` overrides the launcher.
+- `sayagain install --host <id>|all [name...]`: writes entries for
+  registered servers into a host file.
+- `sayagain eject --host <id>|all [name...]`: restores the original entries
+  `import` or `install` replaced (unless edited by hand since), unregisters
+  the servers `import` registered once no host uses them (`--keep` keeps
+  them), removes entries whose server was installed from the registry, and
+  leaves any other Say Again entry in place unless `--prune`.
+- `sayagain remove` warns when the server was imported, since `eject` is
+  the way to put the host entry back.
+- A daemon started by a GUI host's shim gets this Node.js on its PATH.
+- Claude Code's user file honours `CLAUDE_CONFIG_DIR`; while a Claude Code
+  session runs, onboarding warns that the session may rewrite the file.
+- The `sayagain` package (`npx sayagain`) and per-package READMEs.
+
+### Changed
+
+- Imported `env` and `headers` values are copied into `config.json` (0600)
+  as they are. ADR-0006 said copying literal secrets would be opt-in; the
+  values already sit in the host's own file, and without them the upstream
+  cannot start. Use `${VAR}` references in the registry to move them into
+  the daemon's environment.
+- `import` and `install` exit 1 when any host file could not be processed.
+
 ## [0.4.0] - 2026-09-05
 
 ### Added

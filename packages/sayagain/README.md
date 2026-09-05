@@ -3,8 +3,10 @@
 The `sayagain` command: the commitment boundary for MCP tool calls.
 
 ```bash
-npx sayagain --help
 npm install -g sayagain
+sayagain hosts                        # what Claude Code, Cursor, Claude Desktop and VS Code have configured
+sayagain import --host all --rewrite  # wrap every server, keeping each host's keys; backups kept
+sayagain eject --host all             # and back
 ```
 
 This package only provides the command. The implementation, the library

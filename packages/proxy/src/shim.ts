@@ -9,6 +9,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { Agent, request as httpRequest, type IncomingMessage } from "node:http";
+import { delimiter, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   isRequest,
@@ -75,7 +76,12 @@ export async function ensureDaemon(opts: {
   const { file, args } = serveArgv();
   if (!existsSync(args[1] ?? "")) return null;
   opts.log("sayagain: no daemon running; starting one");
-  const child = spawn(file, args, { detached: true, stdio: "ignore", env: process.env });
+  // A GUI host launches without a shell PATH; make sure the daemon can at least find this Node.js and npx.
+  const env = {
+    ...process.env,
+    PATH: [dirname(process.execPath), process.env.PATH ?? ""].filter(Boolean).join(delimiter),
+  };
+  const child = spawn(file, args, { detached: true, stdio: "ignore", env });
   child.on("error", (err) => opts.log(`sayagain: could not start the daemon: ${err.message}`));
   child.unref();
   // Accept whichever daemon is healthy: when several shims start at once, one of them wins the

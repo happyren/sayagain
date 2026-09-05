@@ -677,7 +677,7 @@
       "locked": false,
       "customData": {
         "docent": {
-          "note": "parses the host format, registers each upstream, rewrites entries under the same key, copies secrets only with --copy-secrets",
+          "note": "parses the host format, registers each upstream, rewrites entries under the same key, copies the host's literal secrets (0600 registry)",
           "logic": "for each mcpServers[key]: register(key, entry); entry := boundary(key)"
         }
       }
@@ -1509,13 +1509,13 @@
       "updated": 1788530973893,
       "link": null,
       "locked": false,
-      "text": "~/.sayagain/config.toml",
+      "text": "~/.sayagain/config.json",
       "fontSize": 20,
       "fontFamily": 5,
       "textAlign": "center",
       "verticalAlign": "middle",
       "containerId": "YTVFbhIWpg09B16eftU1",
-      "originalText": "~/.sayagain/config.toml",
+      "originalText": "~/.sayagain/config.json",
       "autoResize": true,
       "lineHeight": 1.25
     },

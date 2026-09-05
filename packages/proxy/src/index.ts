@@ -62,10 +62,23 @@ export { classifyError, guidanceFor } from "./errors.js";
 export type { Decision, Hold } from "./holds.js";
 export { HoldQueue } from "./holds.js";
 export { ensureHome, homePath, sayagainHome } from "./home.js";
+export type { HostFile, HostId, HostSpec, Scope } from "./hosts.js";
+export { HOST_IDS, HOSTS, hostFiles, isHostId } from "./hosts.js";
+export { detectIndent, parseJsonc, stripJsonc } from "./jsonc.js";
 export type { JsonRpcMessage, JsonRpcRequest, JsonRpcResponse } from "./jsonrpc.js";
 export { isRequest, isResponse, LineSplitter, parseMessage } from "./jsonrpc.js";
 export type { Ledger, LedgerRow } from "./ledger.js";
 export { defaultLedgerPath, JsonlLedger, MemoryLedger, readLedger } from "./ledger.js";
+export type { EjectResult, HostEntry, ImportResult, InstallResult, Target } from "./onboarding.js";
+export {
+  boundaryEntry,
+  configFromEntry,
+  ejectHost,
+  importHost,
+  inspectHost,
+  installHost,
+  isBoundaryEntry,
+} from "./onboarding.js";
 export type { HoldMode, PolicyOptions } from "./policy.js";
 export { DEFAULT_POLICY, parseClassOverrides, shouldHold, ToolClassifier } from "./policy.js";
 export type { DaemonInfo, Registry, ServerConfig } from "./registry.js";

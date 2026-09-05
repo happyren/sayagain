@@ -75,8 +75,8 @@ sayagain add linear --url https://mcp.linear.app/mcp --header "Authorization=Bea
 
 # Adopt everything a host already has, keep the keys, rewrite the host
 # config to point at the boundary, back up the original first.
-sayagain import --from claude-code --rewrite        # cursor | claude-desktop | vscode | <path>
-sayagain import --from ./.cursor/mcp.json --dry-run
+sayagain import --host claude-code --rewrite      # or --host all; --dry-run first
+sayagain import --host cursor --file ./.cursor/mcp.json --rewrite
 
 # Or write host entries for registered servers without importing.
 sayagain install --host claude-code
@@ -117,7 +117,14 @@ Registered server entry (`~/.sayagain/config.json`, 0600):
 }
 ```
 
-Host entry written by `install` (Claude Code, HTTP transport):
+Host entry written by `import --rewrite` and `install` (default: the stdio launcher, which
+starts the daemon on first use; `--transport http` for hosts that speak Streamable HTTP):
+
+```json
+"notion": { "command": "/Users/k/.sayagain/bin/sayagain", "args": ["stdio", "notion"] }
+```
+
+With `--transport http`:
 
 ```json
 "notion": {
@@ -127,8 +134,9 @@ Host entry written by `install` (Claude Code, HTTP transport):
 }
 ```
 
-For hosts without HTTP support the entry is
-`{ "command": "sayagain", "args": ["stdio", "notion"] }`.
+The launcher under `~/.sayagain/bin` is rewritten by every onboarding command
+and every daemon start, so host entries survive Node.js and package moves.
+Backups of rewritten host files live in `~/.sayagain/backups`.
 
 ### Defaults chosen for non-intrusiveness
 
@@ -144,9 +152,16 @@ For hosts without HTTP support the entry is
   cannot borrow the upstream credentials through the boundary. The user
   never needs to see the token; `sayagain add` names the file for hosts
   configured by hand.
-- **Secrets**: `env` values are stored as `${VAR}` references and resolved
-  from the daemon's environment at spawn. `import` copies literal values
-  into the config only with `--copy-secrets`, and says so.
+- **Secrets**: `env` and `headers` values may be `${VAR}` references,
+  resolved from the daemon's environment at spawn. `import` (0.5) copies
+  the host's literal values as they are: they already sit in the host's own
+  file, `config.json` is 0600, and without them the upstream cannot start.
+  This amends the original opt-in `--copy-secrets` wording. Replace a value
+  with a `${VAR}` reference to move it into the environment.
+- **Paths for GUI hosts**: Cursor, Claude Desktop and VS Code do not
+  inherit the shell's PATH, so host entries point at the launcher under
+  `~/.sayagain/bin`, which carries the home, a PATH with this Node.js on
+  it, and the current CLI path. `--command <path>` overrides it.
 - **Upstream authentication**: static headers now. OAuth against remote
   upstreams is performed once at `add` time with a browser flow and stored
   by the daemon, the way `mcp-remote` does it. Not in the first release.

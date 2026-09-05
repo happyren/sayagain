@@ -23,6 +23,13 @@ export interface ServerConfig {
   classes?: Record<string, ToolClass>;
   hold?: HoldMode;
   announce?: boolean;
+  /**
+   * Where `import` found this server, keyed by "<file>#<path>": the entry it replaced and the entry
+   * written in its place, so `eject` can restore the original.
+   */
+  origins?: Record<string, { host: string; entry: unknown; wrapped?: unknown }>;
+  /** True for servers `import` registered: `eject` unregisters them once no origin remains. */
+  imported?: boolean;
 }
 
 export interface Registry {
@@ -71,7 +78,8 @@ export function saveRegistry(registry: Registry): void {
   writePrivate(registryPath(), `${JSON.stringify(registry, null, 2)}\n`);
 }
 
-export const isValidServerName = (name: string): boolean => /^[A-Za-z0-9_.-]{1,64}$/.test(name);
+export const isValidServerName = (name: string): boolean =>
+  /^[A-Za-z0-9_.-]{1,64}$/.test(name) && !["__proto__", "constructor", "prototype"].includes(name);
 
 /** Register or replace a server; returns whether a server of that name already existed. */
 export function addServer(name: string, config: ServerConfig): boolean {
