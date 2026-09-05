@@ -11,7 +11,8 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "test": "vitest run",
-    "check": "biome check . && tsc -b && vitest run"
+    "check": "biome check . && tsc -b && tsc -p packages/sdk/tsconfig.test.json && tsc -p packages/proxy/tsconfig.test.json && tsc -p packages/lint/tsconfig.test.json && vitest run",
+    "typecheck:tests": "tsc -p packages/sdk/tsconfig.test.json && tsc -p packages/proxy/tsconfig.test.json && tsc -p packages/lint/tsconfig.test.json"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
@@ -20,5 +21,5 @@
     "vitest": "^4.1.11"
   },
   "packageManager": "pnpm@11.21.0",
-  "version": "0.2.0"
+  "version": "0.3.0"
 }

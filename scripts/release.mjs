@@ -3,17 +3,21 @@
  * Release helper. See docs/RELEASING.md.
  *
  *   node scripts/release.mjs minor|patch|X.Y.Z   bump, changelog, branch, PR
- *   node scripts/release.mjs tag                  tag main at the release commit, push the tag
+ *   node scripts/release.mjs tag                  tag origin/main at its package.json version, push the tag
  *   node scripts/release.mjs notes X.Y.Z          print that version's CHANGELOG section
  */
 import { execSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const sh = (cmd, opts = {}) =>
-  execSync(cmd, { stdio: ["ignore", "pipe", "inherit"], ...opts })
+const sh = (cmd) =>
+  execSync(cmd, { stdio: ["ignore", "pipe", "inherit"] })
     .toString()
     .trim();
+/** Run a command whose output belongs to the terminal (interactive gh prompts). */
+const run = (cmd) => {
+  execSync(cmd, { stdio: "inherit" });
+};
 const root = process.cwd();
 const rootPkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const [mode, arg] = process.argv.slice(2);
@@ -34,15 +38,13 @@ function bumpVersion(current, how) {
   throw new Error(`unknown bump: ${how}`);
 }
 
-function sectionFor(version) {
-  const log = readFileSync(join(root, "CHANGELOG.md"), "utf8");
-  const re = new RegExp(
-    `^## \\[${version.replace(/\./g, "\\.")}\\][^\n]*\n([\\s\\S]*?)(?=^## \\[|\\Z)`,
-    "m",
-  );
-  const m = log.match(re);
-  if (!m) throw new Error(`no CHANGELOG section for ${version}`);
-  return m[1].trim();
+export function sectionFor(version, log = readFileSync(join(root, "CHANGELOG.md"), "utf8")) {
+  const heading = `## [${version}]`;
+  const start = log.indexOf(heading);
+  if (start < 0) throw new Error(`no CHANGELOG section for ${version}`);
+  const bodyStart = log.indexOf("\n", start) + 1;
+  const next = log.indexOf("\n## [", bodyStart);
+  return log.slice(bodyStart, next < 0 ? log.length : next).trim();
 }
 
 if (mode === "notes") {
@@ -78,9 +80,8 @@ if (mode === "notes") {
   sh("git add -A");
   sh(`git commit -q -s -m "chore(release): v${next}"`);
   sh(`git push -q -u origin ${branch}`);
-  sh(
+  run(
     `gh pr create --base main --title "chore(release): v${next}" --body "Release v${next}. Merge, then run: node scripts/release.mjs tag"`,
-    { stdio: "inherit" },
   );
 } else {
   console.log("usage: release.mjs minor|patch|X.Y.Z | tag | notes X.Y.Z");

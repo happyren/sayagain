@@ -25,8 +25,12 @@ describe("control socket", () => {
       createdAt: 0,
       expiresAt: 1,
     });
-    const server = startControlServer(q, path);
+    const server = startControlServer(q, path, { deadletters: () => [], replay: async () => null });
     await new Promise((r) => server.once("listening", r));
+    const dl = await ask(path, { op: "deadletters" });
+    expect(dl).toMatchObject({ ok: true, deadletters: [] });
+    const rp = await ask(path, { op: "replay", receipt: "nope" });
+    expect(rp).toMatchObject({ ok: false });
     const list = await ask(path, { op: "list" });
     expect(list.ok && "holds" in list && list.holds[0]).toMatchObject({
       receipt: "rcpt_x",
@@ -38,5 +42,6 @@ describe("control socket", () => {
     const again = await ask(path, { op: "decide", receipt: "rcpt_x", decision: "approve" });
     expect(again).toMatchObject({ ok: true, decided: false });
     server.close();
+    await new Promise((r) => server.once("close", r));
   });
 });

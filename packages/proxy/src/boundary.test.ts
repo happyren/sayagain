@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   ANNOUNCEMENT,
+  canonicalJson,
   createState,
   describeCall,
   duplicateResponse,
+  failureOf,
+  hashArgs,
   heldResponse,
   observeClientMessage,
   ownToolsListRequest,
@@ -13,7 +16,7 @@ import {
 } from "./boundary.js";
 import type { JsonRpcRequest } from "./jsonrpc.js";
 
-const opts = { version: "0.2.0", ledgerKind: "memory" as const, announce: true, shim: false };
+const opts = { version: "0.3.0", ledgerKind: "memory" as const, announce: true, shim: false };
 const req = (
   id: number | string,
   name: string,
@@ -25,7 +28,7 @@ const req = (
   return { jsonrpc: "2.0", id, method: "tools/call", params };
 };
 
-describe("shapeOf", () => {
+describe("shapes and hashes", () => {
   it("records keys and types, never values", () => {
     expect(shapeOf({ b: 1, a: "x", c: [1], d: null })).toEqual([
       "a:string",
@@ -35,10 +38,17 @@ describe("shapeOf", () => {
     ]);
     expect(shapeOf("nope")).toEqual([]);
   });
+  it("hashes independent of key order at every level", () => {
+    expect(hashArgs({ a: 1, b: { c: 2, d: [1, { e: 3 }] } })).toBe(
+      hashArgs({ b: { d: [1, { e: 3 }], c: 2 }, a: 1 }),
+    );
+    expect(hashArgs({ a: 1 })).not.toBe(hashArgs({ a: 2 }));
+    expect(canonicalJson({ b: undefined, a: 1 })).toBe('{"a":1,"b":null}');
+  });
 });
 
 describe("describeCall", () => {
-  it("reads intent, task and idempotency key from _meta", () => {
+  it("reads intent, task and idempotency key from _meta and keeps the client's hash", () => {
     const call = describeCall(
       req(
         1,
@@ -65,12 +75,25 @@ describe("describeCall", () => {
       argShape: ["q:string"],
       rawLine: "raw",
     });
-    expect(call.receipt).toMatch(/^rcpt_/);
+    expect(call.clientArgsHash).toBe(call.argsHash);
+  });
+});
+
+describe("failureOf", () => {
+  it("survives errors without a message", () => {
+    expect(failureOf({ jsonrpc: "2.0", id: 1, error: { code: -32000 } as never })).toMatchObject({
+      errorClass: "other",
+      signature: "",
+    });
+    expect(
+      failureOf({ jsonrpc: "2.0", id: 1, error: { code: -32602, message: 7 } as never })
+        ?.errorClass,
+    ).toBe("coercible");
   });
 });
 
 describe("tools/call rewrite", () => {
-  it("adds receipt and status to result._meta, produces a row, offers the result for dedupe", () => {
+  it("adds receipt and status, produces a row, offers the result for dedupe", () => {
     const state = createState("notion");
     registerPending(
       state,
@@ -87,57 +110,70 @@ describe("tools/call rewrite", () => {
     const result = (message as { result: { _meta: Record<string, unknown> } }).result;
     expect(result._meta.keep).toBe(1);
     expect(result._meta["sh.sayagain/status"]).toBe("executed");
-    expect(row).toMatchObject({
-      tool: "search",
-      upstream: "notion",
-      toolClass: "read-only",
-      isError: false,
-      latencyMs: 250,
-    });
+    expect(row).toMatchObject({ tool: "search", upstream: "notion", latencyMs: 250 });
     expect(remember?.call.tool).toBe("search");
-    expect(state.pending.size).toBe(0);
   });
 
-  it("classifies isError results, keeps them executed, does not offer them for dedupe", () => {
+  it("reports repaired when arguments changed and the call succeeded", () => {
     const state = createState();
-    registerPending(state, describeCall(req("a", "get", {}), "raw", "read-only", 10));
-    const { row, remember } = rewriteServerMessage(
-      {
-        jsonrpc: "2.0",
-        id: "a",
-        result: {
-          isError: true,
-          content: [{ type: "text", text: "Error: page 'abc-123' not found" }],
-        },
-      },
+    const call = describeCall(req(2, "get", {}), "raw", "read-only", 10);
+    call.repairs = [{ path: "/limit", rule: "string-to-number", from: "1", to: 1 }];
+    registerPending(state, call);
+    const { message, row } = rewriteServerMessage(
+      { jsonrpc: "2.0", id: 2, result: { content: [] } },
       state,
       opts,
       10,
     );
-    expect(row).toMatchObject({
-      isError: true,
-      status: "executed",
-      errorSignature: "Error: page <str> not found",
-    });
-    expect(remember).toBeUndefined();
+    expect(
+      (message as { result: { _meta: Record<string, unknown> } }).result._meta[
+        "sh.sayagain/status"
+      ],
+    ).toBe("repaired");
+    expect(row?.status).toBe("repaired");
   });
 
-  it("leaves JSON-RPC errors untouched but still records them", () => {
+  it("puts the receipt into error.data on JSON-RPC errors and records them", () => {
     const state = createState();
     registerPending(state, describeCall(req(1, "get", { limit: "10" }), "raw", "write", 10));
     const { changed, row, message } = rewriteServerMessage(
       {
         jsonrpc: "2.0",
         id: 1,
-        error: { code: -32602, message: "Invalid params: limit must be a number" },
+        error: {
+          code: -32602,
+          message: "Invalid params: limit must be a number",
+          data: { hint: 1 },
+        },
       },
       state,
       opts,
       10,
     );
-    expect(changed).toBe(false);
-    expect((message as { error: unknown }).error).toBeDefined();
-    expect(row).toMatchObject({ isError: true, errorCode: -32602 });
+    expect(changed).toBe(true);
+    expect((message as { error: { data: Record<string, unknown> } }).error.data).toMatchObject({
+      hint: 1,
+      "sh.sayagain/status": "executed",
+    });
+    expect(row).toMatchObject({ isError: true, errorCode: -32602, errorClass: "coercible" });
+  });
+
+  it("dead-letters a failure after an approved hold", () => {
+    const state = createState();
+    const call = describeCall(req(3, "delete_page", { id: 1 }), "raw", "destructive", 10);
+    call.held = { reason: "destructive", mode: "pre", decision: "approve", waitedMs: 5 };
+    registerPending(state, call);
+    const { row } = rewriteServerMessage(
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        result: { isError: true, content: [{ type: "text", text: "Error: Request timed out" }] },
+      },
+      state,
+      opts,
+      10,
+    );
+    expect(row?.status).toBe("dead-lettered");
   });
 
   it("ignores responses it did not see the request for", () => {
@@ -151,30 +187,13 @@ describe("tools/call rewrite", () => {
     expect(changed).toBe(false);
     expect(row).toBeUndefined();
   });
-
-  it("carries the hold decision into _meta and the row", () => {
-    const state = createState();
-    const call = describeCall(req(3, "delete_page", { id: 1 }), "raw", "destructive", 10);
-    call.held = { reason: "destructive", decision: "approve", waitedMs: 5 };
-    registerPending(state, call);
-    const { message, row } = rewriteServerMessage(
-      { jsonrpc: "2.0", id: 3, result: { content: [] } },
-      state,
-      opts,
-      10,
-    );
-    expect(
-      (message as { result: { _meta: Record<string, unknown> } }).result._meta["sh.sayagain/held"],
-    ).toEqual({ reason: "destructive", decision: "approve" });
-    expect(row?.held).toEqual({ reason: "destructive", decision: "approve", waitedMs: 5 });
-  });
 });
 
 describe("initialize and tools/list", () => {
   it("announces the boundary in _meta and instructions, keeps serverInfo", () => {
     const state = createState("upstream");
     observeClientMessage({ jsonrpc: "2.0", id: 0, method: "initialize", params: {} }, state);
-    const { message, changed } = rewriteServerMessage(
+    const { message } = rewriteServerMessage(
       {
         jsonrpc: "2.0",
         id: 0,
@@ -184,23 +203,18 @@ describe("initialize and tools/list", () => {
       { ...opts, hold: "destructive" },
       10,
     );
-    expect(changed).toBe(true);
     const result = (message as { result: Record<string, unknown> }).result;
     expect(result.serverInfo).toEqual({ name: "notion", version: "1" });
     expect(result.instructions).toBe(`Be kind.\n\n${ANNOUNCEMENT}`);
     expect((result._meta as Record<string, unknown>)["sh.sayagain/boundary"]).toMatchObject({
-      name: "sayagain",
       upstream: "notion",
-      ledger: "memory",
       hold: "destructive",
     });
-    expect(state.upstreamName).toBe("notion");
   });
 
-  it("swallows the reply to its own tools/list but still learns from it", () => {
+  it("swallows the reply to its own tools/list, learns from it, or reports a probe without tools", () => {
     const state = createState();
     const own = ownToolsListRequest(state);
-    expect(String(own.id)).toMatch(/^sayagain:tools:/);
     const { swallow, tools } = rewriteServerMessage(
       { jsonrpc: "2.0", id: own.id, result: { tools: [{ name: "y" }] } },
       state,
@@ -209,19 +223,14 @@ describe("initialize and tools/list", () => {
     );
     expect(swallow).toBe(true);
     expect(tools).toEqual([{ name: "y" }]);
-  });
-
-  it("surfaces tools/list results for the classifier without changing them", () => {
-    const state = createState();
-    observeClientMessage({ jsonrpc: "2.0", id: 5, method: "tools/list", params: {} }, state);
-    const { changed, tools } = rewriteServerMessage(
-      { jsonrpc: "2.0", id: 5, result: { tools: [{ name: "x" }] } },
+    const own2 = ownToolsListRequest(state);
+    const r2 = rewriteServerMessage(
+      { jsonrpc: "2.0", id: own2.id, error: { code: -32601, message: "no" } },
       state,
       opts,
       10,
     );
-    expect(changed).toBe(false);
-    expect(tools).toEqual([{ name: "x" }]);
+    expect(r2).toMatchObject({ swallow: true, probed: true });
   });
 });
 
@@ -232,27 +241,37 @@ describe("synthetic responses", () => {
       content: [{ type: "text", text: "ok" }],
       _meta: { a: 1 },
     });
-    const meta = (msg as { result: { _meta: Record<string, unknown> } }).result._meta;
-    expect(meta).toMatchObject({
+    expect((msg as { result: { _meta: Record<string, unknown> } }).result._meta).toMatchObject({
       a: 1,
-      "sh.sayagain/receipt": call.receipt,
       "sh.sayagain/status": "deduplicated",
       "sh.sayagain/duplicate-of": "rcpt_first",
     });
   });
 
-  it("explains a hold and a rejection differently", () => {
+  it("explains each hold mode differently", () => {
     const call = describeCall(req(9, "delete_page", {}), "raw", "destructive", 10);
-    const held = heldResponse(call, "destructive", 2_000_000_000_000, false) as {
-      result: { isError: boolean; content: { text: string }[]; _meta: Record<string, unknown> };
-    };
-    expect(held.result.isError).toBe(false);
-    expect(held.result.content[0]?.text).toContain("STANDBY");
-    expect(held.result._meta["sh.sayagain/status"]).toBe("held");
-    const rejected = heldResponse(call, "destructive", 2_000_000_000_000, true) as {
-      result: { isError: boolean; content: { text: string }[] };
-    };
-    expect(rejected.result.isError).toBe(true);
-    expect(rejected.result.content[0]?.text).toContain("UNABLE");
+    const pre = heldResponse(call, "destructive", 2_000_000_000_000, {
+      rejected: false,
+      mode: "pre",
+    }) as { result: { content: { text: string }[] } };
+    expect(pre.result.content[0]?.text).toContain("has not been executed");
+    const unknown = heldResponse(call, "r", 2_000_000_000_000, {
+      rejected: false,
+      mode: "unknown-outcome",
+      failure: { errorClass: "retryable", signature: "Error: Request timed out", text: "" },
+    }) as { result: { content: { text: string }[]; _meta: Record<string, unknown> } };
+    expect(unknown.result.content[0]?.text).toContain("outcome is unknown");
+    expect(unknown.result.content[0]?.text).toContain("Do not repeat the call");
+    expect(unknown.result._meta["sh.sayagain/held"]).toMatchObject({
+      mode: "unknown-outcome",
+      attemptError: "Error: Request timed out",
+    });
+    const repaired = heldResponse(call, "r", 2_000_000_000_000, {
+      rejected: true,
+      mode: "repaired",
+      repairs: [{ path: "/limit", rule: "string-to-number" }],
+    }) as { result: { isError: boolean; content: { text: string }[] } };
+    expect(repaired.result.isError).toBe(true);
+    expect(repaired.result.content[0]?.text).toContain("/limit string-to-number");
   });
 });

@@ -10,6 +10,7 @@ const row = (n: number): LedgerRow => ({
   upstream: "u",
   method: "tools/call",
   tool: "t",
+  toolClass: "read-only",
   argShape: [],
   argsHash: "h",
   hasIntent: false,
