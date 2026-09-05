@@ -195,9 +195,12 @@ target; a sample is the first published number).
 
 Coverage, stated on the page: only servers publishing a Streamable HTTP
 remote are probed; package-only and SSE-only servers are listed but not
-probed. Probed servers that answer 401, 403 or 407 (`auth`), do not answer
-in time (`unreachable`), answer with something other than MCP (`not-mcp`)
-or list no tools (`no-tools`) contribute no tools. M16's denominator is
+probed. Probed servers that answer 401, 403 or 407 or declare a required
+secret header (`auth`), answer with a JSON-RPC error (`refused`), do not
+answer in time (`unreachable`), answer with something other than MCP
+(`not-mcp`) or list no tools (`no-tools`) contribute no tools; a remote at
+a private or loopback address is never probed (`skipped`). Deprecated
+registry entries are left out of the listing. M16's denominator is
 every tool listed by a server with outcome `ok`, tools without parameters
 included. The 95% interval treats tools as independent and ignores that
 they cluster by server, so the page also gives the number of servers with

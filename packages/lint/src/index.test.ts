@@ -63,6 +63,16 @@ describe("lintTool", () => {
           note: { type: "string", description: "Free text" },
           sortOrder: { type: "string", description: "asc or desc" },
           createdAt: { type: "string", description: "when", format: "date-time" },
+          // Pydantic and zod shapes: a reference, a nullable union with its format, an enum branch.
+          ref_status: { $ref: "#/$defs/Status", description: "status" },
+          updated_at: {
+            anyOf: [{ type: "string", format: "date-time" }, { type: "null" }],
+            description: "when",
+          },
+          mode: { anyOf: [{ enum: ["a", "b"] }, { type: "null" }], description: "mode" },
+          deleted_at: { type: ["string", "null"], description: "when", format: "date-time" },
+          body: { type: "string", description: "Text in Markdown format" },
+          state: { anyOf: [{ type: "string" }, { type: "null" }], description: "state" },
         },
         required: [],
         additionalProperties: false,
@@ -74,7 +84,14 @@ describe("lintTool", () => {
       "/properties/status",
       "/properties/limit",
       "/properties/sortOrder",
+      "/properties/state",
     ]);
+    // Definitions the linter cannot read are counted by the caller, not thrown at it.
+    const broken = null as unknown as ToolDefinition["inputSchema"];
+    expect(() => lintTool({ name: "x", inputSchema: broken })).not.toThrow();
+    expect(() =>
+      lintTool({ name: "x", inputSchema: { type: "object", properties: { a: broken } } }),
+    ).not.toThrow();
     expect(RULES.find((r) => r.id === "params/constrained")?.implemented).toBe(true);
     expect(RULE_SET_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });

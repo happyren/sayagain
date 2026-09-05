@@ -152,6 +152,7 @@ export {
   REGISTRY_URL,
   renderRegistryScan,
   scanRegistry,
+  summarizeScan,
   wilson,
 } from "./registry-scan.js";
 export type { RepairChange, RepairResult } from "./repair.js";

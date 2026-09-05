@@ -216,6 +216,7 @@ describe("cli audit and contribute", () => {
           "--registry",
           "--registry-url",
           `http://127.0.0.1:${port}/v0/servers`,
+          "--allow-private",
           "--timeout",
           "2s",
           "--out",
@@ -238,6 +239,7 @@ describe("cli audit and contribute", () => {
           "--registry",
           "--registry-url",
           `http://127.0.0.1:${port}/v0/servers`,
+          "--allow-private",
           "--json",
           "--first",
           "1",
@@ -253,6 +255,10 @@ describe("cli audit and contribute", () => {
         /--seed goes with --sample/,
       );
       await expect(main(["lint", "--registry", "--timeout", "soon"])).rejects.toThrow(/--timeout/);
+      await expect(main(["lint", "--registry", "--timeout", "0s"])).rejects.toThrow(
+        /must be positive/,
+      );
+      await expect(main(["lint", "--registry", "--first", "0"])).rejects.toThrow(/positive number/);
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }

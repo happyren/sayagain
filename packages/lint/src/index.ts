@@ -149,6 +149,10 @@ export interface JsonSchema {
   enum?: unknown[];
   format?: string;
   pattern?: string;
+  $ref?: string;
+  anyOf?: JsonSchema[];
+  oneOf?: JsonSchema[];
+  allOf?: JsonSchema[];
   [key: string]: unknown;
 }
 
@@ -179,7 +183,15 @@ const NAME = /^[A-Za-z0-9_.-]{1,128}$/;
 const CONSTRAINED_NAME =
   /(^|_|-)(id|ids|uuid|guid|key|token|sha|hash|date|datetime|time|timestamp|at|before|after|since|until|status|state|type|kind|mode|format|level|priority|visibility|sort|order|direction|role|scope|unit|currency|locale|lang|language|region|country|timezone|tz)$/i;
 const CONSTRAINED_DESC =
-  /\b(one of|either|allowed values|must be (a|an|one)|in the form|ISO ?8601|RFC ?3339|YYYY|uuid|format)\b/i;
+  /\b(one of|either|allowed values|must be (a|an|one)|in the form(at)? of|the format|formatted as|ISO ?8601|RFC ?3339|YYYY|uuid)\b/i;
+/** A union's branches (anyOf, oneOf, allOf), or the schema itself. */
+const branchesOf = (s: JsonSchema, depth = 0): JsonSchema[] => {
+  const alts = [s.anyOf, s.oneOf, s.allOf]
+    .filter((x): x is JsonSchema[] => Array.isArray(x))
+    .flat()
+    .filter((x): x is JsonSchema => typeof x === "object" && x !== null);
+  return alts.length && depth < 4 ? alts.flatMap((b) => branchesOf(b, depth + 1)) : [s];
+};
 const typeOf = (s: JsonSchema): string[] =>
   Array.isArray(s.type) ? s.type : typeof s.type === "string" ? [s.type] : [];
 const hasStringConstraint = (s: JsonSchema): boolean =>
@@ -224,22 +236,29 @@ export function lintTool(tool: ToolDefinition): Finding[] {
       `description is ${desc.length} characters; too short to carry scope, constraints and output`,
     );
 
-  const props = tool.inputSchema.properties ?? {};
-  for (const [key, schema] of Object.entries(props)) {
+  const input: JsonSchema =
+    typeof tool.inputSchema === "object" && tool.inputSchema !== null ? tool.inputSchema : {};
+  const props = Object.entries(input.properties ?? {}).filter(
+    (e): e is [string, JsonSchema] => typeof e[1] === "object" && e[1] !== null,
+  );
+  for (const [key, schema] of props) {
     if (!schema.description || schema.description.trim().length === 0)
       emit("params/described", `parameter ${key} has no description`, `/properties/${key}`);
   }
-  for (const [key, schema] of Object.entries(props)) {
-    const types = typeOf(schema);
+  for (const [key, schema] of props) {
     const path = `/properties/${key}`;
-    if (types.includes("number") || types.includes("integer")) {
-      if (!hasNumberConstraint(schema))
+    const branches = branchesOf(schema);
+    // A reference is a definition elsewhere: the linter cannot judge it, so it does not.
+    if (schema.$ref !== undefined || branches.some((b) => b.$ref !== undefined)) continue;
+    const types = new Set(branches.flatMap(typeOf).filter((t) => t !== "null"));
+    if ((types.has("number") || types.has("integer")) && !types.has("string")) {
+      if (!branches.some(hasNumberConstraint))
         emit("params/constrained", `number ${key} has no bounds (minimum, maximum, enum)`, path);
-    } else if (types.includes("string") || (!types.length && schema.enum === undefined)) {
+    } else if (types.has("string")) {
       const snake = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2"); // userId reads as user_id
       const looksConstrained =
         CONSTRAINED_NAME.test(snake) || CONSTRAINED_DESC.test(schema.description ?? "");
-      if (looksConstrained && !hasStringConstraint(schema))
+      if (looksConstrained && !branches.some(hasStringConstraint))
         emit(
           "params/constrained",
           `${key} reads as an id, date or choice but carries no format, pattern or enum`,
@@ -247,9 +266,9 @@ export function lintTool(tool: ToolDefinition): Finding[] {
         );
     }
   }
-  if (tool.inputSchema.required === undefined)
+  if (input.required === undefined)
     emit("params/required-listed", "inputSchema has no `required` array");
-  if (tool.inputSchema.additionalProperties !== false)
+  if (input.additionalProperties !== false)
     emit("params/closed", "inputSchema does not set additionalProperties: false");
 
   if (!tool.outputSchema && !/\b(returns?|responds? with|yields?|gives back|output)\b/i.test(desc))

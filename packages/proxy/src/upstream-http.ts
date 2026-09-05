@@ -92,6 +92,12 @@ export class HttpUpstream implements Upstream {
     return { ...headers, ...this.baseHeaders };
   }
 
+  /** Post one message and wait for the POST to finish; rejects with the HTTP or network error. */
+  async sendAndWait(line: string): Promise<void> {
+    if (this.stopped) throw new Error("upstream stopped");
+    await this.post(line);
+  }
+
   send(line: string): boolean {
     if (this.stopped) return false;
     void this.post(line).catch((err: unknown) => {

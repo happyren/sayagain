@@ -153,7 +153,7 @@ const USAGE = `sayagain ${PROXY_VERSION}
   sayagain lint <name>|--all [--file <tools.json>] [--fail-below A|B|C|D] [--json]
       Grade a server's tool definitions with @sayagain/lint (starts the upstream through the daemon if needed).
   sayagain lint --registry [--sample <n> [--seed 20260905] | --first <n>] [--concurrency 8] [--timeout 10s]
-                 [--out <file>] [--json] [--registry-url <url>]
+                 [--out <file>] [--json] [--registry-url <url> [--allow-private]]
       Scan the public MCP registry (docs/measurement.md 5.5): ask every server with a Streamable HTTP remote for
       its tools without credentials, grade them, print the grade distribution and M16 (tools without documented
       parameter constraints) with the rule-set version. The page and --json name no server; the progress log on
@@ -1301,16 +1301,20 @@ export async function main(argv: string[]): Promise<number> {
     const timeoutOption = takeOption(opts, "--timeout");
     const outFile = takeOption(opts, "--out");
     const registryUrl = takeOption(opts, "--registry-url");
+    const allowPrivate = takeFlag(opts, "--allow-private");
     if (opts.length) throw new UsageError(`lint: unknown option ${opts[0]}`);
     if (sample !== undefined && first !== undefined)
       throw new UsageError("lint: --sample and --first are alternatives");
     if (seed !== undefined && sample === undefined)
       throw new UsageError("lint: --seed goes with --sample");
+    if (sample === 0 || first === 0)
+      throw new UsageError("lint: --sample and --first need a positive number");
     let timeoutMs: number | undefined;
     if (timeoutOption !== undefined) {
       const m = timeoutOption.match(/^(\d+)\s*(ms|s)?$/);
       if (!m) throw new UsageError("lint: --timeout expects a number of seconds, like 10s");
       timeoutMs = Number(m[1]) * (m[2] === "ms" ? 1 : 1000);
+      if (timeoutMs <= 0) throw new UsageError("lint: --timeout must be positive");
     }
     const scan = await scanRegistry({
       ...(sample !== undefined ? { sample } : {}),
@@ -1319,6 +1323,7 @@ export async function main(argv: string[]): Promise<number> {
       ...(concurrency !== undefined ? { concurrency: Math.max(1, concurrency) } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(registryUrl !== undefined ? { registryUrl } : {}),
+      ...(allowPrivate ? { allowPrivate: true } : {}),
       log: (line) => process.stderr.write(`${line}\n`),
     });
     if (outFile !== undefined) {

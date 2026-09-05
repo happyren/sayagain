@@ -75,6 +75,8 @@ export interface TranscriptSession {
   maxTs: number;
   /** The file records tool results (Cursor files may not; their outcomes are then unrecorded). */
   resultsRecorded: boolean;
+  /** The session belongs to another project than the one asked for (or the file does not say). */
+  excluded?: boolean;
 }
 
 /** USD per million tokens (input, output) at list price. Cache reads cost 10% of input, cache creation 125%. */
@@ -531,6 +533,7 @@ function readCodexSession(file: string, now: number, opts: ReadOptions): Transcr
   const r = startReading(file, "codex", now);
   const { s, pending, turns } = r;
   const schemas = new Map<string, string>();
+  let projectSeen = false;
   let model = "";
   let open: Turn = { tokens: 0, usd: 0, model, calls: [] };
   turns.push(open);
@@ -543,10 +546,12 @@ function readCodexSession(file: string, now: number, opts: ReadOptions): Transcr
     const type = str(e.type);
     if (type === "session_meta") {
       if (opts.project !== undefined) {
-        const cwd = str(p.cwd);
-        const segments = cwd.split(/[\\/]/).filter(Boolean);
-        if (!segments.some((seg) => segmentMatchesProject(seg, opts.project as string)))
+        projectSeen = true;
+        const base = str(p.cwd).split(/[/]/).filter(Boolean).pop() ?? "";
+        if (!segmentMatchesProject(base, opts.project)) {
+          r.s.excluded = true;
           return finishSession(r); // another project: an empty session
+        }
       }
       const tools = Array.isArray(p.dynamic_tools) ? p.dynamic_tools : [];
       for (const t of tools) {
@@ -646,6 +651,10 @@ function readCodexSession(file: string, now: number, opts: ReadOptions): Transcr
       turns.push(open);
     }
   }
+  if (opts.project !== undefined && !projectSeen) {
+    r.s.excluded = true; // the file never said which project it was
+    r.s.calls.length = 0;
+  }
   return finishSession(r);
 }
 
@@ -660,21 +669,25 @@ export interface ReadOptions {
   project?: string;
 }
 
-/** Does a path segment name the project: the directory itself, or a worktree or variant of it. */
+/** Does a directory name the project: the directory itself, or a worktree or variant of it. */
 export const segmentMatchesProject = (segment: string, project: string): boolean => {
   const s = segment.toLowerCase();
   const p = project.toLowerCase();
   return s === p || s.startsWith(`${p}--`) || s.startsWith(`${p}.`);
 };
 
-/** Claude Code and Cursor turn `/Users/k/quantbot` into `-Users-k-quantbot`; the last `-`-part is the directory. */
+/**
+ * Claude Code and Cursor name a project directory after the session's working directory with
+ * every character outside [A-Za-z0-9] turned into `-`: `/Users/k/my_app` becomes
+ * `-Users-k-my-app`. The project is the last directory, or a worktree of it (`--`).
+ */
 export const projectDirMatches = (dirName: string, project: string): boolean => {
-  const p = project.toLowerCase();
+  const p = project.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase();
   const name = dirName.toLowerCase();
-  const i = name.indexOf(`-${p}`);
-  if (i < 0) return name === p || segmentMatchesProject(name, p);
-  const rest = name.slice(i + 1);
-  return segmentMatchesProject(rest.split("--")[0] ?? rest, p) || segmentMatchesProject(rest, p);
+  if (!p) return false;
+  return (
+    name === p || name.endsWith(`-${p}`) || name.includes(`-${p}--`) || name.startsWith(`${p}--`)
+  );
 };
 
 export function readSession(
@@ -762,11 +775,12 @@ export function scanTranscripts(opts: ScanOptions = {}): Scan {
           continue;
         }
       }
-      files[source]++;
       const s = readSession(file, source, {
         now,
         ...(opts.project !== undefined ? { project: opts.project } : {}),
       });
+      if (s.excluded) continue;
+      files[source]++;
       if (s.calls.length) sessions.push(s);
     }
   }

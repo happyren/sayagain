@@ -13,7 +13,8 @@ All notable changes to this project are documented here. The format follows
 - `sayagain lint --registry`: the registry scan of `docs/measurement.md`
   5.5. Lists the public MCP registry, asks every server with a Streamable
   HTTP remote for its tools without credentials, grades them with
-  `@sayagain/lint`, and prints the outcome counts, the grade distribution,
+  `@sayagain/lint`, and prints the outcome counts (ok, auth,
+  refused, unreachable, not-mcp, no-tools, skipped), the grade distribution,
   the share of tools with a finding per rule, and M16 (tools without
   documented parameter constraints) with a 95% interval, the per-server
   view, the coverage statement, and the rule-set version. `--sample <n>
