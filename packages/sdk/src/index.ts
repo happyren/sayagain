@@ -17,6 +17,7 @@ export const META = {
   status: `${META_PREFIX}status`,
   held: `${META_PREFIX}held`,
   repair: `${META_PREFIX}repair`,
+  boundary: `${META_PREFIX}boundary`,
 } as const;
 
 /** Transport header carrying task-level intent (spec section 4). */

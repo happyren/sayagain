@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1                                        |
+| Status         | Draft v0.1.1                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -177,6 +177,21 @@ what the client sent.
 apply `model` repair (side-model regeneration) to a tool it has classified
 as non-read-only without first holding the call.
 
+### 5.5 `sh.sayagain/boundary` (object)
+
+Present on the `initialize` result when a boundary is in the path. A
+boundary MUST NOT alter `serverInfo`, `capabilities` or tool names to
+announce itself; this key is the only announcement.
+
+```json
+{ "name": "sayagain", "version": "0.1.0", "upstream": "notion", "ledger": "sqlite", "shim": false }
+```
+
+Clients MAY display it and MUST NOT require it. A boundary MAY additionally
+append one sentence to the `initialize` result's `instructions` naming the
+boundary and the meaning of the `held`, `repaired` and `queued` statuses;
+operators can turn that sentence off.
+
 ## 6. Held calls and the client
 
 When a call is held, the boundary returns a normal `tools/call` result with
@@ -235,3 +250,4 @@ and the schema shim (section 7) are optional features.
 ## 10. Changelog
 
 - v0.1 (2026-09-04): initial draft.
+- v0.1.1 (2026-09-04): added 5.5, the boundary announcement on `initialize`.
