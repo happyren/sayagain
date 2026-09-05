@@ -63,6 +63,7 @@ export const indexHtml = (version: string): string => `<!doctype html>
     <a href="#tools" data-screen="tools">Tools</a>
     <a href="#errors" data-screen="errors">Errors</a>
     <a href="#report" data-screen="report">Report</a>
+    <a href="#learn" data-screen="learn">Learn</a>
   </nav>
   <div class="tools">
     <label id="window">since <select id="since"><option value="24h">24 hours</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="90d">90 days</option></select></label>
@@ -78,6 +79,7 @@ export const indexHtml = (version: string): string => `<!doctype html>
   <section id="screen-tools" hidden><div id="tools"></div></section>
   <section id="screen-errors" hidden><div id="errors"></div></section>
   <section id="screen-report" hidden><div id="report"></div></section>
+  <section id="screen-learn" hidden><p><button id="learn-update" class="secondary">Update now</button></p><div id="learn"></div></section>
 </main>
 <script type="module" src="/ui/app.js"></script>
 </body>

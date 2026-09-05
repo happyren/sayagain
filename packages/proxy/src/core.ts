@@ -42,6 +42,7 @@ import {
   type JsonRpcRequest,
   parseMessage,
 } from "./jsonrpc.js";
+import { applyLearnedCoercions, augmentDescription, type LearnedStore } from "./learned.js";
 import type { Ledger } from "./ledger.js";
 import { DEFAULT_POLICY, type PolicyOptions, shouldHold, ToolClassifier } from "./policy.js";
 import { repairArguments } from "./repair.js";
@@ -68,6 +69,8 @@ export interface BoundaryCoreOptions {
   /** Start the upstream again after it exited, on the next message. Default false (wrap); the daemon sets true. */
   restartUpstream?: boolean;
   clientInfo?: { name: string; version: string };
+  /** The learning loop's interventions for this deployment. */
+  learned?: LearnedStore;
 }
 
 interface SessionEntry {
@@ -720,8 +723,20 @@ export class Boundary extends EventEmitter {
     const tool = typeof msg.params?.name === "string" ? msg.params.name : "";
     await this.untilWarm();
     if (!this.classifier.warm) this.warmClassifier();
-    const text = `${JSON.stringify(msg)}\n`;
-    const call = describeCall(msg, text, this.classifier.classOf(tool), Buffer.byteLength(text));
+    const toolClass = this.classifier.classOf(tool);
+    // A learned coercion changes the arguments before a safe call leaves; a write keeps the
+    // 0.3 rule (arguments change only after a failure, and then behind a hold).
+    let outgoing = msg;
+    let learned: ReturnType<typeof applyLearnedCoercions> = null;
+    if (this.opts.learned && (toolClass === "read-only" || toolClass === "idempotent-write")) {
+      const rules = this.opts.learned.coercionsFor(this.name, tool, this.state.upstreamName);
+      if (rules.length) learned = applyLearnedCoercions(msg.params?.arguments, rules);
+      if (learned)
+        outgoing = { ...msg, params: { ...(msg.params ?? {}), arguments: learned.arguments } };
+    }
+    const text = `${JSON.stringify(outgoing)}\n`;
+    const call = describeCall(outgoing, text, toolClass, Buffer.byteLength(text));
+    if (learned) call.repairs = learned.changes;
     const routed = this.idMap.get(keyOf(msg.id));
     if (routed && !routed.session.ephemeral) call.session = routed.session.id;
     call.server = this.name;
@@ -781,8 +796,11 @@ export class Boundary extends EventEmitter {
     }
     if (failure.errorClass === "coercible" && this.policy.repair && call.repairs.length === 0) {
       const used = this.repairBudget.get(this.budgetKey(call, now)) ?? 0;
-      if (used < this.policy.repairsPerTask && this.classifier.schemaOf(call.tool) !== undefined)
-        return "repair";
+      const canRepair =
+        this.classifier.schemaOf(call.tool) !== undefined ||
+        (this.opts.learned?.coercionsFor(this.name, call.tool, this.state.upstreamName).length ??
+          0) > 0;
+      if (used < this.policy.repairsPerTask && canRepair) return "repair";
     }
     return "final";
   }
@@ -804,7 +822,14 @@ export class Boundary extends EventEmitter {
       return true;
     }
     if (action === "repair") {
-      const repaired = repairArguments(call.arguments, this.classifier.schemaOf(call.tool));
+      const repaired =
+        repairArguments(call.arguments, this.classifier.schemaOf(call.tool)) ??
+        (this.opts.learned
+          ? applyLearnedCoercions(
+              call.arguments,
+              this.opts.learned.coercionsFor(this.name, call.tool, this.state.upstreamName),
+            )
+          : null);
       if (!repaired) return false;
       // The attempt row describes what failed: the shape before the repair.
       const attemptRow = failedAttemptRow(call, this.state.upstreamName, failure, bytes, now);
@@ -1011,6 +1036,8 @@ export class Boundary extends EventEmitter {
       shim: false,
       hold: this.policy.hold,
       rewriteErrors: this.policy.rewriteErrors,
+      learnedHint: (tool: string, signature: string) =>
+        this.opts.learned?.hintFor(this.name, tool, signature, this.state.upstreamName),
     };
     const { message, swallow, row, tools, probed, remember, call } = rewriteServerMessage(
       msg,
@@ -1048,6 +1075,30 @@ export class Boundary extends EventEmitter {
       }
     }
     if (swallow) return;
+    if (tools !== undefined && this.opts.learned) this.augmentTools(message);
     this.deliver(message);
+  }
+
+  /** Append the loop's facts to the descriptions a host sees; the upstream's text is kept intact. */
+  private augmentTools(message: JsonRpcMessage): void {
+    const learned = this.opts.learned;
+    if (
+      !learned ||
+      !("result" in message) ||
+      typeof message.result !== "object" ||
+      message.result === null
+    )
+      return;
+    const result = message.result as { tools?: unknown };
+    if (!Array.isArray(result.tools)) return;
+    result.tools = result.tools.map((t) => {
+      if (typeof t !== "object" || t === null || typeof (t as { name?: unknown }).name !== "string")
+        return t;
+      const tool = t as { name: string; description?: unknown };
+      const facts = learned.factsFor(this.name, tool.name, this.state.upstreamName);
+      if (!facts.length) return t;
+      const description = augmentDescription(tool.description, facts);
+      return description === undefined ? t : { ...tool, description };
+    });
   }
 }

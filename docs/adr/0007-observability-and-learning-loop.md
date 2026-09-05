@@ -133,7 +133,8 @@ enough to say "this tool fails on `fields` for most people".
 - `sayagain errors [tool]` — signatures with counts, class, turns,
   recovery path and shape change (0.6).
 - `sayagain learn` — the current learned coercions, augmentations and
-  hints, each with its before and after numbers and a `--revert` (0.8).
+  hints, each with its before and after numbers and a `--revert` (0.8:
+  interventions 1, 2, 3 and 6 of the loop; 4 and 5 later).
 - `sayagain report --weekly` — the one page from `docs/measurement.md`
   section 6, plus the top five signatures (0.6; the annualised cost waits
   for token counts from a host).

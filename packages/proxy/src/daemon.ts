@@ -23,6 +23,7 @@ import { summarizeDeadLetter, summarizeHold } from "./control.js";
 import { Boundary } from "./core.js";
 import { type Decision, type Hold, HoldQueue } from "./holds.js";
 import { isRequest, isResponse, type JsonRpcMessage, keyOfId, parseMessage } from "./jsonrpc.js";
+import { LearnedStore, upstreamReport } from "./learned.js";
 import type { OtlpExporter } from "./otlp.js";
 import {
   loadRegistry,
@@ -55,6 +56,10 @@ export interface DaemonOptions {
   onShutdown?: () => void;
   /** Export one span per call to an OTLP/HTTP collector. */
   otlp?: OtlpExporter;
+  /** The learning loop's store; default ~/.sayagain/learned.json. */
+  learned?: LearnedStore;
+  /** How often the loop re-reads the ledger and measures its interventions. Default 10 minutes. */
+  learnEveryMs?: number;
 }
 
 export interface Daemon {
@@ -64,6 +69,7 @@ export interface Daemon {
   url: string;
   holds: HoldQueue;
   boundaries: Map<string, Boundary>;
+  learned: LearnedStore;
   close(): Promise<void>;
 }
 
@@ -164,6 +170,25 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const token = options.token ?? randomBytes(24).toString("base64url");
   const tokenBuf = Buffer.from(token);
   const holds = new HoldQueue();
+  const learned = options.learned ?? new LearnedStore();
+  const relearn = () => {
+    try {
+      const { added, reverted } = learned.reconcile(options.stores.readLedger());
+      if (added.length || reverted.length || learned.list().length) learned.save();
+      for (const i of added)
+        log(
+          `sayagain: learned ${i.kind} for ${i.server}/${i.tool}: ${i.fact ?? i.rule} (${i.evidence} occurrences)`,
+        );
+      for (const i of reverted) log(`sayagain: reverted ${i.id}: ${i.reason}`);
+      if (added.length || reverted.length)
+        emitEvent("learned", {
+          added: added.map((i) => i.id),
+          reverted: reverted.map((i) => i.id),
+        });
+    } catch (err) {
+      log(`sayagain: learning pass failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
   const boundaries = new Map<string, Boundary>();
   const hostSessions = new Map<string, HostSession>();
   const sseClients = new Set<ServerResponse>();
@@ -248,6 +273,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       announce: config.announce ?? true,
       log,
       restartUpstream: true,
+      learned,
       policy: {
         ...(config.classes ? { classes: config.classes } : {}),
         ...(config.hold ? { hold: config.hold } : {}),
@@ -532,6 +558,40 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return json(res, 200, buildReport(a.rows, { since: a.since, minCalls: a.minCalls }));
     }
     const path = url.pathname;
+    if (req.method === "GET" && path === "/api/learn")
+      return json(res, 200, { updatedAt: learned.updatedAt, interventions: learned.list() });
+    if (req.method === "POST" && path === "/api/learn/update") {
+      relearn();
+      return json(res, 200, { updatedAt: learned.updatedAt, interventions: learned.list() });
+    }
+    const learnState = path.match(/^\/api\/learn\/([^/]+)\/(revert|enable)$/);
+    if (req.method === "POST" && learnState) {
+      const id = decodeURIComponent(learnState[1] ?? "");
+      const ok = learned.setState(
+        id,
+        learnState[2] === "enable" ? "active" : "disabled",
+        learnState[2] === "enable" ? undefined : "disabled by the operator",
+      );
+      if (ok) {
+        learned.save();
+        emitEvent("learned", { changed: [id] });
+      }
+      return json(
+        res,
+        ok ? 200 : 404,
+        ok ? { id, state: learned.get(id)?.state } : { error: `no intervention ${id}` },
+      );
+    }
+    const learnReport = path.match(/^\/api\/learn\/report\/([^/]+)$/);
+    if (req.method === "GET" && learnReport) {
+      const server = decodeURIComponent(learnReport[1] ?? "");
+      const text = upstreamReport(server, options.stores.readLedger(), learned);
+      res.writeHead(200, {
+        "content-type": "text/markdown; charset=utf-8",
+        "content-length": Buffer.byteLength(text),
+      });
+      return res.end(text);
+    }
     if (req.method === "GET" && path === "/api/health") {
       return json(res, 200, {
         ok: true,
@@ -692,6 +752,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const infoHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
   const daemonUrl = `http://${infoHost}:${boundPort}`;
 
+  relearn();
+  const learnTimer = setInterval(relearn, options.learnEveryMs ?? 600_000);
+  learnTimer.unref();
   const idleSweep = setInterval(() => {
     const cutoff = Date.now() - (options.sessionIdleMs ?? 1_800_000);
     for (const [id, s] of hostSessions)
@@ -729,11 +792,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     url: daemonUrl,
     holds,
     boundaries,
+    learned,
     close: () => {
       if (closed) return closed;
       closing = true;
       closed = (async () => {
         clearInterval(idleSweep);
+        clearInterval(learnTimer);
         await Promise.all([...boundaries.values()].map((b) => b.close()));
         await options.otlp?.close();
         const streams = [...sseClients, ...[...hostSessions.values()].map((s) => s.stream)];

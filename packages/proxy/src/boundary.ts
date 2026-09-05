@@ -74,6 +74,8 @@ export interface BoundaryOptions {
   shim: boolean;
   hold?: string;
   rewriteErrors?: boolean;
+  /** A sentence the learning loop appends to an error whose signature it has seen fixed before. */
+  learnedHint?: (tool: string, signature: string) => string | undefined;
 }
 
 export const ANNOUNCEMENT =
@@ -238,6 +240,11 @@ export function withArguments(rawLine: string, args: unknown, id?: JsonRpcId): s
   if (id !== undefined) out.id = id;
   return JSON.stringify(out);
 }
+
+const hintText = (opts: BoundaryOptions, tool: string, signature: string): string => {
+  const hint = opts.learnedHint?.(tool, signature);
+  return hint ? ` ${hint}` : "";
+};
 
 const stampMeta = (result: Record<string, unknown>, entries: Record<string, unknown>): void => {
   result._meta = { ...((result._meta as Record<string, unknown> | undefined) ?? {}), ...entries };
@@ -430,14 +437,15 @@ export function rewriteServerMessage(
       const content = Array.isArray(result.content) ? [...result.content] : [];
       content.push({
         type: "text",
-        text: guidanceFor({
-          errorClass: failure.errorClass,
-          attempts: call.attempts,
-          repaired: call.repairs.length > 0,
-          receipt: call.receipt,
-          status: status === "dead-lettered" ? "dead-lettered" : "executed",
-          tool: call.tool,
-        }),
+        text:
+          guidanceFor({
+            errorClass: failure.errorClass,
+            attempts: call.attempts,
+            repaired: call.repairs.length > 0,
+            receipt: call.receipt,
+            status: status === "dead-lettered" ? "dead-lettered" : "executed",
+            tool: call.tool,
+          }) + hintText(opts, call.tool, failure.signature),
       });
       result.content = content;
     }

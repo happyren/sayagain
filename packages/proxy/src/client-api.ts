@@ -114,6 +114,39 @@ export async function daemonToolsList(name: string): Promise<unknown[] | null> {
   return msg.result?.tools ?? [];
 }
 
+/** The daemon's learning-loop state, or null when no daemon is live. */
+export async function daemonLearn(
+  action?: { update?: true } | { id: string; state: "revert" | "enable" },
+): Promise<{ updatedAt: string; interventions: unknown[] } | { id: string; state: string } | null> {
+  const d = await liveDaemon();
+  if (!d) return null;
+  if (!action)
+    return (await (await daemonFetch(d, "/api/learn")).json()) as {
+      updatedAt: string;
+      interventions: unknown[];
+    };
+  if (!("id" in action))
+    return (await (await daemonFetch(d, "/api/learn/update", { method: "POST" })).json()) as {
+      updatedAt: string;
+      interventions: unknown[];
+    };
+  const res = await daemonFetch(d, `/api/learn/${encodeURIComponent(action.id)}/${action.state}`, {
+    method: "POST",
+  });
+  if (!res.ok)
+    throw new Error(
+      ((await res.json()) as { error?: string }).error ?? `daemon answered ${res.status}`,
+    );
+  return (await res.json()) as { id: string; state: string };
+}
+
+/** The daemon's tool definition report for a server, or null when no daemon is live. */
+export async function daemonLearnReport(server: string): Promise<string | null> {
+  const d = await liveDaemon();
+  if (!d) return null;
+  return (await daemonFetch(d, `/api/learn/report/${encodeURIComponent(server)}`)).text();
+}
+
 /** The daemon's ledger tail, or null when no daemon is live. */
 export async function daemonLedger(tail: number): Promise<LedgerRow[] | null> {
   const d = await liveDaemon();
