@@ -232,6 +232,12 @@ Explicitly not built
 
 ## Independent of the phases
 
+- The proof (docs/measurement.md 5.4): `serve --arm coinflip` and
+  `report --ab` run the pre-registered A/B on the operator's own agents:
+  a control arm that observes only, against the boundary as shipped
+  (0.13.0, ADR-0011). The domain purchase and the whitepaper launch (5.5)
+  wait on its verdict.
+
 The whitepaper can ship any time after the registry scan. The desktop
 shell (the former 0.10) is deferred until a phase needs it; the page served
 by the daemon covers the operator today.

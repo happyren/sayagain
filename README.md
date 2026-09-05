@@ -91,6 +91,9 @@ sayagain lint --registry --sample 400 # scan a seeded sample of 400 registry ser
                                      # they list without credentials, print the grade distribution and M16 with the rule-set version
 sayagain contribute                  # build the ADR-0009 shape document from your history, write and show it, send only after a y
                                      # (no index endpoint exists yet: without --endpoint the command stops after writing)
+sayagain import --host claude-code --rewrite --no-start   # the proof (docs/measurement.md 5.4, ADR-0011): point the host at Say Again,
+sayagain serve --arm coinflip --detach                    # run the daemon with each host session in control (observe only) or treatment,
+sayagain report --ab                                      # and after two weeks or 2,000 calls per arm read both arms with 95% intervals
 sayagain learn                       # what the loop learned from your ledger: coercions and hints, each with before and after numbers
                                      # (it advises; `learn --apply <id>` lets one coercion change read-only calls before they leave)
 ```

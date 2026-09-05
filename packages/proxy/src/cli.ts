@@ -13,6 +13,9 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { grade, lintTool, type ToolDefinition } from "@sayagain/lint";
 import {
+  type ArmDiff as AbDiff,
+  type AbReport,
+  abReport,
   report as buildReport,
   parseSince,
   type Report,
@@ -21,6 +24,7 @@ import {
   toolStats,
 } from "./analysis.js";
 import { renderAuditHtml, renderAuditText, runAudit } from "./audit.js";
+import { type ArmMode, isArmMode } from "./boundary.js";
 import {
   allDeadLetters,
   allHolds,
@@ -109,9 +113,14 @@ const USAGE = `sayagain ${PROXY_VERSION}
       --no-rewrite-errors      do not append guidance to failures
       --otlp <url>|off         export one span per call (default: $OTEL_EXPORTER_OTLP_ENDPOINT, else a local collector on :4318; serve remembers it in config.json; SAYAGAIN_OTLP=off disables machine-wide)
       --no-learn               ignore ~/.sayagain/learned.json (the loop's coercions and hints)
-  sayagain serve [--listen 127.0.0.1:7777] [--store jsonl|sqlite] [--db <path>] [--otlp <url>|off] [--detach]
+      --arm control|treatment|coinflip|daily   the A/B arm for this process (docs/measurement.md 5.4; daily follows the calendar)
+  sayagain serve [--listen 127.0.0.1:7777] [--store jsonl|sqlite] [--db <path>] [--otlp <url>|off] [--arm <mode>] [--detach]
       Run the daemon: one virtual server per registered upstream at /mcp/<name>, plus the control API.
       The bearer token is in ~/.sayagain/token. SAYAGAIN_HOME moves every file elsewhere.
+      --arm control|treatment|coinflip|daily|off runs the A/B protocol: control forwards and records only (no
+      hold, dedupe, retry, repair, learned coercion, hint, guidance, augmented descriptions or announcement);
+      treatment is the boundary as shipped; coinflip assigns each host session; daily gives every session of a
+      UTC day the same arm and follows the calendar. Persists in config.json until --arm off.
   sayagain add <name> [--url <url>] [--header k=v]... [--env K[=V]]... [--cwd <dir>] [--class t=c]... [--hold m] [-- <command> [args...]]
       Register an upstream (stdio command, or --url for Streamable HTTP). --env K alone stores "\${K}",
       resolved from the daemon's environment at spawn; so does a \${VAR} inside --header or --env values.
@@ -137,6 +146,11 @@ const USAGE = `sayagain ${PROXY_VERSION}
   sayagain report [--since 7d | --weekly] [--server <name>] [--ledger <path>] [--json]
       The weekly page from docs/measurement.md section 6, from the ledger alone, with the previous window for comparison.
       --server takes the registry name or the upstream's own name. Rows come from the running daemon, else the store.
+  sayagain report --ab [--since 30d] [--json]
+      The A/B protocol's page (docs/measurement.md 5.4): both arms side by side, then the differences with 95%
+      intervals, risk first (unacknowledged writes per 1K writes, the failure tax in bytes per call, the failure
+      rate), and the verdict against the pre-registered minimum of two weeks or 2,000 calls per arm, whichever
+      is later. Rows without an arm (calls outside the experiment) are counted and left out.
   sayagain learn [--update] [--min-evidence 3] [--json]
       What the loop has learned from your own ledger: coercions offered as repairs, facts appended to tool
       descriptions and errors; each with its before and after numbers, reverted by itself when it does not help.
@@ -279,6 +293,77 @@ const kib = (n: number): string =>
   n < 1024 ? `${Math.round(n)} B` : `${(n / 1024).toFixed(1)} KiB`;
 const when = (iso: string): string => iso.slice(0, 16).replace("T", " ");
 
+/** The A/B page: both arms side by side, then the differences with their intervals. */
+function renderAbReport(r: AbReport): string {
+  const out: string[] = [];
+  const c = r.arms.control;
+  const t = r.arms.treatment;
+  const line = (label: string, a: string | number, b: string | number) =>
+    out.push(`  ${label.padEnd(30)} ${String(a).padStart(14)} ${String(b).padStart(14)}`);
+  out.push(
+    `Say Again A/B: ${when(r.window.since)} to ${when(r.window.until)} UTC (${r.window.days} days); target ${r.targetCallsPerArm} calls per arm (docs/measurement.md 5.4)`,
+  );
+  if (r.experiment.first && r.experiment.last)
+    out.push(
+      `Armed rows from ${when(r.experiment.first)} to ${when(r.experiment.last)} UTC (${r.experiment.days} days; minimum ${r.minimumDays} days or ${r.targetCallsPerArm} calls per arm, whichever is later)`,
+    );
+  out.push("");
+  line("", "control", "treatment");
+  line("calls", c.calls, t.calls);
+  line("sessions (clusters)", c.sessions, t.sessions);
+  line("writes", c.writes, t.writes);
+  line(
+    "failures (M1)",
+    `${c.failures} (${c.failureRatePct}%)`,
+    `${t.failures} (${t.failureRatePct}%)`,
+  );
+  line(
+    "unacknowledged writes (M9)",
+    `${c.unacknowledged} (${c.unacknowledgedPer1kWrites}/1K)`,
+    `${t.unacknowledged} (${t.unacknowledgedPer1kWrites}/1K)`,
+  );
+  line("failure tax, bytes per call", c.recoveryBytesPerCall, t.recoveryBytesPerCall);
+  line(
+    "retried / identical (M2, M3)",
+    `${c.recovery.retryRatePct}% / ${c.recovery.identicalRetryPct}%`,
+    `${t.recovery.retryRatePct}% / ${t.recovery.identicalRetryPct}%`,
+  );
+  line("median calls to recover (M17)", c.recovery.medianCalls, t.recovery.medianCalls);
+  line(
+    "boundary: retried / repaired",
+    `${c.boundary.retried} / ${c.boundary.repaired}`,
+    `${t.boundary.retried} / ${t.boundary.repaired}`,
+  );
+  line(
+    "boundary: held ok / rejected",
+    `${c.boundary.held} / ${c.boundary.rejected}`,
+    `${t.boundary.held} / ${t.boundary.rejected}`,
+  );
+  line(
+    "boundary: dead-lettered / dedup",
+    `${c.boundary.deadLettered} / ${c.boundary.deduplicated}`,
+    `${t.boundary.deadLettered} / ${t.boundary.deduplicated}`,
+  );
+  out.push("");
+  out.push("Differences, control minus treatment (95% interval; positive favours the boundary)");
+  const d = r.differences;
+  const show = (label: string, x: AbDiff, unit: string) => {
+    const interval = x.low === null || x.high === null ? "not estimable" : `${x.low} to ${x.high}`;
+    out.push(
+      `  ${label.padEnd(30)} ${String(x.delta).padStart(8)} ${unit.padEnd(14)} ${interval.padEnd(20)} ${x.distinguishable ? "distinguishable from zero" : "not distinguishable"}`,
+    );
+  };
+  // Risk first, then cost (ADR-0009 decision 2).
+  show("unacknowledged (primary, risk)", d.unacknowledgedPer1kWrites, "per 1K writes");
+  show("failure tax (primary, cost)", d.recoveryBytesPerCall, "bytes/call");
+  show("failure rate (secondary)", d.failureRatePct, "points");
+  out.push("");
+  out.push(`Verdict: ${r.verdict}`);
+  if (r.outside) out.push(`Rows outside the experiment (no arm): ${r.outside}`);
+  out.push("");
+  return `${out.join("\n")}\n`;
+}
+
 /** The one page, in the order docs/measurement.md section 6 asks for. */
 function renderReport(r: Report): string {
   const out: string[] = [];
@@ -375,6 +460,9 @@ export async function main(argv: string[]): Promise<number> {
     const retry = takeNumber(opts, "--retry");
     const noRepair = takeFlag(opts, "--no-repair");
     const noRewrite = takeFlag(opts, "--no-rewrite-errors");
+    const armOption = takeOption(opts, "--arm");
+    if (armOption !== undefined && !isArmMode(armOption))
+      throw new UsageError("wrap: --arm must be control, treatment, coinflip or daily");
     const wrapOtlp = takeOption(opts, "--otlp");
     const noLearn = takeFlag(opts, "--no-learn");
     const classes = parseClassOverrides(takeAll(opts, "--class"));
@@ -409,6 +497,7 @@ export async function main(argv: string[]): Promise<number> {
       });
       process.stderr.write(`sayagain: exporting spans to ${wrapOtlpEndpoint}\n`);
     }
+    if (armOption) wrapOptions.arm = armOption as ArmMode;
     const { done } = wrap(wrapOptions);
     return done;
   }
@@ -419,6 +508,9 @@ export async function main(argv: string[]): Promise<number> {
     const store = takeOption(opts, "--store");
     const db = takeOption(opts, "--db");
     const otlpOption = takeOption(opts, "--otlp");
+    const armOption = takeOption(opts, "--arm");
+    if (armOption !== undefined && armOption !== "off" && !isArmMode(armOption))
+      throw new UsageError("serve: --arm must be control, treatment, coinflip, daily or off");
     const detach = takeFlag(opts, "--detach");
     if (opts.length) throw new UsageError(`serve: unknown option ${opts[0]}`);
     if (store !== undefined && store !== "jsonl" && store !== "sqlite")
@@ -438,6 +530,7 @@ export async function main(argv: string[]): Promise<number> {
         ...(store ? ["--store", store] : []),
         ...(db ? ["--db", db] : []),
         ...(otlpOption ? ["--otlp", otlpOption] : []),
+        ...(armOption ? ["--arm", armOption] : []),
       ]);
       const child = spawn(file, args, { detached: true, stdio: "ignore", env: process.env });
       child.on("error", () => undefined);
@@ -475,6 +568,14 @@ export async function main(argv: string[]): Promise<number> {
       registry.daemon = { ...(registry.daemon ?? {}), otlp: otlpOption };
       saveRegistry(registry);
     }
+    // The experiment's arm mode persists like the collector, so a daemon the shim restarts keeps it; `--arm off` ends it.
+    if (armOption !== undefined && registry.daemon?.arm !== armOption) {
+      registry.daemon = { ...(registry.daemon ?? {}), arm: armOption as ArmMode | "off" };
+      saveRegistry(registry);
+    }
+    const persistedArm = armOption ?? registry.daemon?.arm;
+    const armMode: ArmMode | undefined =
+      persistedArm && persistedArm !== "off" ? (persistedArm as ArmMode) : undefined;
     const otlpEndpoint = await resolveOtlpEndpoint(otlpOption ?? registry.daemon?.otlp);
     if (otlpEndpoint) {
       daemonOptions.otlp = new OtlpExporter({
@@ -486,6 +587,7 @@ export async function main(argv: string[]): Promise<number> {
       process.stderr.write(`sayagain: exporting spans to ${otlpEndpoint}\n`);
     }
     if (listen !== undefined) daemonOptions.listen = listen;
+    if (armMode) daemonOptions.arm = armMode;
     const daemon = await startDaemon(daemonOptions);
     process.stderr.write(
       `sayagain ${PROXY_VERSION} serving ${Object.keys(registry.servers).length} upstream(s) at ${daemon.url} (store: ${stores.kind}; token in ${tokenPath()})\n`,
@@ -620,7 +722,7 @@ export async function main(argv: string[]): Promise<number> {
       return 1;
     }
     process.stdout.write(
-      `daemon pid ${s.info.pid} at ${daemonBaseUrl(s.info)} since ${s.info.startedAt} (version ${s.info.version}; spans ${typeof s.health.otlp === "string" ? `to ${s.health.otlp}` : "not exported"})\n`,
+      `daemon pid ${s.info.pid} at ${daemonBaseUrl(s.info)} since ${s.info.startedAt} (version ${s.info.version}; spans ${typeof s.health.otlp === "string" ? `to ${s.health.otlp}` : "not exported"}${typeof s.health.arm === "string" ? `; A/B arms: ${s.health.arm}` : ""})\n`,
     );
     for (const srv of s.servers as {
       name: string;
@@ -866,8 +968,10 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (command === "tools" || command === "errors" || command === "report") {
     const opts = [...rest];
+    const ab = command === "report" && takeFlag(opts, "--ab");
     const weekly = takeFlag(opts, "--weekly");
-    const sinceOption = takeOption(opts, "--since") ?? "7d";
+    // The A/B page defaults to the experiment's scale, a month, so a four-week proof is not read as its last week.
+    const sinceOption = takeOption(opts, "--since") ?? (ab ? "30d" : "7d");
     const server = takeOption(opts, "--server");
     const ledgerOption = takeOption(opts, "--ledger");
     const minCallsRaw = command === "tools" ? takeNumber(opts, "--min-calls") : undefined;
@@ -942,6 +1046,11 @@ export async function main(argv: string[]): Promise<number> {
         if (x.topShapeChange) process.stdout.write(`    shape change: ${x.topShapeChange}\n`);
         process.stdout.write(`    suggestion: ${x.suggestion}\n`);
       }
+      return 0;
+    }
+    if (ab) {
+      const r = abReport(rows, analysis);
+      process.stdout.write(json ? `${JSON.stringify(r, null, 2)}\n` : renderAbReport(r));
       return 0;
     }
     const r = buildReport(rows, analysis);

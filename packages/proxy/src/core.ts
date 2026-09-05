@@ -28,6 +28,7 @@ import {
   registerPending,
   rewriteServerMessage,
   shapeOf,
+  unansweredResponse,
   withArguments,
 } from "./boundary.js";
 import type { ReplayOutcome } from "./control.js";
@@ -421,7 +422,11 @@ export class Boundary extends EventEmitter {
       if (session.bidirectional !== false) this.safeSend(session, msg);
   }
 
-  private initializeResponse(clientId: JsonRpcId, base: Record<string, unknown>): JsonRpcMessage {
+  private initializeResponse(
+    clientId: JsonRpcId,
+    base: Record<string, unknown>,
+    announce: boolean,
+  ): JsonRpcMessage {
     const result = { ...base };
     const boundary: Record<string, unknown> = {
       name: BOUNDARY_NAME,
@@ -435,7 +440,7 @@ export class Boundary extends EventEmitter {
       ...((result._meta as Record<string, unknown> | undefined) ?? {}),
       [META.boundary]: boundary,
     };
-    if (this.opts.announce) {
+    if (this.opts.announce && announce) {
       const existing = typeof result.instructions === "string" ? result.instructions.trimEnd() : "";
       result.instructions = existing ? `${existing}\n\n${ANNOUNCEMENT}` : ANNOUNCEMENT;
     }
@@ -476,7 +481,11 @@ export class Boundary extends EventEmitter {
         });
         return;
       }
-      this.safeSend(session, this.initializeResponse(msg.id, this.initResult));
+      // The control arm's model reads nothing from the boundary, not even the announcement.
+      this.safeSend(
+        session,
+        this.initializeResponse(msg.id, this.initResult, session.arm !== "control"),
+      );
       return;
     }
     if ("method" in msg && msg.method === "notifications/initialized") return;
@@ -612,6 +621,14 @@ export class Boundary extends EventEmitter {
       text: reason,
     };
     const row = failedAttemptRow(call, this.state.upstreamName, failure, 0, Date.now());
+    if (call.arm === "control") {
+      // Observe only: the row records the unanswered call; no dead letter, no replay sentence for the model.
+      this.record(row);
+      this.settle(call, null);
+      if (!this.state.ownIds.delete(keyOf(call.id))) this.deliver(unansweredResponse(call, reason));
+      this.resolveWaiter(call, { isError: true, text: reason });
+      return;
+    }
     row.status = "dead-lettered";
     this.record(row);
     this.recordDeadLetter(call, row.errorClass ?? "retryable", reason);
@@ -650,6 +667,7 @@ export class Boundary extends EventEmitter {
       mode,
     };
     if (call.intent !== undefined) hold.intent = call.intent;
+    if (call.arm !== undefined) hold.arm = call.arm;
     this.holds.create(hold);
     this.emit("hold", hold);
     call.held = { reason, mode };
@@ -732,12 +750,16 @@ export class Boundary extends EventEmitter {
     await this.untilWarm();
     if (!this.classifier.warm) this.warmClassifier();
     const toolClass = this.classifier.classOf(tool);
+    // The A/B control arm (docs/measurement.md 5.4) forwards every call as it came and records
+    // it; nothing below that changes a call, a result or its timing runs for it.
+    const routed = this.idMap.get(keyOf(msg.id));
+    const arm = routed?.session.arm;
     // A learned coercion the operator switched to "apply" changes the arguments before a read-only
     // call leaves (ADR-0009: the loop advises by default). Everything else keeps the 0.3 rule:
     // arguments change only after a failure, and a write's then wait behind a hold.
     let outgoing = msg;
     let learned: ReturnType<typeof applyLearnedCoercions> = null;
-    if (this.opts.learned && toolClass === "read-only") {
+    if (this.opts.learned && toolClass === "read-only" && arm !== "control") {
       this.opts.learned.maybeReload();
       const rules = this.opts.learned.coercionsFor(this.name, tool, this.state.upstreamName, true);
       if (rules.length) learned = applyLearnedCoercions(msg.params?.arguments, rules);
@@ -752,9 +774,13 @@ export class Boundary extends EventEmitter {
       // Dedupe and identical-retry detection compare what the client sent, not what left.
       call.clientArgsHash = hashArgs(msg.params?.arguments);
     }
-    const routed = this.idMap.get(keyOf(msg.id));
     if (routed && !routed.session.ephemeral) call.session = routed.session.id;
     call.server = this.name;
+    if (arm !== undefined) call.arm = arm;
+    if (arm === "control") {
+      this.forward(call); // no dedupe, no hold: observe only
+      return;
+    }
 
     // DISREGARD: one identity per call; a concurrent duplicate waits for the first result,
     // off the session's chain so it does not block the host's later calls.
@@ -822,6 +848,7 @@ export class Boundary extends EventEmitter {
 
   /** Try to recover a failed call. Returns true when the response was consumed and must not be forwarded. */
   private recover(call: PendingCall, failure: Failure, bytes: number): boolean {
+    if (call.arm === "control") return false; // the control arm never retries, repairs or holds
     const now = Date.now();
     const action = this.decideOnFailure(call, failure, now);
     if (action === "retry") {
@@ -940,6 +967,7 @@ export class Boundary extends EventEmitter {
     const call = describeCall(req, rawLine, hold.toolClass, Buffer.byteLength(rawLine));
     call.receipt = hold.receipt;
     if (hold.intent !== undefined) call.intent = hold.intent;
+    if (hold.arm !== undefined) call.arm = hold.arm;
     call.held = {
       reason: hold.reason,
       mode: (hold.mode as HoldMode | undefined) ?? "pre",
@@ -1044,15 +1072,31 @@ export class Boundary extends EventEmitter {
     const failure = pending ? failureOf(msg) : null;
     if (pending && failure && this.recover(pending, failure, bytes)) return;
 
+    // In the control arm the model sees the upstream's words: no guidance, no learned hint.
+    const armOfResponse =
+      "id" in msg && msg.id !== null && msg.id !== undefined
+        ? this.idMap.get(keyOf(msg.id))?.session.arm
+        : undefined;
+    // The call's own arm decides; the session's is the fallback for responses with no pending call
+    // (tools/list), so a daily session that crosses midnight mid-call keeps the arm its row carries.
+    const control = pending ? pending.arm === "control" : armOfResponse === "control";
     const opts = {
       version: this.opts.version,
       ledgerKind: this.opts.ledgerKind,
       announce: this.opts.announce,
       shim: false,
       hold: this.policy.hold,
-      rewriteErrors: this.policy.rewriteErrors,
+      rewriteErrors: this.policy.rewriteErrors && !control,
       learnedHint: (tool: string, signature: string, applied: string[]) =>
-        this.opts.learned?.hintFor(this.name, tool, signature, this.state.upstreamName, applied),
+        control
+          ? undefined
+          : this.opts.learned?.hintFor(
+              this.name,
+              tool,
+              signature,
+              this.state.upstreamName,
+              applied,
+            ),
     };
     const { message, swallow, row, tools, probed, remember, call } = rewriteServerMessage(
       msg,
@@ -1066,7 +1110,8 @@ export class Boundary extends EventEmitter {
     if (row && call && row.status === "dead-lettered")
       this.recordDeadLetter(call, row.errorClass ?? "other", row.errorSignature ?? "");
     if (call) {
-      if (remember) {
+      // Control results are not remembered: a control write must not answer a treatment duplicate.
+      if (remember && call.arm !== "control") {
         const key = DedupeCache.keyFor(call);
         const remembered: Remembered = {
           receipt: call.receipt,
@@ -1096,7 +1141,7 @@ export class Boundary extends EventEmitter {
         msg.id !== null &&
         msg.id !== undefined &&
         this.plainLists.delete(keyOf(msg.id));
-      if (!plain) this.augmentTools(message);
+      if (!plain && !control) this.augmentTools(message);
     }
     this.deliver(message);
   }

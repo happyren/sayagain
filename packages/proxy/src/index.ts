@@ -5,7 +5,12 @@
  */
 export { classify, META, PROWORD, REPAIR_BUDGET } from "@sayagain/sdk";
 export {
+  AB_MINIMUM_DAYS,
+  type AbReport,
   type AnalysisOptions,
+  type ArmDiff,
+  type ArmStats,
+  abReport,
   parseSince,
   type Recovery,
   type Report,
@@ -20,9 +25,18 @@ export {
 } from "./analysis.js";
 export type { Audit, AuditOptions, AuditSource, AuditTool } from "./audit.js";
 export { renderAuditHtml, renderAuditText, runAudit } from "./audit.js";
-export type { BoundaryOptions, BoundaryState, Failure, PendingCall, Rewrite } from "./boundary.js";
+export type {
+  Arm,
+  ArmMode,
+  BoundaryOptions,
+  BoundaryState,
+  Failure,
+  PendingCall,
+  Rewrite,
+} from "./boundary.js";
 export {
   ANNOUNCEMENT,
+  ARM_MODES,
   BOUNDARY_NAME,
   baseRow,
   createState,
@@ -31,10 +45,12 @@ export {
   failureOf,
   hashArgs,
   heldResponse,
+  isArmMode,
   newReceipt,
   observeClientMessage,
   ownToolsListRequest,
   pendingFor,
+  pickArm,
   registerPending,
   rewriteServerMessage,
   shapeOf,

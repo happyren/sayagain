@@ -68,10 +68,11 @@ function harness(
         clientInfo: { name: "t", version: "0" },
       },
     });
-    await waitFor("init");
+    const init = await waitFor("init");
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
     send({ jsonrpc: "2.0", id: "list", method: "tools/list", params: {} });
     await waitFor("list");
+    return init;
   };
   const finish = async () => {
     input.end();
@@ -550,6 +551,64 @@ describe("lifecycle", () => {
     } finally {
       await h.finish();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("in the control arm forwards, records and does nothing else", async () => {
+    const h = harness({ hold: "destructive" }, { arm: "control" });
+    try {
+      // The control arm's model reads nothing from the boundary: no announcement in instructions.
+      expect(JSON.stringify(await h.handshake())).not.toContain("Say Again");
+      // A coercible failure is not repaired: the upstream's error reaches the host as it was.
+      h.call(1, "strict", { limit: "10" });
+      const failed = await h.waitFor(1);
+      expect(JSON.stringify(failed)).toContain("Invalid params: limit must be a number");
+      expect(meta(failed)["sh.sayagain/status"]).toBe("executed");
+      expect(JSON.stringify(failed)).not.toContain("Say Again");
+      // A retryable failure on a read-only tool is not retried.
+      h.call(2, "flaky", { failTimes: 1 });
+      const timedOut = await h.waitFor(2);
+      expect(JSON.stringify(timedOut)).toContain("Request timed out");
+      // A destructive tool is not held.
+      h.call(3, "delete_page", { id: "p1" });
+      expect(meta(await h.waitFor(3))["sh.sayagain/status"]).toBe("executed");
+      // Two identical writes are both executed: no dedupe.
+      h.call(4, "create_page", { title: "same" });
+      h.call(5, "create_page", { title: "same" });
+      expect(meta(await h.waitFor(4))["sh.sayagain/status"]).toBe("executed");
+      expect(meta(await h.waitFor(5))["sh.sayagain/status"]).toBe("executed");
+      await h.finish();
+      const rows = h.ledger.rows;
+      expect(rows).toHaveLength(5);
+      expect(rows.every((r) => r.arm === "control")).toBe(true);
+      expect(rows.map((r) => r.status)).toEqual([
+        "executed",
+        "executed",
+        "executed",
+        "executed",
+        "executed",
+      ]);
+      expect(rows[0]).toMatchObject({ tool: "strict", isError: true, errorClass: "coercible" });
+      expect(rows[0]?.attempts).toBeUndefined();
+      expect(rows[0]?.repairs).toBeUndefined();
+      expect(rows[1]).toMatchObject({ tool: "flaky", isError: true, errorClass: "retryable" });
+      expect(rows[2]?.held).toBeUndefined();
+      expect(h.logs.some((l) => l.includes("runs in the control arm"))).toBe(true);
+    } finally {
+      await h.finish();
+    }
+  });
+
+  it("in the treatment arm behaves as shipped and stamps the arm on every row", async () => {
+    const h = harness({ hold: "destructive" }, { arm: "treatment" });
+    try {
+      expect(JSON.stringify(await h.handshake())).toContain("Say Again"); // the announcement, as shipped
+      h.call(1, "strict", { limit: "10" });
+      expect(meta(await h.waitFor(1))["sh.sayagain/status"]).toBe("repaired");
+      await h.finish();
+      expect(h.ledger.rows[0]).toMatchObject({ arm: "treatment", status: "repaired" });
+    } finally {
+      await h.finish();
     }
   });
 

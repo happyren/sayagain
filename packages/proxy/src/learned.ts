@@ -78,6 +78,9 @@ export interface LearnedFile {
 
 export const defaultLearnedPath = (): string => homePath("learned.json");
 
+/** The loop never sees the control arm: its rows have no coercion applied, so they would measure the loop's absence. */
+const treated = (rows: LedgerRow[]): LedgerRow[] => rows.filter((r) => r.arm !== "control");
+
 /** Facts appended to a tool description are delimited and attributed, and capped in length, prefix included. */
 export const AUGMENT_PREFIX = "[Say Again learned]";
 export const AUGMENT_CAP = 200;
@@ -176,9 +179,10 @@ const short = (s: string): string => {
 
 /** Interventions the evidence supports, whether or not they already exist. */
 export function deriveInterventions(
-  rows: LedgerRow[],
+  allRows: LedgerRow[],
   opts: { minEvidence?: number; now?: Date } = {},
 ): Intervention[] {
+  const rows = treated(allRows);
   const minEvidence = opts.minEvidence ?? 3;
   const now = (opts.now ?? new Date()).toISOString();
   const byId = new Map<string, Intervention>();
@@ -270,8 +274,13 @@ const medianCalls = (recs: { calls: number }[]): number => {
  * their rate, and the median calls to recover. Recovery windows run over the whole history, so a
  * failure just before a boundary is not cut short.
  */
-function liftOver(rows: LedgerRow[], i: Intervention, since: Date | undefined, until: Date): Lift {
-  const scoped = rows.filter(
+function liftOver(
+  allRows: LedgerRow[],
+  i: Intervention,
+  since: Date | undefined,
+  until: Date,
+): Lift {
+  const scoped = treated(allRows).filter(
     (r) => r.tool === i.tool && (r.upstream === i.server || r.server === i.server),
   );
   const inSpan = (r: LedgerRow) =>

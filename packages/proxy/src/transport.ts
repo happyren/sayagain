@@ -11,6 +11,8 @@ export interface Session {
   readonly bidirectional?: boolean;
   /** A one-shot session (one HTTP request): its id says nothing about the host, so rows do not carry it. */
   readonly ephemeral?: boolean;
+  /** The A/B arm this session was assigned (docs/measurement.md 5.4); undefined outside an experiment. */
+  readonly arm?: "control" | "treatment" | undefined;
 }
 
 export interface Upstream {

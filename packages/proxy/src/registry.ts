@@ -34,7 +34,15 @@ export interface ServerConfig {
 
 export interface Registry {
   servers: Record<string, ServerConfig>;
-  daemon?: { listen?: string; store?: Exclude<StoreKind, "memory">; db?: string; otlp?: string };
+  daemon?: {
+    listen?: string;
+    store?: Exclude<StoreKind, "memory">;
+    db?: string;
+    otlp?: string;
+    /** The A/B protocol's arm mode for the daemon (docs/measurement.md 5.4). */
+    /** The A/B arm mode `serve --arm` persisted; "off" ends the experiment and is what `--arm off` stores. */
+    arm?: "control" | "treatment" | "coinflip" | "daily" | "off";
+  };
   /** `sayagain contribute` settings (ADR-0009): contributor id, consent, endpoint, weekly. */
   contribute?: {
     contributor?: string;

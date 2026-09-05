@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { pickArm } from "./boundary.js";
 import { type Daemon, startDaemon } from "./daemon.js";
 import { LearnedStore } from "./learned.js";
 import { runStdioShim } from "./shim.js";
@@ -527,6 +528,92 @@ describe("daemon", () => {
     expect((await api(d, "/api/report?since=soon")) as { error: string }).toMatchObject({
       error: expect.stringContaining("duration"),
     });
+  });
+
+  it("assigns every host session an arm and stamps it on the rows", {
+    timeout: 15_000,
+  }, async () => {
+    const d = await boot("memory", { arm: "control" });
+    expect(await api(d, "/api/health")).toMatchObject({ arm: "control" });
+    const session = (await rpc(d, "fake", initMsg)).session ?? "";
+    expect(session).not.toBe("");
+    const call = (id: number) => ({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: "delete_page", arguments: { id: `p${id}` } },
+    });
+    const inSession = await rpc(d, "fake", call(2), { session });
+    expect(inSession.status).toBe(200);
+    const sessionless = await rpc(d, "fake", call(3)); // some hosts never send a session id
+    expect(sessionless.status).toBe(200);
+    const rows = (await api(d, "/api/ledger?tail=2")) as {
+      arm?: string;
+      status: string;
+      held?: unknown;
+    }[];
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row).toMatchObject({ arm: "control", status: "executed" }); // not held in control
+      expect(row.held).toBeUndefined();
+    }
+    expect(logs.some((l) => l.includes("in the control arm (control)"))).toBe(true);
+  });
+
+  it("reports the arm mode on health, none outside an experiment, and picks arms deterministically by day", {
+    timeout: 15_000,
+  }, async () => {
+    const daily = await boot("memory", { arm: "daily" });
+    expect(await api(daily, "/api/health")).toMatchObject({ arm: "daily" });
+    expect(["control", "treatment"]).toContain(pickArm("daily"));
+    expect(pickArm("daily", new Date("2026-09-06T00:00:00Z"))).toBe(
+      pickArm("daily", new Date("2026-09-06T23:59:59Z")),
+    );
+    const arms = new Set(
+      Array.from({ length: 31 }, (_, i) => pickArm("daily", new Date(Date.UTC(2026, 8, 1 + i)))),
+    );
+    expect(arms.size).toBe(2); // a month lands in both arms
+    expect(pickArm("control")).toBe("control");
+    expect(pickArm("treatment")).toBe("treatment");
+    expect(["control", "treatment"]).toContain(pickArm("coinflip"));
+    await daily.close();
+    const plain = await boot("memory");
+    expect(await api(plain, "/api/health")).toMatchObject({ arm: null });
+  });
+
+  it("pins the treatment arm, keeps one arm per session under coinflip, and gives sessionless calls one arm for the daemon's lifetime", {
+    timeout: 15_000,
+  }, async () => {
+    const call = (id: number) => ({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: "echo", arguments: { id } },
+    });
+    const pinned = await boot("memory", { arm: "treatment" });
+    expect(await api(pinned, "/api/health")).toMatchObject({ arm: "treatment" });
+    const pinnedSession = (await rpc(pinned, "fake", initMsg)).session ?? "";
+    expect((await rpc(pinned, "fake", call(2), { session: pinnedSession })).status).toBe(200);
+    const [pinnedRow] = (await api(pinned, "/api/ledger?tail=1")) as { arm?: string }[];
+    expect(pinnedRow?.arm).toBe("treatment"); // a pinned treatment run is inside the experiment
+    await pinned.close();
+
+    const flip = await boot("memory", { arm: "coinflip" });
+    const session = (await rpc(flip, "fake", initMsg)).session ?? "";
+    for (const id of [2, 3, 4])
+      expect((await rpc(flip, "fake", call(id), { session })).status).toBe(200);
+    for (const id of [5, 6, 7]) expect((await rpc(flip, "fake", call(id))).status).toBe(200);
+    const rows = (await api(flip, "/api/ledger?tail=6")) as { arm?: string; session?: string }[];
+    expect(rows).toHaveLength(6);
+    const inSession = rows.filter((r) => r.session === session);
+    const sessionless = rows.filter((r) => r.session !== session);
+    expect(inSession).toHaveLength(3);
+    expect(sessionless).toHaveLength(3);
+    expect(new Set(inSession.map((r) => r.arm)).size).toBe(1); // one coin per session
+    expect(new Set(sessionless.map((r) => r.arm)).size).toBe(1); // one coin per daemon for sessionless calls
+    expect(rows.every((r) => r.arm === "control" || r.arm === "treatment")).toBe(true);
+    expect(logs.some((l) => l.includes("calls without a session id run in the"))).toBe(true);
+    await flip.close();
   });
 
   it("applies a learned coercion before a safe call leaves, augments tools/list, hints on a known failure, and obeys revert", async () => {

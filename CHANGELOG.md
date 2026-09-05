@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-06
+
+### Added
+
+- The A/B protocol of `docs/measurement.md` 5.4, inside the boundary
+  (ADR-0011). `sayagain serve --arm coinflip` assigns each host session to
+  a control or a treatment arm (`--arm daily` gives every session of a
+  UTC day the same arm and follows the calendar; `--arm control` and
+  `--arm treatment` pin one arm; `--arm off` ends the experiment;
+  `sayagain wrap --arm` does the same for one process). The control arm
+  forwards every call as it came and records it: no hold, dedupe, retry,
+  repair, learned coercion, hint, description augmentation, guidance text
+  or announcement, and a call the upstream never answers is reported as
+  such, not dead-lettered. Control results are not remembered for dedupe
+  and the learning loop never reads control rows. Every ledger row
+  carries its arm (a hold resumed after a restart keeps it); a host that
+  sends no session id keeps one arm for the daemon's lifetime under
+  `coinflip`. `sayagain status` and `/api/health` show the mode; it
+  persists in `config.json` until `--arm off`.
+- `sayagain report --ab` (30-day window by default): both arms side by
+  side with the report's definitions and the number of sessions
+  (clusters), then the differences, control minus treatment, with 95%
+  intervals: unacknowledged writes per 1,000 writes (primary risk,
+  Newcombe), recovery bytes per call (the failure tax, primary cost, a
+  normal interval on Welch's standard error) and the failure rate
+  (secondary); a verdict against the pre-registered minimum of two weeks
+  or 2,000 calls per arm, whichever is later; rows outside the experiment
+  counted and left out. `--json` for the numbers.
+
 ## [0.12.0] - 2026-09-05
 
 ### Added

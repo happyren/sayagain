@@ -24,6 +24,8 @@ export interface Hold {
   /** Reloaded from storage after a restart: no host is waiting for the result. */
   orphaned?: boolean;
   mode?: string;
+  /** The A/B arm the call ran in, so a hold resumed after a restart keeps it (docs/measurement.md 5.4). */
+  arm?: "control" | "treatment";
 }
 
 export class HoldQueue extends EventEmitter {

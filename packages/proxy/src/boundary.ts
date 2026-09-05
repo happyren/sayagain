@@ -3,7 +3,7 @@
  * and how to rewrite a server response. No I/O here, so it is testable
  * without processes.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 import { META, type Status, type ToolClass } from "@sayagain/sdk";
 import { classifyError, type ErrorClass, guidanceFor } from "./errors.js";
 import type { JsonRpcId, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse } from "./jsonrpc.js";
@@ -24,7 +24,30 @@ export interface HeldInfo {
   cancelled?: boolean;
 }
 
+/** An A/B arm: control observes and records only; treatment is the boundary as shipped. */
+export type Arm = "control" | "treatment";
+/** How a daemon or wrap assigns arms: one arm for every session, a coin per session, or a hash of the UTC date, so every session of a day, on every server, lands in the same arm. */
+export type ArmMode = Arm | "coinflip" | "daily";
+export const ARM_MODES: readonly ArmMode[] = ["control", "treatment", "coinflip", "daily"];
+export const isArmMode = (s: string): s is ArmMode => (ARM_MODES as readonly string[]).includes(s);
+
+/**
+ * The arm for a new session. `daily` hashes the UTC date so every session that day, on every
+ * server, lands in the same arm (a day is the unit that joins the ledger to a transcript audit).
+ */
+export function pickArm(mode: ArmMode, now: Date = new Date()): Arm {
+  if (mode === "control" || mode === "treatment") return mode;
+  if (mode === "daily") {
+    const day = now.toISOString().slice(0, 10);
+    const byte = createHash("sha256").update(`sayagain-arm:${day}`).digest()[0] ?? 0;
+    return byte % 2 === 0 ? "control" : "treatment";
+  }
+  return randomInt(2) === 0 ? "control" : "treatment";
+}
+
 export interface PendingCall {
+  /** The A/B arm of the session that sent it; undefined outside an experiment. */
+  arm?: Arm;
   /** The host session that sent it, when it has a stable identity. */
   session?: string;
   /** The registry name of the boundary handling it. */
@@ -282,6 +305,7 @@ export function baseRow(
     responseBytes,
   };
   if (call.task !== undefined) row.task = call.task;
+  if (call.arm !== undefined) row.arm = call.arm;
   if (call.session !== undefined) row.session = call.session;
   if (call.server !== undefined) row.server = call.server;
   if (call.held) row.held = { ...call.held };
@@ -548,6 +572,19 @@ export function abandonedResponse(call: PendingCall, reason: string): JsonRpcRes
       code: -32000,
       message: `Say Again: ${reason}. Receipt ${call.receipt}; the call is dead-lettered for an operator to replay.`,
       data: { [META.receipt]: call.receipt, [META.status]: "dead-lettered" },
+    },
+  };
+}
+
+/** The control arm's answer to a call the upstream never answered: the reason, nothing more. */
+export function unansweredResponse(call: PendingCall, reason: string): JsonRpcResponse {
+  return {
+    jsonrpc: "2.0",
+    id: call.id,
+    error: {
+      code: -32000,
+      message: reason,
+      data: { [META.receipt]: call.receipt, [META.status]: "executed" },
     },
   };
 }

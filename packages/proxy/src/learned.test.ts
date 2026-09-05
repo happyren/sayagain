@@ -167,6 +167,37 @@ describe("learned", () => {
     );
   });
 
+  it("never learns from the control arm: its rows add no evidence and measure no lift", () => {
+    const rows = evidence();
+    const coerce = deriveInterventions(rows).find((i) => i.kind === "coerce") as Intervention;
+    coerce.activatedAt = new Date(t0 + 100_000).toISOString();
+    for (let i = 0; i < REVERT_MIN_CALLS; i++)
+      rows.push(
+        row({
+          tool: "strict",
+          at: 200 + i,
+          arm: "control",
+          isError: true,
+          errorClass: "coercible",
+          errorSignature: "Invalid params: limit must be a number",
+          argShape: ["limit:string"],
+        }),
+      );
+    // Control calls never had the coercion applied, so they say nothing about its lift.
+    const { after } = measureLift(rows, coerce, new Date(t0 + 1_000_000));
+    expect(after).toMatchObject({ calls: 0, failures: 0 });
+    const dir = mkdtempSync(join(tmpdir(), "sayagain-learned-"));
+    try {
+      const store = new LearnedStore(join(dir, "learned.json"));
+      store.reconcile(rows.slice(0, 15), { now: new Date(t0 + 100_000) });
+      expect(store.reconcile(rows, { now: new Date(t0 + 1_000_000) }).reverted).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    // Nor does a control-only ledger produce interventions.
+    expect(deriveInterventions(rows.map((r) => ({ ...r, arm: "control" as const })))).toEqual([]);
+  });
+
   it("measures lift around activation and reverts when twenty calls show none", () => {
     const rows = evidence();
     const coerce = deriveInterventions(rows).find((i) => i.kind === "coerce") as Intervention;
