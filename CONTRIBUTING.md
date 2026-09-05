@@ -13,7 +13,8 @@ git commit -s
 ```
 
 Use your real name and a reachable email address. Pull requests with
-unsigned commits fail the DCO check. We use the DCO instead of a CLA on
+unsigned commits fail the DCO check. Commits authored by bots (Dependabot)
+are exempt; a maintainer reviews and merges them like any other change. We use the DCO instead of a CLA on
 purpose: it is lighter, it is what the Linux Foundation and its sub-foundations
 use, and it keeps the project relicensable only with every contributor's
 consent, which is the guarantee we want to give.

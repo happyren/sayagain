@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1                                        |
+| Status         | Draft v0.1.4                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -131,8 +131,11 @@ returns to the client.
 ### 5.1 `sh.sayagain/receipt` (string)
 
 Unique identifier for this call in the boundary's ledger. MUST be present
-on every response that passed through the boundary, including pass-through
-responses.
+on every `tools/call` response that passed through the boundary. On a
+JSON-RPC error response there is no `result`; the boundary places the same
+keys in `error.data` when that member is absent or an object, and omits
+them (keeping the receipt in its ledger) when `error.data` is something
+else.
 
 ### 5.2 `sh.sayagain/status` (string)
 
@@ -144,8 +147,8 @@ One of:
 | `repaired`        | Arguments were changed before forwarding; see 5.4. Result is the server's. |
 | `held`            | Not forwarded. Awaiting operator or policy approval. See 5.3.           |
 | `queued`          | Accepted, not yet forwarded (backpressure or scheduled retry).          |
-| `deduplicated`    | Not forwarded; result reproduced from an earlier call with the same key. |
-| `dead-lettered`   | Retries and repairs exhausted; stored for operator review.              |
+| `deduplicated`    | Not forwarded; result reproduced from an earlier call with the same key. The response also carries `sh.sayagain/duplicate-of` with the first call's receipt. |
+| `dead-lettered`   | Retries and repairs exhausted; stored for operator review. The upstream's final error is returned as-is, with one guidance sentence appended to `content`. |
 
 ### 5.3 `sh.sayagain/held` (object)
 
@@ -158,6 +161,26 @@ Present when status is `held`.
   "expiresAt": "2026-09-04T12:00:00Z"
 }
 ```
+
+`held.mode` says why the call is waiting: `pre` (held before it was ever
+sent), `unknown-outcome` (it was sent, failed with an error that does not
+prove it did not apply, and has NOT been re-sent), or `repaired` (the
+server rejected the arguments and a corrected version awaits approval).
+The text block the agent receives says the same in words; for
+`unknown-outcome` it tells the agent not to repeat the call. When an
+operator rejects a held call, the boundary answers with `isError` true,
+`status` still `held`, and `held.decision` set to `"reject"`. When a held
+call is later approved and executed, its response carries `held` with
+`decision` `"approve"` so the agent can see it waited. A client that
+cancels a held request with `notifications/cancelled` gets no response, as
+the protocol allows, and the hold is dropped.
+
+### 5.4a `sh.sayagain/replay-of` (string)
+
+Present on the result of an operator replay: the receipt of the
+dead-lettered call it re-executed. Replays are boundary-initiated requests;
+their results reach the ledger and the operator, never the model that sent
+the original call.
 
 ### 5.4 `sh.sayagain/repair` (object)
 
@@ -176,6 +199,21 @@ what the client sent.
 `kind` is one of `coerce`, `rename`, `default`, `model`. A boundary MUST NOT
 apply `model` repair (side-model regeneration) to a tool it has classified
 as non-read-only without first holding the call.
+
+### 5.5 `sh.sayagain/boundary` (object)
+
+Present on the `initialize` result when a boundary is in the path. A
+boundary MUST NOT alter `serverInfo`, `capabilities` or tool names to
+announce itself; this key is the only announcement.
+
+```json
+{ "name": "sayagain", "version": "0.1.0", "upstream": "notion", "ledger": "sqlite", "shim": false }
+```
+
+Clients MAY display it and MUST NOT require it. A boundary MAY additionally
+append one sentence to the `initialize` result's `instructions` naming the
+boundary and the meaning of the `held`, `repaired` and `queued` statuses;
+operators can turn that sentence off.
 
 ## 6. Held calls and the client
 
@@ -235,3 +273,7 @@ and the schema shim (section 7) are optional features.
 ## 10. Changelog
 
 - v0.1 (2026-09-04): initial draft.
+- v0.1.1 (2026-09-04): added 5.5, the boundary announcement on `initialize`.
+- v0.1.2 (2026-09-05): `sh.sayagain/duplicate-of` on deduplicated responses; `held.decision` on rejected and later-approved calls.
+- v0.1.3 (2026-09-05): `sh.sayagain/replay-of`; guidance sentence appended to failed results; dead-lettered semantics clarified.
+- v0.1.4 (2026-09-05): receipt and status on JSON-RPC error responses via `error.data`; `held.mode`; cancellation of held calls; `repaired` status emitted when arguments were changed and the call succeeded.
