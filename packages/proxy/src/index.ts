@@ -18,6 +18,8 @@ export {
   type ToolStats,
   toolStats,
 } from "./analysis.js";
+export type { Audit, AuditOptions, AuditSource, AuditTool } from "./audit.js";
+export { renderAuditHtml, renderAuditText, runAudit } from "./audit.js";
 export type { BoundaryOptions, BoundaryState, Failure, PendingCall, Rewrite } from "./boundary.js";
 export {
   ANNOUNCEMENT,
@@ -47,6 +49,27 @@ export {
   replayAnywhere,
   stopDaemon,
 } from "./client-api.js";
+export type {
+  Consent,
+  ContributionSource,
+  IntentCategory,
+  Receipt,
+  Resolution,
+  Shape,
+  ShapeDocument,
+  ShapeError,
+} from "./contribute.js";
+export {
+  assertShapeDocumentSafe,
+  buildShapeDocument,
+  intentCategory,
+  SHAPE_SCHEMA,
+  sendContribution,
+  signatureHash,
+  TERMS_VERSION,
+  weeklyContribution,
+  writeContribution,
+} from "./contribute.js";
 export type {
   ControlRequest,
   ControlResponse,
@@ -121,6 +144,25 @@ export { daemonHealthy, ensureDaemon, runStdioShim } from "./shim.js";
 export { resultText, signatureOf } from "./signature.js";
 export type { DeadLetters, HoldPersistence, Stores } from "./stores.js";
 export { defaultSqlitePath, openStores } from "./stores.js";
+export type {
+  ModelFamily,
+  Outcome,
+  RowExtra,
+  Scan,
+  ScanOptions,
+  TranscriptCall,
+  TranscriptSession,
+  TranscriptSource,
+} from "./transcripts.js";
+export {
+  defaultTranscriptDirs,
+  modelFamily,
+  readSession,
+  scanTranscripts,
+  sessionRows,
+  TRANSCRIPT_SOURCES,
+  toolClassFor,
+} from "./transcripts.js";
 export type { Session, Upstream } from "./transport.js";
 export { HttpUpstream } from "./upstream-http.js";
 export { StdioUpstream } from "./upstream-stdio.js";

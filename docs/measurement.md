@@ -90,11 +90,12 @@ own ledger (`sayagain report`, `tools`, `errors`; recovery cost in bytes on the 
 
 ## 4. North star
 
-Two numbers, one for risk and one for cost, both per 1,000 tool calls:
+Two numbers, one for risk and one for cost:
 
-- **Unacknowledged writes**: M9. Once Layer 1 runs, the intent-versus-action
-  rate (the complement of M14) stands beside it.
-- **Failure tax in dollars**: M5 summed over failures, divided by calls.
+- **Unacknowledged writes** per 1,000 writes: M9. Once Layer 1 runs, the
+  intent-versus-action rate (the complement of M14) stands beside it.
+- **Failure tax in dollars** per 1,000 calls: M5 summed over failures,
+  divided by calls.
 
 The product exists to push both down. Everything else is diagnostic.
 
@@ -113,8 +114,22 @@ node scripts/baseline/claude-code-baseline.mjs --since 2026-08-01 --json baselin
 
 Reads every session under `~/.claude/projects`, computes M1 to M11 and
 prints a summary. It never outputs argument values, file contents, tool
-results or prompts; only tool names, counts, token totals and timestamps.
-Keep `baseline.json` out of the repository.
+results or prompts; only tool names, counts, token totals, timestamps,
+argument shapes and masked signatures. Keep `baseline.json` out of the
+repository.
+
+Since 0.10, `sayagain audit` runs the 0.6 analysis over the same
+transcripts (and Codex and Cursor ones) with the definitions in section 3,
+prints the section 6 page risk first, and writes a shareable HTML page.
+The script stays as the pre-registered instrument behind the baseline
+numbers quoted in the build brief. Differences from the script: `audit`
+reports M9 per 1,000 writes (the script per 1,000 calls); it classes an
+MCP tool whose name carries no recognised verb as a write, as the boundary
+does without annotations, and says how many calls that affected (the
+script leaves such tools out of the write counts); it recognises more
+verbs and a destructive class; it counts M17 in calls between failure and
+recovery rather than assistant turns; and it does not split duplicates by
+Bash and non-Bash.
 
 Caveat: Claude Code transcripts mix built-in tools with MCP tools. Report
 both, but the product claim rests on the MCP subset and on the `Edit` and

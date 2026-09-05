@@ -57,6 +57,12 @@ Deliverables
 - Baseline on our own agents: this repository's history, quantbot, the
   delivery flywheel; the three reports kept out of the repository.
 
+Status, 2026-09-05 (0.10.0): `sayagain audit` and `sayagain contribute`
+shipped (Claude Code, Codex and Cursor readers; the HTML page; the shape
+document, consent flow and weekly setting; `docs/CONTRIBUTING-DATA.md`).
+The `scripts/baseline` script stays as the pre-registered instrument rather
+than being folded in. The registry scan and the three baselines are next.
+
 Metric that proves it worked
 
 - One command from a fresh clone to a report on each of the three agents.

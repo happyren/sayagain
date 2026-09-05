@@ -19,6 +19,7 @@ import {
   signatureStats,
   toolStats,
 } from "./analysis.js";
+import { weeklyContribution } from "./contribute.js";
 import { summarizeDeadLetter, summarizeHold } from "./control.js";
 import { Boundary } from "./core.js";
 import { type Decision, type Hold, HoldQueue } from "./holds.js";
@@ -60,6 +61,8 @@ export interface DaemonOptions {
   learned?: LearnedStore;
   /** How often the loop re-reads the ledger and measures its interventions. Default 10 minutes. */
   learnEveryMs?: number;
+  /** How often the weekly contribution (ADR-0009) checks whether it is due. Default 1 hour; 0 disables the check. */
+  contributeEveryMs?: number;
 }
 
 export interface Daemon {
@@ -782,6 +785,24 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   relearn();
   const learnTimer = setInterval(relearn, options.learnEveryMs ?? 600_000);
   learnTimer.unref();
+  // The weekly contribution runs only with `sayagain contribute --weekly on`, an endpoint and the
+  // accepted terms; the function checks all three every time, so a CLI change is honoured.
+  const contributeEvery = options.contributeEveryMs ?? 3_600_000;
+  const contribute = (): void => {
+    if (!loadRegistry().contribute?.weekly) return; // the ledger read is not free
+    weeklyContribution({ rows: options.stores.readLedger(), version: options.version, log })
+      .then((r) => {
+        if (r.sent) log(`weekly contribution sent (${r.path})`);
+      })
+      .catch((err: unknown) =>
+        log(`weekly contribution failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
+  };
+  let contributeTimer: NodeJS.Timeout | undefined;
+  if (contributeEvery > 0) {
+    contributeTimer = setInterval(contribute, contributeEvery);
+    contributeTimer.unref();
+  }
   const idleSweep = setInterval(() => {
     const cutoff = Date.now() - (options.sessionIdleMs ?? 1_800_000);
     for (const [id, s] of hostSessions)
