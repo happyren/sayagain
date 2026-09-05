@@ -16,7 +16,8 @@ operator between the agent and its tools who says it, so the agent never has
 to.
 
 > **Status: pre-alpha.** The `_meta` convention, design records and package
-> skeletons are here. The proxy is not yet usable. Watch the repo or open a
+> skeletons are here. The proxy runs (0.4: `wrap`, the daemon, holds, repair,
+> dead letters). Watch the repo or open a
 > Discussion.
 
 ## What it does
@@ -34,7 +35,7 @@ properties:
 destructive tools and for writes with an unknown outcome, deterministic
 argument repair from the tool's own schema, dead-letter and replay, and
 error rewriting into model-actionable feedback. The ledger is a JSONL file
-today; SQLite and Postgres arrive with the daemon in 0.4.
+today; the daemon adds persisted holds and an optional SQLite store.
 
 **Layer 1, opt-in:** intent capture, intent verification and reroute, bounded
 side-model repair, intent-drift detection, and hold-before-write with
@@ -42,16 +43,25 @@ approval.
 
 ## Getting started
 
-Today, 0.3: one server, wrapped in place. The daemon, HTTP routes and
-`import --rewrite` arrive in 0.4 and 0.5 (see `docs/ROADMAP.md`).
+Today, 0.4: a daemon that serves every registered upstream, or one server
+wrapped in place. `import --rewrite` arrives in 0.5 (see `docs/ROADMAP.md`).
 
 ```bash
-# Wrap a stdio server. Its name, tools and errors are untouched; every result
-# gains a receipt; destructive tools are held until you approve.
-npx sayagain wrap -- npx -y @notionhq/notion-mcp-server
+# Install once (Node 22.13+), then register upstreams, start the daemon, point hosts at it.
+npm install -g @sayagain/proxy
+sayagain add notion -- npx -y @notionhq/notion-mcp-server
+sayagain add linear --url https://mcp.linear.app/mcp --header 'Authorization=Bearer ${LINEAR_TOKEN}'   # single quotes: resolved by the daemon, never stored
+sayagain serve --detach            # http://127.0.0.1:7777/mcp/<name>; bearer token in ~/.sayagain/token
+sayagain status                    # SAYAGAIN_HOME=<dir> moves every file the tool keeps
 
-# In your host config, keep the key and wrap the command:
-#   "notion": { "command": "npx", "args": ["sayagain", "wrap", "--", "npx", "-y", "@notionhq/notion-mcp-server"] }
+# Host entry, keeping the key the host already uses (stdio hosts):
+#   "notion": { "command": "sayagain", "args": ["stdio", "notion"] }
+# or, for hosts that speak Streamable HTTP:
+#   "notion": { "type": "http", "url": "http://127.0.0.1:7777/mcp/notion",
+#               "headers": { "Authorization": "Bearer <token>" } }
+
+# Or wrap one stdio server in place, no daemon:
+sayagain wrap -- npx -y @notionhq/notion-mcp-server
 
 sayagain holds                 # what is waiting
 sayagain approve <receipt>     # or: sayagain reject <receipt>

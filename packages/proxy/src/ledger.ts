@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import type { Status, ToolClass } from "@sayagain/sdk";
+import { homePath } from "./home.js";
 
 /**
  * One row per outcome the boundary produced for a call. A receipt normally
@@ -49,12 +49,12 @@ export interface Ledger {
   append(row: LedgerRow): void;
 }
 
-export const defaultLedgerPath = (): string => join(homedir(), ".sayagain", "ledger.jsonl");
+export const defaultLedgerPath = (): string => homePath("ledger.jsonl");
 
 /** Append-only JSON lines. Durable across restarts. */
 export class JsonlLedger implements Ledger {
   constructor(readonly path: string = defaultLedgerPath()) {
-    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   }
   append(row: LedgerRow): void {
     appendFileSync(this.path, `${JSON.stringify(row)}\n`);

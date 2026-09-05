@@ -16,6 +16,14 @@ export interface Hold {
   expiresAt: number;
   decision?: Decision;
   decidedAt?: number;
+  /** Which upstream the call was headed for, and why it is waiting. */
+  /** The upstream's reported name, for display. */
+  upstream?: string;
+  /** The registry name of the boundary that holds it, for routing. */
+  server?: string;
+  /** Reloaded from storage after a restart: no host is waiting for the result. */
+  orphaned?: boolean;
+  mode?: string;
 }
 
 export class HoldQueue extends EventEmitter {

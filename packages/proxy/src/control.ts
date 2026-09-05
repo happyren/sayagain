@@ -5,13 +5,14 @@
  */
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
-import { homedir, platform } from "node:os";
+import { platform } from "node:os";
 import { join } from "node:path";
 import type { DeadLetter } from "./deadletter.js";
 import type { Decision, Hold, HoldQueue } from "./holds.js";
+import { homePath } from "./home.js";
 import { LineSplitter } from "./jsonrpc.js";
 
-export const runDir = (): string => join(homedir(), ".sayagain", "run");
+export const runDir = (): string => homePath("run");
 const isWindows = () => platform() === "win32";
 
 export function socketPathFor(pid: number): string {
@@ -40,6 +41,11 @@ export interface HoldSummary {
   createdAt: string;
   expiresAt: string;
   pid: number;
+  upstream?: string;
+  server?: string;
+  mode?: string;
+  /** Reloaded after a daemon restart: no host is waiting; approving executes it for the ledger. */
+  orphaned?: boolean;
 }
 
 export interface DeadLetterSummary {
@@ -53,6 +59,7 @@ export interface DeadLetterSummary {
   attempts: number;
   repairs: number;
   pid: number;
+  server?: string;
 }
 
 export interface ReplayOutcome {
@@ -79,6 +86,10 @@ export const summarizeHold = (h: Hold, pid: number): HoldSummary => {
     pid,
   };
   if (h.intent !== undefined) s.intent = h.intent;
+  if (h.upstream !== undefined) s.upstream = h.upstream;
+  if (h.server !== undefined) s.server = h.server;
+  if (h.mode !== undefined) s.mode = h.mode;
+  if (h.orphaned) s.orphaned = true;
   return s;
 };
 
@@ -95,6 +106,7 @@ export const summarizeDeadLetter = (d: DeadLetter, pid: number): DeadLetterSumma
     pid,
   };
   if (d.intent !== undefined) s.intent = d.intent;
+  if (d.server !== undefined) s.server = d.server;
   return s;
 };
 

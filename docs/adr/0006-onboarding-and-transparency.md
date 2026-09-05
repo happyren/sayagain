@@ -87,23 +87,34 @@ sayagain eject --host claude-code
 sayagain status | list | ledger | holds | replay <receipt>
 ```
 
-`wrap` runs the boundary in-process with a SQLite ledger and no daemon. It
+`wrap` runs the boundary in-process with a JSONL ledger and no daemon. It
 is the demo path and the fallback when the daemon cannot start. `add`,
-`import` and `install` write `~/.sayagain/config.toml` and the host's own
+`import` and `install` write `~/.sayagain/config.json` (JSON, not TOML: no
+parser dependency yet) and the host's own
 file, in the host's own format, with a timestamped backup beside it.
 
-Registered server entry:
+Registered server entry (`~/.sayagain/config.json`, 0600):
 
-```toml
-[servers.notion]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@notionhq/notion-mcp-server"]
-env = { NOTION_TOKEN = "${NOTION_TOKEN}" }
-class_overrides = { delete_page = "destructive" }
-shim = false
-announce = true
-fallback = "closed"
+```json
+{
+  "servers": {
+    "notion": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": { "NOTION_TOKEN": "${NOTION_TOKEN}" },
+      "classes": { "delete_page": "destructive" },
+      "hold": "destructive",
+      "announce": true
+    },
+    "linear": {
+      "transport": "http",
+      "url": "https://mcp.linear.app/mcp",
+      "headers": { "Authorization": "Bearer ${LINEAR_TOKEN}" }
+    }
+  },
+  "daemon": { "listen": "127.0.0.1:7777", "store": "jsonl" }
+}
 ```
 
 Host entry written by `install` (Claude Code, HTTP transport):
@@ -121,13 +132,18 @@ For hosts without HTTP support the entry is
 
 ### Defaults chosen for non-intrusiveness
 
-- **Ledger**: SQLite at `~/.sayagain/ledger.sqlite` by default. Postgres is
-  a URL in the same setting, for shared and hosted deployments. This
-  supersedes the "Postgres dead-letter queue" wording in earlier documents.
+- **Store**: JSONL files under `~/.sayagain` by default (`ledger.jsonl`,
+  `deadletter.jsonl`, `holds.jsonl`), so nothing depends on a Node.js
+  feature; `serve --store sqlite` keeps the same data in `sayagain.db`
+  (node:sqlite, Node 22.13+). Postgres is a later option for shared and
+  hosted deployments. This supersedes the "Postgres dead-letter queue"
+  wording in earlier documents.
 - **Loopback only, with a token**: the daemon binds `127.0.0.1` and requires
-  a bearer token it generates on first run and writes into host entries
-  itself. Other local processes cannot borrow the upstream credentials
-  through the boundary. The user never sees the token.
+  a bearer token it generates on first run (`~/.sayagain/token`, 0600) and
+  writes into host entries itself (`install`, 0.5). Other local processes
+  cannot borrow the upstream credentials through the boundary. The user
+  never needs to see the token; `sayagain add` names the file for hosts
+  configured by hand.
 - **Secrets**: `env` values are stored as `${VAR}` references and resolved
   from the daemon's environment at spawn. `import` copies literal values
   into the config only with `--copy-secrets`, and says so.

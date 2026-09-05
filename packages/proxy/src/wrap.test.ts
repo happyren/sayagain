@@ -423,7 +423,7 @@ describe("lifecycle", () => {
     await h.handshake();
     h.call(1, "slow_write", { delayMs: 5000 });
     await sleep(50);
-    h.wrapped.child.kill();
+    h.wrapped.kill();
     const err = await h.waitFor(1);
     expect((err.error as { data: Record<string, unknown> }).data["sh.sayagain/status"]).toBe(
       "dead-lettered",

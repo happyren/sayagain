@@ -1,12 +1,14 @@
 /** UNABLE: calls whose retries and repairs are exhausted, kept with intent for replay. */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { homePath } from "./home.js";
 
 export interface DeadLetter {
   receipt: string;
   ts: string;
   upstream: string;
+  /** The registry name of the boundary that recorded it, for routing replays. */
+  server?: string;
   tool: string;
   /** The last request line sent upstream (arguments included; the operator's trust domain). */
   rawLine: string;
@@ -20,7 +22,7 @@ export interface DeadLetter {
   resolvedBy?: string;
 }
 
-export const defaultDeadLetterPath = (): string => join(homedir(), ".sayagain", "deadletter.jsonl");
+export const defaultDeadLetterPath = (): string => homePath("deadletter.jsonl");
 
 /** Read every entry and fold resolutions: a later line for the same receipt replaces the earlier one. */
 export function readDeadLetters(
@@ -47,13 +49,13 @@ export class DeadLetterStore {
   private readonly entries = new Map<string, DeadLetter>();
   constructor(readonly path?: string) {
     if (path) {
-      mkdirSync(dirname(path), { recursive: true });
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       for (const d of readDeadLetters(path, { includeResolved: true }))
         this.entries.set(d.receipt, d);
     }
   }
   private persist(entry: DeadLetter): void {
-    if (this.path) appendFileSync(this.path, `${JSON.stringify(entry)}\n`);
+    if (this.path) appendFileSync(this.path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
   }
   add(entry: DeadLetter): void {
     this.entries.set(entry.receipt, entry);

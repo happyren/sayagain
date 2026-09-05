@@ -24,6 +24,15 @@ export {
   shapeOf,
   withArguments,
 } from "./boundary.js";
+export {
+  allDeadLetters,
+  allHolds,
+  daemonStatus,
+  decideAnywhere,
+  liveDaemon,
+  replayAnywhere,
+  stopDaemon,
+} from "./client-api.js";
 export type {
   ControlRequest,
   ControlResponse,
@@ -41,6 +50,10 @@ export {
   socketPathFor,
   startControlServer,
 } from "./control.js";
+export type { BoundaryCoreOptions } from "./core.js";
+export { Boundary } from "./core.js";
+export type { Daemon, DaemonOptions } from "./daemon.js";
+export { startDaemon } from "./daemon.js";
 export type { DeadLetter } from "./deadletter.js";
 export { DeadLetterStore, defaultDeadLetterPath, readDeadLetters } from "./deadletter.js";
 export { DedupeCache } from "./dedupe.js";
@@ -48,15 +61,33 @@ export type { ErrorClass } from "./errors.js";
 export { classifyError, guidanceFor } from "./errors.js";
 export type { Decision, Hold } from "./holds.js";
 export { HoldQueue } from "./holds.js";
+export { ensureHome, homePath, sayagainHome } from "./home.js";
 export type { JsonRpcMessage, JsonRpcRequest, JsonRpcResponse } from "./jsonrpc.js";
 export { isRequest, isResponse, LineSplitter, parseMessage } from "./jsonrpc.js";
 export type { Ledger, LedgerRow } from "./ledger.js";
 export { defaultLedgerPath, JsonlLedger, MemoryLedger, readLedger } from "./ledger.js";
 export type { HoldMode, PolicyOptions } from "./policy.js";
 export { DEFAULT_POLICY, parseClassOverrides, shouldHold, ToolClassifier } from "./policy.js";
+export type { DaemonInfo, Registry, ServerConfig } from "./registry.js";
+export {
+  addServer,
+  loadRegistry,
+  readDaemonInfo,
+  registryPath,
+  removeServer,
+  resolveEnv,
+  saveRegistry,
+  upstreamFor,
+} from "./registry.js";
 export type { RepairChange, RepairResult } from "./repair.js";
 export { repairArguments } from "./repair.js";
+export { daemonHealthy, ensureDaemon, runStdioShim } from "./shim.js";
 export { resultText, signatureOf } from "./signature.js";
+export type { DeadLetters, HoldPersistence, Stores } from "./stores.js";
+export { defaultSqlitePath, openStores } from "./stores.js";
+export type { Session, Upstream } from "./transport.js";
+export { HttpUpstream } from "./upstream-http.js";
+export { StdioUpstream } from "./upstream-stdio.js";
 export { PROXY_VERSION } from "./version.js";
 export type { WrapOptions, Wrapped } from "./wrap.js";
 export { wrap } from "./wrap.js";
