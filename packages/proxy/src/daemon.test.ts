@@ -503,7 +503,7 @@ describe("daemon", () => {
     expect(report.calls).toBe(2);
     expect(report.byServer[0]?.server).toBe("fake-notion");
     expect((await api(d, "/api/report?since=soon")) as { error: string }).toMatchObject({
-      error: expect.stringContaining("--since"),
+      error: expect.stringContaining("duration"),
     });
   });
 });

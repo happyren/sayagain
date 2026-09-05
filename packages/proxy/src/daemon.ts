@@ -508,8 +508,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       let a: ReturnType<typeof analysisRows>;
       try {
         a = analysisRows(url);
-      } catch (err) {
-        return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      } catch {
+        return json(res, 400, {
+          error: "since must be a duration like 7d, 24h or 90m, or an ISO date",
+        });
       }
       if (url.pathname === "/api/tools")
         return json(
