@@ -1214,7 +1214,7 @@ export async function main(argv: string[]): Promise<number> {
         rows.push(...out.rows);
         extras = new Map([...extras, ...out.extras]);
       }
-      sessions = scan.sessions.length;
+      sessions = new Set(scan.sessions.map((x) => x.id)).size; // files can share a session
       source = `${host}-transcripts`;
     }
     const doc = buildShapeDocument(rows, {
