@@ -59,6 +59,16 @@ const MAX_BODY = 8 * 1024 * 1024;
 const HEARTBEAT_MS = 25_000;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
+/** "host:port" without the port, when the tail is a port number. */
+function stripPort(hostHeader: string): string {
+  const i = hostHeader.lastIndexOf(":");
+  if (i <= 0) return hostHeader;
+  const tail = hostHeader.slice(i + 1);
+  return tail.length > 0 && tail.length <= 5 && [...tail].every((c) => c >= "0" && c <= "9")
+    ? hostHeader.slice(0, i)
+    : hostHeader;
+}
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -106,7 +116,7 @@ export function parseListen(listen: string): { host: string; port: number } {
 
 /** One host that presented an Mcp-Session-Id: its POSTs settle here; its GET stream carries the rest. */
 class HostSession implements Session {
-  readonly waiters = new Map<string, (msg: JsonRpcMessage) => void>();
+  readonly waiters = new Map<string, { settle: (msg: JsonRpcMessage) => void }>();
   stream: ServerResponse | undefined;
   lastSeen = Date.now();
   constructor(readonly id: string) {}
@@ -118,10 +128,10 @@ class HostSession implements Session {
   }
   send(msg: JsonRpcMessage): void {
     if (isResponse(msg) && msg.id !== null && msg.id !== undefined) {
-      const w = this.waiters.get(keyOfId(msg.id));
-      if (w) {
+      const waiter = this.waiters.get(keyOfId(msg.id));
+      if (waiter) {
         this.waiters.delete(keyOfId(msg.id));
-        w(msg);
+        waiter.settle(msg);
         return;
       }
     }
@@ -249,8 +259,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
   const authorized = (req: IncomingMessage, url: URL): boolean => {
     const header = req.headers.authorization ?? "";
-    const m = header.match(/^bearer\s+(.+)$/i);
-    if (m && tokenMatches(m[1]?.trim())) return true;
+    if (header.slice(0, 7).toLowerCase() === "bearer " && tokenMatches(header.slice(7).trim()))
+      return true;
     // EventSource cannot set headers: the query form is accepted for streams only.
     const wantsStream =
       req.method === "GET" && (req.headers.accept ?? "").includes("text/event-stream");
@@ -258,7 +268,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
   const hostAllowed = (req: IncomingMessage): boolean => {
     if (!LOOPBACK_HOSTS.has(host)) return true;
-    const h = (req.headers.host ?? "").replace(/:\d+$/, "");
+    const h = stripPort(req.headers.host ?? "");
     return h === "" || LOOPBACK_HOSTS.has(h);
   };
 
@@ -368,7 +378,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     timer.unref();
     let session: Session;
     if (host) {
-      host.waiters.set(wanted, (m) => settle(m));
+      host.waiters.set(wanted, { settle: (m) => settle(m) });
       session = host;
     } else {
       session = {
@@ -532,8 +542,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return json(res, 404, { error: "not found" });
       } catch (err) {
         log(`sayagain: request failed: ${err instanceof Error ? err.message : String(err)}`);
-        if (!res.headersSent)
-          json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        if (!res.headersSent) json(res, 500, { error: "request failed; see the daemon log" });
         else res.end();
       }
     })();
