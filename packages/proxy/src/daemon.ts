@@ -446,12 +446,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const CSP =
     "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'";
+  // Next to this file when built (dist/ui/app.js); under dist when this file runs from source (tests).
   const appJs = (): string | undefined => {
-    try {
-      return readFileSync(fileURLToPath(new URL("./ui/app.js", import.meta.url)), "utf8");
-    } catch {
-      return undefined;
+    for (const rel of ["./ui/app.js", "../dist/ui/app.js"]) {
+      try {
+        return readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+      } catch {
+        // try the next location
+      }
     }
+    return undefined;
   };
   const handleUi = (req: IncomingMessage, res: ServerResponse, url: URL) => {
     if (req.method !== "GET") return json(res, 405, { error: "GET only" });
@@ -643,6 +647,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     void (async () => {
       try {
         if (!hostAllowed(req)) return json(res, 421, { error: "Host header is not loopback" });
+        // The page's stylesheet and script are public: a <link> or <script> tag cannot send a header,
+        // and they hold nothing but layout and generic code. The page and every API call need the token.
+        if (
+          req.method === "GET" &&
+          (url.pathname === "/ui/app.css" || url.pathname === "/ui/app.js")
+        )
+          return handleUi(req, res, url);
         if (!authorized(req, url))
           return json(res, 401, { error: "missing or wrong bearer token" });
         const declared = Number(req.headers["content-length"] ?? 0);

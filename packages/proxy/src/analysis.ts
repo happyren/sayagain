@@ -379,7 +379,7 @@ export function toolStats(rows: LedgerRow[], opts: AnalysisOptions = {}): ToolSt
     if (r.status === "deduplicated" || r.status === "held") continue;
     const a = accFor(r);
     a.calls++;
-    a.latencies.push(r.latencyMs);
+    a.latencies.push(Math.max(0, r.latencyMs - (r.held?.waitedMs ?? 0))); // the operator's wait is not the tool's latency
     if (resolvedByRetry(r)) a.boundary.retried++;
     if (r.status === "repaired") a.boundary.repaired++;
     if (r.held?.decision === "approve") a.boundary.held++;

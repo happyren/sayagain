@@ -468,10 +468,13 @@ describe("daemon", () => {
     expect(html).toContain('<script type="module" src="/ui/app.js">');
     expect(html).toContain("0.4.0-test");
     expect(html).not.toMatch(/https?:\/\/(?!127\.0\.0\.1)/); // no remote origins
-    const css = await fetch(`${d.url}/ui/app.css`, {
-      headers: { authorization: `Bearer ${d.token}` },
-    });
+    const css = await fetch(`${d.url}/ui/app.css`); // assets need no token: tags cannot send headers
+    expect(css.status).toBe(200);
     expect(css.headers.get("content-type")).toContain("text/css");
+    const js = await fetch(`${d.url}/ui/app.js`);
+    expect(js.status).toBe(200);
+    expect(js.headers.get("content-type")).toContain("text/javascript");
+    expect(await js.text()).toContain("sayagain.token");
     expect((await fetch(`${d.url}/ui`)).status).toBe(401);
     expect((await fetch(`${d.url}/api/holds?token=${d.token}`)).status).toBe(401); // never for the API
     await rpc(d, "fake", {
