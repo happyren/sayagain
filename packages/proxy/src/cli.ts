@@ -15,7 +15,9 @@ import {
 } from "./client-api.js";
 import { startDaemon } from "./daemon.js";
 import { defaultDeadLetterPath, readDeadLetters } from "./deadletter.js";
+import { HOST_IDS, HOSTS, type HostId, hostFiles, isHostId, type Scope } from "./hosts.js";
 import { defaultLedgerPath, JsonlLedger, readLedger } from "./ledger.js";
+import { ejectHost, importHost, inspectHost, installHost, type Target } from "./onboarding.js";
 import { parseClassOverrides } from "./policy.js";
 import {
   addServer,
@@ -55,6 +57,14 @@ const USAGE = `sayagain ${PROXY_VERSION}
       Register an upstream (stdio command, or --url for Streamable HTTP). --env K alone stores "\${K}",
       resolved from the daemon's environment at spawn; so does a \${VAR} inside --header or --env values.
   sayagain remove <name> | sayagain list | sayagain status | sayagain stop
+  sayagain hosts [--project] [--json]
+      Which MCP hosts are configured on this machine (Claude Code, Cursor, Claude Desktop, VS Code) and what they hold.
+  sayagain import --host <id>|all [--rewrite] [--dry-run] [--force] [--project] [--file <path>] [--transport stdio|http] [--command <path>]
+      Register the host's servers; with --rewrite, point the host's entries at Say Again (same keys, backup beside the file).
+  sayagain install --host <id>|all [--project] [--file <path>] [--dry-run] [--transport stdio|http] [--command <path>] [name...]
+      Write entries for registered servers into a host's file.
+  sayagain eject --host <id>|all [--project] [--file <path>] [--dry-run] [--keep] [name...]
+      Restore the host's original entries and forget the servers that import registered (--keep keeps them registered).
   sayagain stdio <name>
       Thin stdio client for hosts that only spawn commands; starts the daemon if needed.
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
@@ -360,6 +370,130 @@ export async function main(argv: string[]): Promise<number> {
 
   if (command === "stop") {
     process.stdout.write((await stopDaemon()) ? "stopping daemon\n" : "no daemon running\n");
+    return 0;
+  }
+
+  if (command === "hosts") {
+    const opts = [...rest];
+    const json = takeFlag(opts, "--json");
+    const project = takeFlag(opts, "--project");
+    if (opts.length) throw new UsageError(`hosts: unknown option ${opts[0]}`);
+    const rows = hostFiles(process.cwd(), project ? ["user", "project"] : ["user"]).map((f) => ({
+      ...f,
+      label: HOSTS[f.host].label,
+      ...(f.exists ? inspectHost(f) : { servers: [] as string[], wrapped: [] as string[] }),
+    }));
+    if (json) {
+      process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+      return 0;
+    }
+    for (const r of rows)
+      process.stdout.write(
+        `${r.label.padEnd(15)} ${r.scope.padEnd(8)} ${r.exists ? `${r.servers.length} server(s), ${r.wrapped.length} through Say Again` : "no config file"}  ${r.file}\n`,
+      );
+    process.stdout.write(
+      "\nsayagain import --host all --rewrite   wraps every server the hosts above know about\n",
+    );
+    return 0;
+  }
+
+  if (command === "import" || command === "install" || command === "eject") {
+    const opts = [...rest];
+    const hostOption = takeOption(opts, "--host");
+    const fileOption = takeOption(opts, "--file");
+    const project = takeFlag(opts, "--project");
+    const dryRun = takeFlag(opts, "--dry-run");
+    const rewrite = command === "import" ? takeFlag(opts, "--rewrite") : false;
+    const force = command === "import" ? takeFlag(opts, "--force") : false;
+    const keep = command === "eject" ? takeFlag(opts, "--keep") : false;
+    const transport =
+      command === "eject" ? undefined : (takeOption(opts, "--transport") ?? "stdio");
+    const commandPath = command === "eject" ? undefined : takeOption(opts, "--command");
+    const names = opts.filter((o) => !o.startsWith("--"));
+    const unknown = opts.find((o) => o.startsWith("--"));
+    if (unknown) throw new UsageError(`${command}: unknown option ${unknown}`);
+    if (command === "import" && names.length)
+      throw new UsageError("import: takes no server names; it imports every server in the file");
+    if (transport !== undefined && transport !== "stdio" && transport !== "http")
+      throw new UsageError(`${command}: --transport must be stdio or http`);
+    if (!hostOption)
+      throw new UsageError(`${command}: --host <${HOST_IDS.join("|")}|all> is required`);
+    const scopes: Scope[] = project ? ["user", "project"] : ["user"];
+    let targets: Target[];
+    if (hostOption === "all") {
+      if (fileOption) throw new UsageError(`${command}: --file needs one --host`);
+      targets = hostFiles(process.cwd(), scopes).filter((f) => f.exists);
+      if (!targets.length) {
+        process.stdout.write("no host config files found (sayagain hosts lists the locations)\n");
+        return 0;
+      }
+    } else {
+      if (!isHostId(hostOption))
+        throw new UsageError(
+          `${command}: unknown host ${hostOption}; one of ${HOST_IDS.join(", ")}, all`,
+        );
+      const host: HostId = hostOption;
+      const scope: Scope = project ? "project" : "user";
+      if (!HOSTS[host].scopes.includes(scope))
+        throw new UsageError(`${command}: ${HOSTS[host].label} has no project-scope config`);
+      targets = [
+        { host, scope, file: resolve(fileOption ?? HOSTS[host].file(scope, process.cwd())) },
+      ];
+    }
+    const log = (l: string) => process.stderr.write(`${l}\n`);
+    const label = (t: Target) => `${HOSTS[t.host].label} (${t.scope})  ${t.file}`;
+    const list = (xs: string[]) => (xs.length ? ` (${xs.join(", ")})` : "");
+    let anyRewritten = false;
+    for (const t of targets) {
+      try {
+        if (command === "import") {
+          const entryOptions = {
+            transport: transport as "stdio" | "http",
+            ...(commandPath ? { command: commandPath } : {}),
+          };
+          const r = importHost(t, { log, dryRun, rewrite, force, ...entryOptions });
+          const parts = [`imported ${r.imported.length}${list(r.imported)}`];
+          if (r.updated.length) parts.push(`updated ${r.updated.length}${list(r.updated)}`);
+          if (r.unchanged.length) parts.push(`already registered ${r.unchanged.length}`);
+          if (r.rewritten.length) parts.push(`rewritten ${r.rewritten.length}`);
+          process.stdout.write(`${dryRun ? "[dry-run] " : ""}${label(t)}\n  ${parts.join(", ")}\n`);
+          for (const sk of r.skipped) process.stdout.write(`  skipped ${sk.name}: ${sk.reason}\n`);
+          if (r.backup) process.stdout.write(`  backup: ${r.backup}\n`);
+          anyRewritten ||= r.rewritten.length > 0;
+        } else if (command === "install") {
+          const entryOptions = {
+            transport: transport as "stdio" | "http",
+            ...(commandPath ? { command: commandPath } : {}),
+          };
+          const r = installHost(t, names.length ? names : undefined, {
+            log,
+            dryRun,
+            ...entryOptions,
+          });
+          process.stdout.write(
+            `${dryRun ? "[dry-run] " : ""}${label(t)}\n  added ${r.added.length}${list(r.added)}, rewritten ${r.rewritten.length}${list(r.rewritten)}, unchanged ${r.unchanged.length}\n`,
+          );
+          if (r.backup) process.stdout.write(`  backup: ${r.backup}\n`);
+          anyRewritten ||= r.added.length + r.rewritten.length > 0;
+        } else {
+          const r = ejectHost(t, names.length ? names : undefined, { log, dryRun, keep });
+          process.stdout.write(
+            `${dryRun ? "[dry-run] " : ""}${label(t)}\n  restored ${r.restored.length}${list(r.restored)}, removed ${r.removed.length}${list(r.removed)}, unregistered ${r.unregistered.length}${list(r.unregistered)}\n`,
+          );
+          if (r.backup) process.stdout.write(`  backup: ${r.backup}\n`);
+        }
+      } catch (err) {
+        process.stdout.write(
+          `${label(t)}\n  error: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+    if (command === "import" && !rewrite && !dryRun)
+      process.stdout.write("\nregistered only; add --rewrite to point the host at Say Again\n");
+    if (anyRewritten && !dryRun)
+      process.stdout.write(
+        "\nrestart the host to pick up the change; the daemon starts on first use (or now: sayagain serve --detach)\n",
+      );
     return 0;
   }
 

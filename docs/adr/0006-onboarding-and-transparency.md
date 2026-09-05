@@ -144,9 +144,16 @@ For hosts without HTTP support the entry is
   cannot borrow the upstream credentials through the boundary. The user
   never needs to see the token; `sayagain add` names the file for hosts
   configured by hand.
-- **Secrets**: `env` values are stored as `${VAR}` references and resolved
-  from the daemon's environment at spawn. `import` copies literal values
-  into the config only with `--copy-secrets`, and says so.
+- **Secrets**: `env` and `headers` values may be `${VAR}` references,
+  resolved from the daemon's environment at spawn. `import` (0.5) copies
+  the host's literal values as they are: they already sit in the host's own
+  file, `config.json` is 0600, and without them the upstream cannot start.
+  This amends the original opt-in `--copy-secrets` wording. Replace a value
+  with a `${VAR}` reference to move it into the environment.
+- **Paths for GUI hosts**: Cursor, Claude Desktop and VS Code do not
+  inherit the shell's PATH, so `import --rewrite` writes the absolute
+  Node.js and CLI paths for them; terminal hosts (Claude Code) get
+  `sayagain` when it is on PATH. `--command <path>` overrides either.
 - **Upstream authentication**: static headers now. OAuth against remote
   upstreams is performed once at `add` time with a browser flow and stored
   by the daemon, the way `mcp-remote` does it. Not in the first release.

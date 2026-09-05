@@ -23,6 +23,10 @@ export interface ServerConfig {
   classes?: Record<string, ToolClass>;
   hold?: HoldMode;
   announce?: boolean;
+  /** Where `import` found this server: the host file and the entry it replaced, so `eject` can restore it. */
+  origins?: Record<string, { host: string; entry: unknown }>;
+  /** False for servers added by hand: `eject` never unregisters them. */
+  imported?: boolean;
 }
 
 export interface Registry {

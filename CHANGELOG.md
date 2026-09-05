@@ -6,6 +6,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-05
+
+### Added
+
+- `sayagain hosts`: the MCP hosts configured on this machine (Claude Code,
+  Cursor, Claude Desktop, VS Code), their config files, how many servers
+  each holds and how many already go through Say Again.
+- `sayagain import --host <id>|all [--rewrite]`: registers every server a
+  host knows about and, with `--rewrite`, points the host's entries at Say
+  Again under the same keys, so the agent still sees "notion". A timestamped
+  backup is written beside the file; writes are atomic; other keys,
+  indentation and VS Code `inputs` are preserved (comments are not, and the
+  tool says so). Entries that already go through Say Again, legacy SSE
+  entries, and VS Code entries that use `${input:...}` are skipped with a
+  reason. `--dry-run` shows the plan; `--project` includes the project-scope
+  files in the current directory; `--transport http` writes daemon URLs
+  with the bearer token instead of the stdio shim.
+- `sayagain install --host <id>|all [name...]`: writes entries for
+  registered servers into a host file.
+- `sayagain eject --host <id>|all [name...]`: restores the original entries
+  `import` replaced and unregisters the servers it imported; servers added
+  by hand stay.
+- GUI hosts (Cursor, Claude Desktop, VS Code) do not inherit a shell PATH,
+  so their entries use the absolute Node.js and CLI paths; terminal hosts
+  get `sayagain` when it is on PATH. `--command <path>` overrides both.
+- The `sayagain` package (`npx sayagain`) and per-package READMEs.
+
+### Changed
+
+- Imported `env` and `headers` values are copied into `config.json` (0600)
+  as they are. ADR-0006 said copying literal secrets would be opt-in; the
+  values already sit in the host's own file, and without them the upstream
+  cannot start. Use `${VAR}` references in the registry to move them into
+  the daemon's environment.
+
 ## [0.4.0] - 2026-09-05
 
 ### Added
