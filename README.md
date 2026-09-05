@@ -59,8 +59,9 @@ sayagain add linear --url https://mcp.linear.app/mcp --header 'Authorization=Bea
 sayagain serve --detach              # http://127.0.0.1:7777/mcp/<name>; bearer token in ~/.sayagain/token
 sayagain status                      # SAYAGAIN_HOME=<dir> moves every file the tool keeps
 
-# Host entry, keeping the key the host already uses (what --rewrite writes):
-#   "notion": { "command": "sayagain", "args": ["stdio", "notion"] }
+# Host entry, keeping the key the host already uses (what --rewrite writes; the launcher is
+# refreshed by every command, so the entry survives Node.js and package upgrades):
+#   "notion": { "command": "~/.sayagain/bin/sayagain", "args": ["stdio", "notion"] }
 # or, for hosts that speak Streamable HTTP (--transport http):
 #   "notion": { "type": "http", "url": "http://127.0.0.1:7777/mcp/notion",
 #               "headers": { "Authorization": "Bearer <token>" } }

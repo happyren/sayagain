@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,9 +15,18 @@ import {
 } from "./client-api.js";
 import { startDaemon } from "./daemon.js";
 import { defaultDeadLetterPath, readDeadLetters } from "./deadletter.js";
-import { HOST_IDS, HOSTS, type HostId, hostFiles, isHostId, type Scope } from "./hosts.js";
+import {
+  HOST_IDS,
+  HOSTS,
+  type HostId,
+  hostFiles,
+  isHostId,
+  type Scope,
+  type Target,
+} from "./hosts.js";
+import { ensureLauncher, launcherCaveat } from "./launcher.js";
 import { defaultLedgerPath, JsonlLedger, readLedger } from "./ledger.js";
-import { ejectHost, importHost, inspectHost, installHost, type Target } from "./onboarding.js";
+import { ejectHost, importHost, inspectHost, installHost } from "./onboarding.js";
 import { parseClassOverrides } from "./policy.js";
 import {
   addServer,
@@ -59,12 +68,14 @@ const USAGE = `sayagain ${PROXY_VERSION}
   sayagain remove <name> | sayagain list | sayagain status | sayagain stop
   sayagain hosts [--project] [--json]
       Which MCP hosts are configured on this machine (Claude Code, Cursor, Claude Desktop, VS Code) and what they hold.
-  sayagain import --host <id>|all [--rewrite] [--dry-run] [--force] [--project] [--file <path>] [--transport stdio|http] [--command <path>]
-      Register the host's servers; with --rewrite, point the host's entries at Say Again (same keys, backup beside the file).
-  sayagain install --host <id>|all [--project] [--file <path>] [--dry-run] [--transport stdio|http] [--command <path>] [name...]
+  sayagain import --host <id>|all [--rewrite] [--dry-run] [--force] [--project] [--file <path>] [--transport stdio|http] [--command <path>] [--no-start]
+      Register the host's servers; with --rewrite, point the host's entries at Say Again (same keys; backups in ~/.sayagain/backups)
+      and start the daemon from this shell. Entries point at ~/.sayagain/bin/sayagain, a launcher every command refreshes.
+  sayagain install --host <id>|all [--project] [--file <path>] [--dry-run] [--transport stdio|http] [--command <path>] [--no-start] [name...]
       Write entries for registered servers into a host's file.
-  sayagain eject --host <id>|all [--project] [--file <path>] [--dry-run] [--keep] [name...]
-      Restore the host's original entries and forget the servers that import registered (--keep keeps them registered).
+  sayagain eject --host <id>|all [--project] [--file <path>] [--dry-run] [--keep] [--prune] [name...]
+      Restore the host's original entries and forget the servers that import registered (--keep keeps them; --prune also removes
+      Say Again entries whose server is no longer registered).
   sayagain stdio <name>
       Thin stdio client for hosts that only spawn commands; starts the daemon if needed.
   sayagain ledger [--ledger <path>] [--tail <n>] [--json]
@@ -112,6 +123,20 @@ function takeFlag(args: string[], name: string): boolean {
   if (i < 0) return false;
   args.splice(i, 1);
   return true;
+}
+
+/** Is a Claude Code session running? It rewrites ~/.claude.json when it exits. */
+function claudeCodeRunning(): boolean {
+  if (process.platform === "win32") return false;
+  try {
+    return (
+      execFileSync("pgrep", ["-x", "claude"], { stdio: ["ignore", "pipe", "ignore"] })
+        .toString()
+        .trim().length > 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -207,6 +232,7 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     const token = loadOrCreateToken();
+    ensureLauncher();
     const kind: StoreKind = (store as StoreKind | undefined) ?? registry.daemon?.store ?? "jsonl";
     const storeOptions: Parameters<typeof openStores>[1] = {
       log: (l) => process.stderr.write(`${l}\n`),
@@ -316,6 +342,11 @@ export async function main(argv: string[]): Promise<number> {
   if (command === "remove") {
     const name = rest[0];
     if (!name) throw new UsageError("remove: expected a server name");
+    const origins = Object.keys(loadRegistry().servers[name]?.origins ?? {});
+    if (origins.length)
+      process.stderr.write(
+        `note: ${name} was imported from ${origins.length} host file(s); eject it first (sayagain eject --host all ${name}) to restore the original entries\n`,
+      );
     const removed = removeServer(name);
     process.stdout.write(removed ? `removed ${name}\n` : `no server named ${name}\n`);
     if (removed && (await liveDaemon()))
@@ -378,19 +409,39 @@ export async function main(argv: string[]): Promise<number> {
     const json = takeFlag(opts, "--json");
     const project = takeFlag(opts, "--project");
     if (opts.length) throw new UsageError(`hosts: unknown option ${opts[0]}`);
-    const rows = hostFiles(process.cwd(), project ? ["user", "project"] : ["user"]).map((f) => ({
-      ...f,
-      label: HOSTS[f.host].label,
-      ...(f.exists ? inspectHost(f) : { servers: [] as string[], wrapped: [] as string[] }),
-    }));
+    const rows = hostFiles(
+      process.cwd(),
+      project ? ["user", "local", "project"] : ["user", "local"],
+    ).map((f) => {
+      const base = {
+        ...f,
+        label: HOSTS[f.host].label,
+        servers: [] as string[],
+        wrapped: [] as string[],
+        error: undefined as string | undefined,
+      };
+      if (!f.exists) return base;
+      try {
+        return { ...base, ...inspectHost(f) };
+      } catch (err) {
+        return { ...base, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
     if (json) {
       process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
       return 0;
     }
-    for (const r of rows)
+    for (const r of rows) {
+      const where = r.scope === "local" ? `local ${r.project ?? ""}` : r.scope;
+      const state = r.error
+        ? `error: ${r.error}`
+        : r.exists
+          ? `${r.servers.length} server(s), ${r.wrapped.length} through Say Again`
+          : "no config file";
       process.stdout.write(
-        `${r.label.padEnd(15)} ${r.scope.padEnd(8)} ${r.exists ? `${r.servers.length} server(s), ${r.wrapped.length} through Say Again` : "no config file"}  ${r.file}\n`,
+        `${r.label.padEnd(15)} ${where.padEnd(8)} ${state}  ${r.scope === "local" ? "" : r.file}\n`,
       );
+    }
     process.stdout.write(
       "\nsayagain import --host all --rewrite   wraps every server the hosts above know about\n",
     );
@@ -406,19 +457,21 @@ export async function main(argv: string[]): Promise<number> {
     const rewrite = command === "import" ? takeFlag(opts, "--rewrite") : false;
     const force = command === "import" ? takeFlag(opts, "--force") : false;
     const keep = command === "eject" ? takeFlag(opts, "--keep") : false;
+    const prune = command === "eject" ? takeFlag(opts, "--prune") : false;
+    const noStart = command === "eject" ? true : takeFlag(opts, "--no-start");
     const transport =
       command === "eject" ? undefined : (takeOption(opts, "--transport") ?? "stdio");
     const commandPath = command === "eject" ? undefined : takeOption(opts, "--command");
-    const names = opts.filter((o) => !o.startsWith("--"));
-    const unknown = opts.find((o) => o.startsWith("--"));
+    const unknown = opts.find((o) => o.startsWith("-"));
     if (unknown) throw new UsageError(`${command}: unknown option ${unknown}`);
+    const names = opts;
     if (command === "import" && names.length)
       throw new UsageError("import: takes no server names; it imports every server in the file");
     if (transport !== undefined && transport !== "stdio" && transport !== "http")
       throw new UsageError(`${command}: --transport must be stdio or http`);
     if (!hostOption)
       throw new UsageError(`${command}: --host <${HOST_IDS.join("|")}|all> is required`);
-    const scopes: Scope[] = project ? ["user", "project"] : ["user"];
+    const scopes: Scope[] = project ? ["user", "local", "project"] : ["user", "local"];
     let targets: Target[];
     if (hostOption === "all") {
       if (fileOption) throw new UsageError(`${command}: --file needs one --host`);
@@ -436,21 +489,41 @@ export async function main(argv: string[]): Promise<number> {
       const scope: Scope = project ? "project" : "user";
       if (!HOSTS[host].scopes.includes(scope))
         throw new UsageError(`${command}: ${HOSTS[host].label} has no project-scope config`);
-      targets = [
-        { host, scope, file: resolve(fileOption ?? HOSTS[host].file(scope, process.cwd())) },
-      ];
+      const file = resolve(fileOption ?? HOSTS[host].file(scope, process.cwd()));
+      targets = [{ host, scope, file, path: [HOSTS[host].key] }];
+      if (!fileOption && host === "claude-code" && !project)
+        targets.push(
+          ...hostFiles(process.cwd(), ["local"]).filter((f) => f.host === "claude-code"),
+        );
     }
+    if (transport === "http") {
+      for (const t of targets.filter((t) => !HOSTS[t.host].http))
+        process.stdout.write(
+          `${HOSTS[t.host].label}: does not accept HTTP entries; skipped (use --transport stdio for it)\n`,
+        );
+      targets = targets.filter((t) => HOSTS[t.host].http);
+    }
+    if (
+      !dryRun &&
+      targets.some((t) => t.host === "claude-code" && t.scope !== "project") &&
+      claudeCodeRunning()
+    )
+      process.stderr.write(
+        "note: Claude Code is running; it rewrites ~/.claude.json when a session ends and may undo this change. Close sessions first, or run this again afterwards.\n",
+      );
     const log = (l: string) => process.stderr.write(`${l}\n`);
-    const label = (t: Target) => `${HOSTS[t.host].label} (${t.scope})  ${t.file}`;
+    const label = (t: Target) =>
+      `${HOSTS[t.host].label} (${t.scope === "local" ? `local: ${t.project ?? ""}` : t.scope})  ${t.file}`;
     const list = (xs: string[]) => (xs.length ? ` (${xs.join(", ")})` : "");
+    const entryOptions = {
+      transport: transport as "stdio" | "http",
+      ...(commandPath ? { command: commandPath } : {}),
+    };
     let anyRewritten = false;
+    let failed = false;
     for (const t of targets) {
       try {
         if (command === "import") {
-          const entryOptions = {
-            transport: transport as "stdio" | "http",
-            ...(commandPath ? { command: commandPath } : {}),
-          };
           const r = importHost(t, { log, dryRun, rewrite, force, ...entryOptions });
           const parts = [`imported ${r.imported.length}${list(r.imported)}`];
           if (r.updated.length) parts.push(`updated ${r.updated.length}${list(r.updated)}`);
@@ -461,10 +534,6 @@ export async function main(argv: string[]): Promise<number> {
           if (r.backup) process.stdout.write(`  backup: ${r.backup}\n`);
           anyRewritten ||= r.rewritten.length > 0;
         } else if (command === "install") {
-          const entryOptions = {
-            transport: transport as "stdio" | "http",
-            ...(commandPath ? { command: commandPath } : {}),
-          };
           const r = installHost(t, names.length ? names : undefined, {
             log,
             dryRun,
@@ -476,27 +545,42 @@ export async function main(argv: string[]): Promise<number> {
           if (r.backup) process.stdout.write(`  backup: ${r.backup}\n`);
           anyRewritten ||= r.added.length + r.rewritten.length > 0;
         } else {
-          const r = ejectHost(t, names.length ? names : undefined, { log, dryRun, keep });
+          const r = ejectHost(t, names.length ? names : undefined, { log, dryRun, keep, prune });
           process.stdout.write(
             `${dryRun ? "[dry-run] " : ""}${label(t)}\n  restored ${r.restored.length}${list(r.restored)}, removed ${r.removed.length}${list(r.removed)}, unregistered ${r.unregistered.length}${list(r.unregistered)}\n`,
           );
+          for (const l of r.left) process.stdout.write(`  left ${l.name}: ${l.reason}\n`);
           if (r.backup) process.stdout.write(`  backup: ${r.backup}\n`);
         }
       } catch (err) {
-        process.stdout.write(
+        failed = true;
+        process.stderr.write(
           `${label(t)}\n  error: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
     }
     if (command === "import" && !rewrite && !dryRun)
       process.stdout.write("\nregistered only; add --rewrite to point the host at Say Again\n");
-    if (anyRewritten && !dryRun)
-      process.stdout.write(
-        "\nrestart the host to pick up the change; the daemon starts on first use (or now: sayagain serve --detach)\n",
-      );
-    return 0;
+    if (anyRewritten && !dryRun) {
+      const caveat = launcherCaveat();
+      if (caveat) process.stderr.write(`note: ${caveat}\n`);
+      if (!noStart && !(await liveDaemon())) {
+        // Started from this shell, the daemon inherits the environment the upstreams expect (PATH, exported tokens).
+        const { file, args } = serveArgv();
+        const child = spawn(file, args, { detached: true, stdio: "ignore", env: process.env });
+        child.on("error", () => undefined);
+        child.unref();
+        const info = await waitForDaemon(10_000, child.pid);
+        process.stdout.write(
+          info
+            ? `\ndaemon started (pid ${info.pid}) at http://${info.host}:${info.port}\n`
+            : "\nthe daemon did not start; run: sayagain serve\n",
+        );
+      }
+      process.stdout.write("restart the host to pick up the change\n");
+    }
+    return failed ? 1 : 0;
   }
-
   if (command === "ledger") {
     const opts = [...rest];
     const ledgerOption = takeOption(opts, "--ledger");

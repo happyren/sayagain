@@ -114,7 +114,7 @@ flowchart LR
   subgraph adopt["01 Adopt"]
     backup["Backup"]
     restored["Host config, restored"]
-    registry["~/.sayagain/config.toml"]
+    registry["~/.sayagain/config.json"]
     hostcfg["Host config file"]
     rewritten["Host config, rewritten"]
     eject["sayagain eject"]

@@ -5,11 +5,32 @@ export interface JsoncResult {
   hadComments: boolean;
 }
 
-/** Strip // and block comments outside strings, and trailing commas before } or ]. */
-export function stripJsonc(text: string): { text: string; hadComments: boolean } {
+/**
+ * Strip a leading BOM, `//` and block comments outside strings, and trailing
+ * commas before `}` or `]`. Strings are copied verbatim, so a `,]` or `//`
+ * inside one is untouched.
+ */
+export function stripJsonc(input: string): { text: string; hadComments: boolean } {
+  const text = input.replace(/^\uFEFF/, "");
   let out = "";
   let hadComments = false;
   let i = 0;
+  const skipCommentsAndSpace = (from: number): number => {
+    let j = from;
+    for (;;) {
+      while (j < text.length && /\s/.test(text[j] as string)) j++;
+      if (text[j] === "/" && text[j + 1] === "/") {
+        while (j < text.length && text[j] !== "\n") j++;
+        continue;
+      }
+      if (text[j] === "/" && text[j + 1] === "*") {
+        const end = text.indexOf("*/", j + 2);
+        j = end < 0 ? text.length : end + 2;
+        continue;
+      }
+      return j;
+    }
+  };
   while (i < text.length) {
     const c = text[i] as string;
     if (c === '"') {
@@ -33,11 +54,16 @@ export function stripJsonc(text: string): { text: string; hadComments: boolean }
       i = end < 0 ? text.length : end + 2;
       continue;
     }
+    if (c === ",") {
+      const next = text[skipCommentsAndSpace(i + 1)];
+      if (next === "}" || next === "]") {
+        i++;
+        continue; // trailing comma: drop it, keep whatever whitespace or comment follows
+      }
+    }
     out += c;
     i++;
   }
-  // Trailing commas: a comma followed only by whitespace and a closing bracket.
-  out = out.replace(/,(\s*[}\]])/g, "$1");
   return { text: out, hadComments };
 }
 
