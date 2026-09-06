@@ -702,10 +702,37 @@ export interface AbReport {
   differences: {
     /** Primary, cost: the failure tax in bytes per call. */
     recoveryBytesPerCall: ArmDiff;
+    /**
+     * The same difference from a seeded percentile bootstrap, which makes no normality assumption.
+     * The per-call series is mostly zeros with a long tail, so this is the interval to read
+     * (docs/measurement.md 5.4, amendment of 2026-09-06).
+     */
+    recoveryBytesPerCallRobust: ArmDiff;
     /** Primary, risk: unacknowledged writes per 1,000 writes. */
     unacknowledgedPer1kWrites: ArmDiff;
     /** Secondary: the failure rate in percentage points. */
     failureRatePct: ArmDiff;
+  };
+  /**
+   * The failure tax is a failure rate times what a failure costs. Both factors are steadier than
+   * their product, and a change in either says something different about the boundary.
+   */
+  taxFactors: {
+    control: { failureRatePct: number; bytesPerFailure: number };
+    treatment: { failureRatePct: number; bytesPerFailure: number };
+  };
+  /** How fast the arms are filling, and when the smaller one reaches the target at that rate. */
+  rate: { perArmPerDay: number | null; daysToTarget: number | null; targetDate: string | null };
+  /** What a sample of this size can distinguish, from the variance and rates seen so far. */
+  power: {
+    /** False while the control arm is too small to estimate a baseline; the figures are then null. */
+    estimable: boolean;
+    callsPerArm: number;
+    /** Smallest difference in bytes per call an interval would exclude zero for, at 80% power. */
+    failureTaxBytes: number | null;
+    /** Smallest relative cut in the rate detectable at that size, 0 to 1; null if none is. */
+    unacknowledgedCut: number | null;
+    failureRateCut: number | null;
   };
   verdict: string;
 }
@@ -771,8 +798,89 @@ function meanDiff(a: number[], b: number[]): ArmDiff {
   };
 }
 
-/** The pre-registered minimum span of the experiment, in days (docs/measurement.md 5.4). */
-export const AB_MINIMUM_DAYS = 14;
+/**
+ * The pre-registered minimum span, in days. Twelve weeks, not two: at the rate this machine's
+ * wrappable servers actually produce, 2,000 calls per arm takes about that long
+ * (docs/measurement.md 5.4, amendment of 2026-09-06).
+ */
+export const AB_MINIMUM_DAYS = 84;
+
+/** z for 80% power, alongside Z for a 95% interval. */
+const Z_POWER = 0.8416212;
+/** Resamples for the bootstrap interval: enough for a stable 95% percentile, cheap enough to run. */
+const BOOTSTRAP = 2000;
+
+/** A small deterministic generator, so the same ledger always produces the same interval. */
+function seeded(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const meanOf = (xs: number[]): number =>
+  xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+
+/**
+ * Percentile bootstrap for a difference of means (control minus treatment). The per-call cost series
+ * is mostly zeros with a few very large values, where a normal interval is the wrong shape.
+ */
+function bootstrapDiff(a: number[], b: number[]): ArmDiff {
+  const delta = meanOf(a) - meanOf(b);
+  const r = (v: number) => Math.round(v);
+  if (a.length < 2 || b.length < 2)
+    return {
+      control: r(meanOf(a)),
+      treatment: r(meanOf(b)),
+      delta: r(delta),
+      low: null,
+      high: null,
+      distinguishable: false,
+    };
+  const rand = seeded(0x5a11a9a1);
+  const draws: number[] = [];
+  for (let i = 0; i < BOOTSTRAP; i++) {
+    let sa = 0;
+    for (let j = 0; j < a.length; j++) sa += a[(rand() * a.length) | 0] as number;
+    let sb = 0;
+    for (let j = 0; j < b.length; j++) sb += b[(rand() * b.length) | 0] as number;
+    draws.push(sa / a.length - sb / b.length);
+  }
+  draws.sort((x, y) => x - y);
+  const at = (q: number) =>
+    draws[Math.min(draws.length - 1, Math.max(0, Math.round(q * (draws.length - 1))))] as number;
+  const low = at(0.025);
+  const high = at(0.975);
+  return {
+    control: r(meanOf(a)),
+    treatment: r(meanOf(b)),
+    delta: r(delta),
+    low: r(low),
+    high: r(high),
+    distinguishable: r(low) > 0 || r(high) < 0,
+  };
+}
+
+/** Sample size per arm for a difference of proportions at 95% and 80% power. */
+function sizeForProportions(p1: number, p2: number): number {
+  if (p1 === p2) return Number.POSITIVE_INFINITY;
+  const pbar = (p1 + p2) / 2;
+  const a = Z * Math.sqrt(2 * pbar * (1 - pbar));
+  const b = Z_POWER * Math.sqrt(p1 * (1 - p1) + p2 * (1 - p2));
+  return (a + b) ** 2 / (p1 - p2) ** 2;
+}
+
+/** The smallest relative cut in a rate that a sample of this size could distinguish. */
+function detectableCut(p: number, n: number): number | null {
+  if (!(p > 0) || !(n > 0)) return null;
+  for (let cut = 0.01; cut <= 1.0001; cut += 0.01)
+    if (sizeForProportions(p, p * (1 - cut)) <= n) return +cut.toFixed(2);
+  return null;
+}
 
 /** The A/B protocol's page: both arms with the report's definitions, and the differences with intervals. */
 export function abReport(
@@ -850,6 +958,7 @@ export function abReport(
   const treatment = arm("treatment");
   const differences = {
     recoveryBytesPerCall: meanDiff(series.control, series.treatment),
+    recoveryBytesPerCallRobust: bootstrapDiff(series.control, series.treatment),
     unacknowledgedPer1kWrites: proportionDiff(
       control.unacknowledged,
       control.writes,
@@ -865,9 +974,64 @@ export function abReport(
       100,
     ),
   };
+  const factorsOf = (
+    a: ArmStats,
+    s: number[],
+  ): { failureRatePct: number; bytesPerFailure: number } => ({
+    failureRatePct: a.failureRatePct,
+    bytesPerFailure: a.failures ? Math.round(s.reduce((x, y) => x + y, 0) / a.failures) : 0,
+  });
+  const taxFactors = {
+    control: factorsOf(control, series.control),
+    treatment: factorsOf(treatment, series.treatment),
+  };
+
+  const smaller = Math.min(control.calls, treatment.calls);
+  // Two days of armed traffic before a rate means anything; below that the projection would be noise.
+  const perArmPerDay = experiment.days >= 2 ? +(smaller / experiment.days).toFixed(1) : null;
+  const daysToTarget =
+    perArmPerDay && perArmPerDay > 0
+      ? Math.ceil(Math.max(0, target - smaller) / perArmPerDay)
+      : null;
+  const rate = {
+    perArmPerDay,
+    daysToTarget,
+    targetDate:
+      daysToTarget === null
+        ? null
+        : new Date(until.getTime() + daysToTarget * 86_400_000).toISOString(),
+  };
+
+  // What the pre-registered size can distinguish, given the spread and rates seen so far.
+  const pooled = [...series.control, ...series.treatment];
+  const n = pooled.length;
+  const mean = meanOf(pooled);
+  const sd = n > 1 ? Math.sqrt(pooled.reduce((a, x) => a + (x - mean) ** 2, 0) / (n - 1)) : 0;
+  const writeShare = control.calls ? control.writes / control.calls : 0;
+  // A baseline needs enough of the control arm to be worth quoting; below that the figures would
+  // say more about the sample than about the design.
+  const POWER_MIN_CALLS = 100;
+  const estimable = control.calls >= POWER_MIN_CALLS;
+  const power = {
+    estimable,
+    callsPerArm: target,
+    failureTaxBytes:
+      estimable && n >= 30 && sd > 0
+        ? Math.round((Z + Z_POWER) * sd * Math.sqrt(2 / target))
+        : null,
+    unacknowledgedCut:
+      estimable && control.writes > 0 && control.unacknowledged > 0
+        ? detectableCut(control.unacknowledged / control.writes, target * writeShare)
+        : null,
+    failureRateCut:
+      estimable && control.failures > 0
+        ? detectableCut(control.failures / control.calls, target)
+        : null,
+  };
+
   const shortCalls = Math.max(0, target - Math.min(control.calls, treatment.calls));
   const shortDays = Math.max(0, +(AB_MINIMUM_DAYS - experiment.days).toFixed(1));
-  const cost = differences.recoveryBytesPerCall;
+  const cost = differences.recoveryBytesPerCallRobust;
   const risk = differences.unacknowledgedPer1kWrites;
   const say = (d: ArmDiff, unit: string) => {
     if (d.low === null || d.high === null) return `not estimable (${d.delta} ${unit})`;
@@ -897,6 +1061,9 @@ export function abReport(
     targetCallsPerArm: target,
     minimumDays: AB_MINIMUM_DAYS,
     experiment,
+    taxFactors,
+    rate,
+    power,
     outside,
     arms: { control, treatment },
     differences,

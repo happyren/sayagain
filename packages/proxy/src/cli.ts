@@ -421,6 +421,12 @@ function renderAbReport(r: AbReport): string {
     `${t.boundary.deadLettered} / ${t.boundary.deduplicated}`,
   );
   out.push("");
+  line(
+    "failure tax = rate x cost",
+    `${c.failureRatePct}% x ${r.taxFactors.control.bytesPerFailure}B`,
+    `${t.failureRatePct}% x ${r.taxFactors.treatment.bytesPerFailure}B`,
+  );
+  out.push("");
   out.push("Differences, control minus treatment (95% interval; positive favours the boundary)");
   const d = r.differences;
   const show = (label: string, x: AbDiff, unit: string) => {
@@ -431,8 +437,27 @@ function renderAbReport(r: AbReport): string {
   };
   // Risk first, then cost (ADR-0009 decision 2).
   show("unacknowledged (primary, risk)", d.unacknowledgedPer1kWrites, "per 1K writes");
-  show("failure tax (primary, cost)", d.recoveryBytesPerCall, "bytes/call");
+  show("failure tax (primary, cost)", d.recoveryBytesPerCallRobust, "bytes/call");
+  show("  the same, normal interval", d.recoveryBytesPerCall, "bytes/call");
   show("failure rate (secondary)", d.failureRatePct, "points");
+  out.push("");
+  if (r.rate.perArmPerDay !== null)
+    out.push(
+      `Filling at ${r.rate.perArmPerDay} calls per arm per day${
+        r.rate.daysToTarget
+          ? `; ${r.rate.targetDate ? `the target is met around ${when(r.rate.targetDate)}` : ""} (${r.rate.daysToTarget} days)`
+          : "; the target is met"
+      }`,
+    );
+  else out.push("Filling too briefly to project a rate yet (two days of armed calls are needed)");
+  const p = r.power;
+  const cut = (x: number | null) =>
+    x === null ? "nothing short of elimination" : `a ${Math.round(100 * x)}% cut`;
+  out.push(
+    p.estimable
+      ? `At ${p.callsPerArm} calls per arm, this much traffic can distinguish: unacknowledged writes ${cut(p.unacknowledgedCut)}, failure rate ${cut(p.failureRateCut)}, failure tax ${p.failureTaxBytes === null ? "not estimable" : `a change of ${p.failureTaxBytes} bytes per call`} (docs/measurement.md 5.4).`
+      : "Too few control calls yet to say what this sample could distinguish (docs/measurement.md 5.4 carries the figures from the baseline).",
+  );
   out.push("");
   out.push(`Verdict: ${r.verdict}`);
   if (r.outside) out.push(`Rows outside the experiment (no arm): ${r.outside}`);

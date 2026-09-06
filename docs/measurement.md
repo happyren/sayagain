@@ -226,6 +226,54 @@ why:
   only; `daily` is predictable and confounded with day-of-week and
   workload, so `coinflip` is the default.
 
+Amendment, 2026-09-06 (0.15.0), written before the experiment has any data:
+the ledger held nine rows, all from commissioning, when these figures were
+computed, so nothing here is chosen with an outcome in view.
+
+**The rate.** Over the 30 days to 2026-09-06 this machine made 3,874 MCP
+calls, of which 1,418 went to servers the boundary can wrap (docent 1,367,
+codegraph 50, pencil 1). The rest belong to servers the host provides
+itself and no host file names, so `import` cannot reach them: Claude's
+browser tools 2,174, github 81, and eight smaller ones. The boundary
+therefore sees about 47 calls a day, 24 per arm, and the pre-registered
+2,000 calls per arm arrives in about 85 days, not the four weeks the
+runbook assumed. The experiment's population is docent-dominated: it
+measures the boundary on one server's traffic, and the whitepaper has to
+say so.
+
+**What that sample can distinguish.** From the same 30 days (failure rate
+3.5%, unacknowledged writes 8 per 1,000 writes, recovery bytes per call
+mean 47,126 and standard deviation 422,990), at 95% and 80% power:
+
+| calls per arm | days | failure tax | unacknowledged writes | failure rate |
+|---|---|---|---|---|
+| 1,000 | 42 | no useful bound | elimination only | a 57% cut |
+| 2,000 | 85 | a 79% cut | an 82% cut | a 42% cut |
+| 4,000 | 169 | a 56% cut | a 62% cut | a 31% cut |
+
+So the pre-registered size answers "does the boundary largely remove
+unacknowledged writes and most of the failure tax", and cannot answer
+"does it halve them". That is the claim the proof will support, and the
+one the whitepaper may make.
+
+**Changed by this amendment:**
+
+- The stopping rule is 2,000 calls per arm or 12 weeks of armed traffic,
+  whichever is later, replacing "two weeks" with the span the measured
+  rate actually implies. `sayagain report --ab` prints the fill rate and
+  the date the target is met, so the rule is checked and not guessed.
+- The interval for the failure tax is a seeded percentile bootstrap over
+  the per-call series rather than the normal interval on Welch's standard
+  error. The series is mostly zeros with a few very large values, where a
+  normal interval is the wrong shape. Both are printed; the bootstrap is
+  the one the verdict reads.
+- The failure tax is also reported as its two factors, the failure rate
+  and the bytes a failure costs. They move for different reasons: the
+  boundary can lower the rate by repairing a call before it leaves, and
+  lower the cost by answering a failure the model would otherwise chase.
+- Nothing else changes: the outcomes, their order, the sign convention,
+  the decision rule and the arms are as amended on 2026-09-06 above.
+
 ### 5.5 Registry scan (whitepaper launch)
 
 Run `@sayagain/lint` over every server in the public registry that

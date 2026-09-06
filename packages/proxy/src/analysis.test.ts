@@ -352,7 +352,7 @@ describe("analysis", () => {
     // The rows span seconds, so the calls are in but the two weeks are not.
     expect(r.experiment.days).toBe(0);
     expect(r.verdict).toContain(
-      "14 more days before the pre-registered minimum (14 days or 30 calls per arm, whichever is later)",
+      "84 more days before the pre-registered minimum (84 days or 30 calls per arm, whichever is later)",
     );
     expect(r.verdict).toContain("Failure tax per call: treatment lowers it by");
     expect(r.verdict.indexOf("Unacknowledged writes")).toBeLessThan(
@@ -365,23 +365,23 @@ describe("analysis", () => {
       if (x.arm === "treatment") lastTreatment = i;
     });
     const spread = rows.map((x, i) =>
-      i === lastTreatment ? { ...x, ts: new Date(t0 + 15 * 86_400_000).toISOString() } : x,
+      i === lastTreatment ? { ...x, ts: new Date(t0 + 90 * 86_400_000).toISOString() } : x,
     );
     const passed = abReport(spread, {
       since: new Date(t0 - 1000),
-      until: new Date(t0 + 16 * 86_400_000),
+      until: new Date(t0 + 91 * 86_400_000),
       targetCallsPerArm: 30,
     });
-    expect(passed.experiment.days).toBeCloseTo(15, 0);
+    expect(passed.experiment.days).toBeCloseTo(90, 0);
     expect(passed.verdict).toContain(
-      "Both arms passed the pre-registered minimum (14 days and 30 calls per arm)",
+      "Both arms passed the pre-registered minimum (84 days and 30 calls per arm)",
     );
     const early = abReport(rows.slice(0, 10), {
       since: new Date(t0 - 1000),
       until: new Date(t0 + 1_000_000),
     });
     expect(early.verdict).toMatch(
-      /^\d+ more calls in the smaller arm and 14 more days before the pre-registered minimum \(14 days or 2000 calls per arm/,
+      /^\d+ more calls in the smaller arm and 84 more days before the pre-registered minimum \(84 days or 2000 calls per arm/,
     );
     expect(early.differences.recoveryBytesPerCall.distinguishable).toBe(false);
     const empty = abReport([], { since: new Date(t0 - 1000), until: new Date(t0 + 1000) });
@@ -393,6 +393,88 @@ describe("analysis", () => {
       delta: 0,
       distinguishable: false,
     });
+  });
+
+  it("brackets a heavy-tailed cost with a bootstrap, decomposes the tax, and projects the fill rate", () => {
+    // A tail like the real one: most calls cost nothing to recover, a few cost a great deal.
+    const rows: LedgerRow[] = [];
+    let t = 0;
+    for (const arm of ["control", "treatment"] as const)
+      for (let i = 0; i < 200; i++) {
+        const fails = arm === "control" ? i % 10 === 0 : i % 25 === 0;
+        rows.push(
+          row({
+            tool: "echo",
+            at: t++ * 900,
+            arm,
+            session: `${arm}-${Math.floor(i / 20)}`,
+            toolClass: "write",
+            ...(fails
+              ? { isError: true, errorClass: "retryable" as const, responseBytes: 200_000 }
+              : {}),
+          }),
+        );
+        if (fails)
+          rows.push(
+            row({
+              tool: "echo",
+              at: t++ * 900,
+              arm,
+              session: `${arm}-${Math.floor(i / 20)}`,
+              toolClass: "write",
+            }),
+          );
+      }
+    const r = abReport(rows, {
+      since: new Date(t0 - 1000),
+      until: new Date(t0 + 500 * 900 * 1000),
+      targetCallsPerArm: 100,
+    });
+    const d = r.differences;
+    // Both intervals answer the same question; the bootstrap makes no normality assumption.
+    expect(d.recoveryBytesPerCall.delta).toBe(d.recoveryBytesPerCallRobust.delta);
+    expect(d.recoveryBytesPerCallRobust.low).not.toBeNull();
+    expect(d.recoveryBytesPerCallRobust.low as number).toBeLessThan(
+      d.recoveryBytesPerCallRobust.delta,
+    );
+    expect(d.recoveryBytesPerCallRobust.high as number).toBeGreaterThan(
+      d.recoveryBytesPerCallRobust.delta,
+    );
+    expect(d.recoveryBytesPerCallRobust.distinguishable).toBe(true); // control pays more
+    // Same seed, same interval: the report is reproducible from the ledger.
+    const again = abReport(rows, {
+      since: new Date(t0 - 1000),
+      until: new Date(t0 + 500 * 900 * 1000),
+      targetCallsPerArm: 100,
+    });
+    expect(again.differences.recoveryBytesPerCallRobust).toEqual(d.recoveryBytesPerCallRobust);
+    // The tax is a rate times a cost, and control fails more often for the same cost each time.
+    expect(r.taxFactors.control.failureRatePct).toBeGreaterThan(
+      r.taxFactors.treatment.failureRatePct,
+    );
+    expect(r.taxFactors.control.bytesPerFailure).toBeGreaterThan(0);
+    // Both arms are past the target, so the rate is measurable and nothing is left to fill.
+    expect(r.rate.perArmPerDay as number).toBeGreaterThan(0);
+    expect(r.rate.daysToTarget).toBe(0);
+    expect(r.power.estimable).toBe(true);
+    expect(r.power.callsPerArm).toBe(100);
+    expect(r.power.failureRateCut === null || r.power.failureRateCut > 0).toBe(true);
+  });
+
+  it("says nothing about rate or power until there is enough to say it with", () => {
+    const rows = [
+      row({ tool: "echo", at: 0, arm: "control", session: "c" }),
+      row({ tool: "echo", at: 1, arm: "treatment", session: "t" }),
+    ];
+    const r = abReport(rows, { since: new Date(t0 - 1000), until: new Date(t0 + 10_000) });
+    expect(r.rate).toMatchObject({ perArmPerDay: null, daysToTarget: null, targetDate: null });
+    expect(r.power).toMatchObject({
+      estimable: false,
+      failureTaxBytes: null,
+      unacknowledgedCut: null,
+      failureRateCut: null,
+    });
+    expect(r.differences.recoveryBytesPerCallRobust).toMatchObject({ low: null, high: null });
   });
 
   it("computes Newcombe's interval for the failure-rate difference (10 of 100 against 5 of 100)", () => {
