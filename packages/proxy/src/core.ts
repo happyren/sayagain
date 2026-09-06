@@ -741,6 +741,7 @@ export class Boundary extends EventEmitter {
         this.record(heldRow(Date.now()));
         answerHeld(true);
         this.settle(call, null);
+        this.resolveWaiter(call, { isError: true, text: "held for an operator, who declined it" });
         return;
       }
       this.record(heldRow(Date.now()));
@@ -749,9 +750,18 @@ export class Boundary extends EventEmitter {
       const later = await this.holds.waitFor(call.receipt, this.opts.holdTtlMs);
       finishHold();
       if (later === "approve") send(true);
-      else if (later === "reject" && call.held) {
-        call.held.decision = "reject";
-        this.record(heldRow(Date.now()));
+      else {
+        if (later === "reject" && call.held) {
+          call.held.decision = "reject";
+          this.record(heldRow(Date.now()));
+        }
+        this.resolveWaiter(call, {
+          isError: true,
+          text:
+            later === "reject"
+              ? "held for an operator, who declined it"
+              : "held for an operator until it expired",
+        });
       }
     })().catch((err: unknown) =>
       this.log(
@@ -995,7 +1005,14 @@ export class Boundary extends EventEmitter {
     // Only an answer that names the thing as missing counts as absence. Any other failure of the
     // verifier (a timeout, a server not ready, a conflict) says nothing about the write, and a
     // re-send on its strength would be the duplicate this path exists to prevent.
-    const gone = outcome.isError && saysAbsent(outcome.text);
+    // The absence has to be of the thing asked for: a verifier that failed to start can say "not
+    // found" about its own files, and a re-send on that would duplicate the write. When the
+    // declaration resolved to a scalar, the answer must name it.
+    const named = Object.values(args)
+      .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
+      .map(String);
+    const aboutIt = named.length === 0 || named.some((v) => outcome.text.includes(v));
+    const gone = outcome.isError && saysAbsent(outcome.text) && aboutIt;
     const present = effect === "result" ? !outcome.isError : gone;
     const absent = effect === "result" ? gone : !outcome.isError;
     if (present) {
@@ -1040,7 +1057,10 @@ export class Boundary extends EventEmitter {
           return;
         }
         const timer = setTimeout(() => {
-          if (this.replayWaiters.delete(keyOf(call.id)))
+          // A call parked for an operator meanwhile answers through the hold, not through this timer.
+          if (this.heldById.has(keyOf(call.id))) return;
+          // `abandon` resolves the waiter itself; deleting it first would leave the caller waiting forever.
+          if (this.replayWaiters.has(keyOf(call.id)))
             this.abandon(call, `no response from upstream within ${this.opts.replayTimeoutMs} ms`);
         }, this.opts.replayTimeoutMs);
         timer.unref();

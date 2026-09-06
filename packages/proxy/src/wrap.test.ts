@@ -638,6 +638,25 @@ describe("lifecycle", () => {
     }
   });
 
+  it("holds the write when the verifier never answers, and leaves no dead letter behind", async () => {
+    const h = harness({ hold: "destructive", holdWaitMs: 200 }, { replayTimeoutMs: 300 });
+    try {
+      await h.handshake();
+      h.call(1, "hangverify_write", { id: "h" });
+      // The probe times out at 300 ms; the call must then be held, not left hanging for the sweep.
+      expect(meta(await h.waitFor(1, 3000))["sh.sayagain/status"]).toBe("held");
+      // Before shutdown, which dead-letters any call still held: the probe itself was never one.
+      expect(h.wrapped.deadLetters.list()).toEqual([]);
+      const probe = h.ledger.rows.find((r) => r.tool === "hang_probe");
+      expect(probe).toMatchObject({ isError: true, status: "executed" });
+      expect(probe?.verifies).toBeDefined();
+      await h.finish();
+      expect(h.wrapped.deadLetters.list().some((d) => d.tool === "hang_probe")).toBe(false);
+    } finally {
+      await h.finish();
+    }
+  });
+
   it("does not read a write back when the policy says not to", async () => {
     const h = harness({ hold: "destructive", verify: false, holdWaitMs: 200 });
     try {

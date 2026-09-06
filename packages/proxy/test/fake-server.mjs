@@ -100,6 +100,19 @@ rl.on("line", (line) => {
             inputSchema: { type: "object" },
             _meta: { "sh.sayagain/verify": { tool: "landed", arguments: { id: "$result.id" } } },
           },
+          // A verifier that never answers: its silence says nothing about the write.
+          {
+            name: "hangverify_write",
+            inputSchema: { type: "object" },
+            _meta: {
+              "sh.sayagain/verify": { tool: "hang_probe", arguments: { id: "$arguments.id" } },
+            },
+          },
+          {
+            name: "hang_probe",
+            inputSchema: { type: "object" },
+            annotations: { readOnlyHint: true },
+          },
         ],
       },
     });
@@ -184,7 +197,8 @@ rl.on("line", (line) => {
       name === "vanished_write" ||
       name === "unverifiable_write" ||
       name === "unready_write" ||
-      name === "badtemplate_write"
+      name === "badtemplate_write" ||
+      name === "hangverify_write"
     ) {
       const key = `${name}:${args.id}`;
       if (!lostOnce.has(key)) {
@@ -202,6 +216,8 @@ rl.on("line", (line) => {
         lostOnce.add(key);
         fail("Error: Request timed out");
       } else ok();
+    } else if (name === "hang_probe") {
+      // never answers
     } else if (name === "unready") {
       fail("Error: Client not initialized. Call initialize first."); // semantic, but not an absence
     } else if (name === "landed") {

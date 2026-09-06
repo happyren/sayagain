@@ -323,7 +323,8 @@ export function lintTool(tool: ToolDefinition): Finding[] {
   else if (verify !== undefined) {
     // A declaration the boundary would refuse is worse than none: it reads as a promise.
     const v = verify as { tool?: unknown; arguments?: unknown; effect?: unknown };
-    const props = new Set(Object.keys(tool.inputSchema?.properties ?? {}));
+    const declared = tool.inputSchema?.properties;
+    const props = declared ? new Set(Object.keys(declared)) : null;
     const args =
       typeof v.arguments === "object" && v.arguments !== null && !Array.isArray(v.arguments)
         ? Object.values(v.arguments as Record<string, unknown>)
@@ -332,7 +333,9 @@ export function lintTool(tool: ToolDefinition): Finding[] {
     const bad = args.filter(
       (a) => typeof a !== "string" || (a.startsWith("$") && !a.startsWith("$arguments.")),
     );
-    const unknownRef = refs.filter((a) => !props.has(String(a).slice("$arguments.".length)));
+    const unknownRef = props
+      ? refs.filter((a) => !props.has(String(a).slice("$arguments.".length)))
+      : [];
     if (typeof v.tool !== "string" || !v.tool)
       emit("annotations/verify", "sh.sayagain/verify names no tool");
     else if (bad.length)
