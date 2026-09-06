@@ -94,29 +94,50 @@ export async function daemonLedgerSince(since: Date): Promise<LedgerRow[] | null
 export async function daemonToolsList(name: string): Promise<unknown[] | null> {
   const d = await liveDaemon();
   if (!d) return null;
-  const res = await daemonFetch(d, `/mcp/${encodeURIComponent(name)}`, {
-    method: "POST",
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: "lint",
-      method: "tools/list",
-      params: { _meta: { "sh.sayagain/plain": true } },
-    }),
-  });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string | { message?: string } };
-    const detail =
-      typeof body.error === "object" && body.error
-        ? (body.error.message ?? "")
-        : (body.error ?? "");
-    throw new Error(`daemon answered ${res.status} for ${name}: ${detail}`);
+  const tools: unknown[] = [];
+  let cursor: string | undefined;
+  // A paginated server answers a page at a time; a class table built from page one would drop the
+  // rest, and an override written from it would drop with them.
+  for (let page = 0; page < 50; page++) {
+    const res = await daemonFetch(d, `/mcp/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: `lint-${page}`,
+        method: "tools/list",
+        params: { ...(cursor ? { cursor } : {}), _meta: { "sh.sayagain/plain": true } },
+      }),
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string | { message?: string };
+      };
+      const detail =
+        typeof body.error === "object" && body.error
+          ? (body.error.message ?? "")
+          : (body.error ?? "");
+      throw new Error(`daemon answered ${res.status} for ${name}: ${detail}`);
+    }
+    const msg = (await res.json()) as {
+      result?: { tools?: unknown[]; nextCursor?: unknown };
+      error?: { message?: string };
+    };
+    if (msg.error) throw new Error(msg.error.message ?? "tools/list failed");
+    tools.push(...(msg.result?.tools ?? []));
+    const next = msg.result?.nextCursor;
+    if (typeof next !== "string" || !next) break;
+    cursor = next;
   }
-  const msg = (await res.json()) as {
-    result?: { tools?: unknown[] };
-    error?: { message?: string };
-  };
-  if (msg.error) throw new Error(msg.error.message ?? "tools/list failed");
-  return msg.result?.tools ?? [];
+  return tools;
+}
+
+/** Ask a running daemon to re-read the registry's class tables and hold modes. */
+export async function daemonReloadPolicy(): Promise<number | null> {
+  const d = await liveDaemon();
+  if (!d) return null;
+  const res = await daemonFetch(d, "/api/policy/reload", { method: "POST" });
+  if (!res.ok) throw new Error(`daemon answered ${res.status} for the policy reload`);
+  return ((await res.json()) as { servers?: number }).servers ?? 0;
 }
 
 /** The daemon's learning-loop state, or null when no daemon is live. */

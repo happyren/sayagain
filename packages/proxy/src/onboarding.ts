@@ -388,6 +388,10 @@ export function configFromEntry(
     }
     if (typeof entry.cwd === "string")
       config.cwd = projectRoot ? resolve(projectRoot, entry.cwd) : resolve(entry.cwd);
+    // The host ran this server inside the project; the daemon runs it from its own directory, so a
+    // server that finds its work by the current directory would come up empty. Carry the project
+    // over, but only if it is still there: a stale projects entry would stop the server spawning.
+    else if (projectRoot && existsSync(projectRoot)) config.cwd = resolve(projectRoot);
     return { config };
   }
   return { reason: `unrecognised entry${type ? ` (type ${type})` : ""}` };
@@ -441,7 +445,19 @@ export function importHost(target: Target, opts: ImportOptions): ImportResult {
     }
     const existing = Object.hasOwn(registry.servers, name) ? registry.servers[name] : undefined;
     let config: ServerConfig;
-    if (existing && !sameTransport(existing, translated.config)) {
+    // A working directory this import derived from the project is an upgrade of a server registered
+    // before, not a different server: adopt it instead of reporting a conflict.
+    const derivedCwd = translated.config.cwd;
+    const adoptsCwd =
+      existing !== undefined &&
+      existing.cwd === undefined &&
+      derivedCwd !== undefined &&
+      typeof (entry as { cwd?: unknown }).cwd !== "string" &&
+      sameTransport({ ...existing, cwd: derivedCwd }, translated.config);
+    if (existing && adoptsCwd) {
+      config = { ...existing, cwd: derivedCwd };
+      result.updated.push(name);
+    } else if (existing && !sameTransport(existing, translated.config)) {
       if (!opts.force) {
         result.skipped.push({
           name,
@@ -461,7 +477,13 @@ export function importHost(target: Target, opts: ImportOptions): ImportResult {
     const wrapped = opts.rewrite
       ? boundaryEntry(spec, name, { ...opts, dryRun: opts.dryRun }, registry)
       : undefined;
-    const origin = { host: target.host, entry, ...(wrapped ? { wrapped } : {}) };
+    const project = projectRootOf(target);
+    const origin = {
+      host: target.host,
+      entry,
+      ...(project ? { project } : {}),
+      ...(wrapped ? { wrapped } : {}),
+    };
     const origins = { ...(config.origins ?? {}), [key]: origin };
     if (!existing || !sameEntry(existing, { ...config, origins })) {
       registry.servers[name] = { ...config, origins };

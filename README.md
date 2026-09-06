@@ -44,10 +44,10 @@ approval.
 
 ## Getting started
 
-Today, 0.10: one command wraps every server your hosts know about, one puts
-it back, `sayagain ui` shows what the boundary is doing, and `sayagain audit`
-reports on the history your agents already have (see `docs/ROADMAP.md` for
-what follows).
+Today, 0.14: one command wraps every server your hosts know about, one puts it
+back, `sayagain doctor` says what is still wrong with the setup, `sayagain ui`
+shows what the boundary is doing, and `sayagain audit` reports on the history
+your agents already have (see `docs/ROADMAP.md` for what follows).
 
 ```bash
 npm install -g @sayagain/proxy       # Node 22.13+; provides the `sayagain` command (or: npx -y -p @sayagain/proxy sayagain ...)
@@ -55,6 +55,8 @@ npm install -g @sayagain/proxy       # Node 22.13+; provides the `sayagain` comm
 sayagain hosts                       # what Claude Code, Cursor, Claude Desktop and VS Code have configured
 sayagain import --host all --rewrite # register every server and point each host at Say Again (backups beside the files)
 sayagain eject --host all            # and back
+sayagain doctor                      # what is wrong with the setup, and the command that fixes each one
+sayagain classes --all --suggest     # how every tool is classed, and what its name implies where they differ
 
 # Or by hand: register upstreams, start the daemon, point hosts at it.
 sayagain add notion -- npx -y @notionhq/notion-mcp-server

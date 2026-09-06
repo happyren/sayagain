@@ -5,7 +5,7 @@
  * `wrap` and the daemon are thin shells around this class.
  */
 import { EventEmitter } from "node:events";
-import { META } from "@sayagain/sdk";
+import { META, type ToolClass } from "@sayagain/sdk";
 import {
   ANNOUNCEMENT,
   abandonedResponse,
@@ -308,6 +308,18 @@ export class Boundary extends EventEmitter {
   }
 
   /** Stop the upstream and resolve once it has actually exited (or after a short grace period). */
+  /**
+   * Apply a changed class table or hold mode to a running boundary. Both are pure policy: no
+   * connection, session or pending call depends on them, so the upstream keeps running.
+   */
+  setPolicy(next: { classes?: Record<string, ToolClass>; hold?: PolicyOptions["hold"] }): void {
+    if (next.classes) {
+      this.policy.classes = next.classes;
+      this.classifier.setOverrides(next.classes);
+    }
+    if (next.hold) this.policy.hold = next.hold;
+  }
+
   close(graceMs = 3000): Promise<void> {
     if (this.closing) return this.closing;
     if (this.sweep) clearInterval(this.sweep);
