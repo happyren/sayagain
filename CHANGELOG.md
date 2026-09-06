@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-06
+
+### Added
+
+- `sayagain up` restarts a daemon from an older install (the plan says so:
+  "restart the daemon (0.17.0 to 0.21.0)"), unless a call is waiting for a
+  decision, which a restart would dead-letter; then it says which and how
+  to decide it. `up --force` replaces a registered server whose host entry
+  now names a different command, and a skipped entry says so. `up` ends
+  with the full `doctor`, tool classes included, when the daemon is up.
+- While the A/B protocol runs, a first `up` keeps holds on: the treatment
+  arm is pre-registered as the boundary as shipped, and `up` says that
+  changing it (`--observe`) is an amendment to docs/measurement.md 5.4.
+- The launcher hosts point at falls back to `npx -y -p @sayagain/proxy@<its
+  version>` when the install that wrote it is gone (an npx cache evicted, a
+  Node.js upgrade), so a host never fails closed on a missing file. The
+  doctor's note about an npx-cache install says so and is a note, not a
+  warning.
+- `up`'s summary names the way back: `sayagain down` for everything,
+  `sayagain stop` for the daemon alone.
+
+
 ## [0.20.0] - 2026-09-06
 
 ### Added

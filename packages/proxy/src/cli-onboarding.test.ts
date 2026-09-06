@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "./cli.js";
 import { startDaemon } from "./daemon.js";
 import { openStores } from "./stores.js";
+import { PROXY_VERSION } from "./version.js";
 
 /** Drive the real command line with HOME and SAYAGAIN_HOME pointed at a scratch directory. */
 describe("cli onboarding", () => {
@@ -248,7 +249,7 @@ describe("cli onboarding", () => {
     const daemon = await startDaemon({
       registry: { servers: {} },
       stores: openStores("memory"),
-      version: "t",
+      version: PROXY_VERSION, // the command's own version, so up reloads it rather than restarting it
       listen: "127.0.0.1:0",
       log: () => {},
     });
@@ -267,6 +268,52 @@ describe("cli onboarding", () => {
       expect(await main(["up", "--hold"])).toBe(0);
       expect((await health()).hold).toBe("destructive");
       expect(out).toContain("holds are on");
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("keeps holds on while the A/B protocol runs, and calls a change an amendment", async () => {
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({ mcpServers: { g: { command: "g" } } }),
+    );
+    mkdirSync(join(dir, "sayagain"), { recursive: true });
+    writeFileSync(
+      join(dir, "sayagain", "config.json"),
+      JSON.stringify({ servers: {}, daemon: { arm: "coinflip" } }),
+    );
+    const config = () =>
+      JSON.parse(readFileSync(join(dir, "sayagain", "config.json"), "utf8")) as {
+        daemon?: { hold?: string; arm?: string };
+      };
+    expect(await main(["up", "--no-start"])).toBe(0);
+    expect(out).toContain("the A/B protocol is on (coinflip)");
+    expect(out).toContain("hold destructive calls");
+    expect(config().daemon).toMatchObject({ arm: "coinflip", hold: "destructive" });
+    out = "";
+    expect(await main(["up", "--observe", "--no-start"])).toBe(0);
+    expect(out).toContain("amend docs/measurement.md 5.4");
+    expect(config().daemon?.hold).toBe("never");
+  });
+
+  it("plans to restart a daemon from an older install", async () => {
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({ mcpServers: { g: { command: "g" } } }),
+    );
+    const daemon = await startDaemon({
+      registry: { servers: {} },
+      stores: openStores("memory"),
+      version: "0.0.1",
+      listen: "127.0.0.1:0",
+      log: () => {},
+    });
+    try {
+      expect(await main(["up", "--dry-run"])).toBe(0);
+      expect(out).toContain(
+        `5. restart the daemon (0.0.1 to ${PROXY_VERSION}), so the hosts get this version`,
+      );
     } finally {
       await daemon.close();
     }

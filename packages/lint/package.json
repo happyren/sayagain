@@ -1,6 +1,6 @@
 {
   "name": "@sayagain/lint",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "Linter for MCP tool definitions: names, descriptions, schemas and annotations.",
   "license": "Apache-2.0",
   "type": "module",

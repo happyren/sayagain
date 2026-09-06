@@ -145,9 +145,10 @@ export function doctorFindings(input: DoctorInput): Finding[] {
 
   if (input.launcherCaveat)
     add({
-      severity: "warning",
-      title: "the launcher is not the one hosts point at",
+      severity: "note",
+      title: "the launcher points at an install that may not last",
       detail: input.launcherCaveat,
+      fix: "npm install -g @sayagain/proxy && sayagain up",
     });
 
   // ---- hosts
