@@ -10,20 +10,31 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- `sayagain up` restarts a daemon from an older install (the plan says so:
-  "restart the daemon (0.17.0 to 0.21.0)"), unless a call is waiting for a
-  decision, which a restart would dead-letter; then it says which and how
-  to decide it. `up --force` replaces a registered server whose host entry
-  now names a different command, and a skipped entry says so. `up` ends
-  with the full `doctor`, tool classes included, when the daemon is up.
+- `sayagain up` restarts a daemon from another install (the plan says so:
+  "restart the daemon (0.17.0 to 0.21.0); calls in flight fail once and the
+  hosts reconnect on their own"), unless a live call in that daemon is
+  waiting for a decision, which a restart would dead-letter; then it says
+  how to decide it or stop first. A hold that came back orphaned from an
+  earlier daemon does not block it. If a host's shim starts a daemon of its
+  own in the gap, `up` says so rather than "did not start". `up --force`
+  replaces a registered server whose host entry now names a different
+  command, and a skipped entry says so. `up` ends with the full `doctor`,
+  tool classes included, when the daemon is up; the plan says it will start
+  each server once for that, and `--no-probe` skips it. The shim now
+  re-initializes on a 404 as it does on a 401, so a session a restarted
+  daemon forgot comes back on the next call.
 - While the A/B protocol runs, a first `up` keeps holds on: the treatment
-  arm is pre-registered as the boundary as shipped, and `up` says that
-  changing it (`--observe`) is an amendment to docs/measurement.md 5.4.
+  arm is pre-registered as the boundary as shipped. A restart during an
+  experiment keeps what the running daemon actually does, whatever
+  `config.json` says (an older daemon never read `daemon.hold`), and the
+  plan says so; `--observe` changes it and amends docs/measurement.md 5.4.
 - The launcher hosts point at falls back to `npx -y -p @sayagain/proxy@<its
-  version>` when the install that wrote it is gone (an npx cache evicted, a
-  Node.js upgrade), so a host never fails closed on a missing file. The
-  doctor's note about an npx-cache install says so and is a note, not a
-  warning.
+  version>` when the CLI file or the Node.js binary that wrote it is gone
+  (an npx cache evicted, a Node.js upgrade); that needs `npx` on the
+  launcher's PATH and, the first time, the network. `up` refreshes the
+  launcher on every run, so `npm install -g @sayagain/proxy && sayagain up`
+  moves the hosts off a cache, and the doctor's note about a launcher that
+  points into one says exactly that; it is a note, not a warning.
 - `up`'s summary names the way back: `sayagain down` for everything,
   `sayagain stop` for the daemon alone.
 

@@ -319,6 +319,56 @@ describe("cli onboarding", () => {
     }
   });
 
+  it("keeps what the running daemon does when it restarts during an experiment, and waits for a live hold", async () => {
+    // The author's machine: an experiment on, a hold default an earlier up wrote, and a daemon from
+    // an install that never read it. A restart must not move the treatment arm.
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({ mcpServers: { g: { command: "g" } } }),
+    );
+    mkdirSync(join(dir, "sayagain"), { recursive: true });
+    writeFileSync(
+      join(dir, "sayagain", "config.json"),
+      JSON.stringify({ servers: {}, daemon: { arm: "coinflip", hold: "never" } }),
+    );
+    const daemon = await startDaemon({
+      registry: { servers: {} },
+      stores: openStores("memory"),
+      version: "0.0.1",
+      listen: "127.0.0.1:0",
+      log: () => {},
+    });
+    try {
+      expect(await main(["up", "--dry-run"])).toBe(0);
+      expect(out).toContain("hold destructive calls");
+      expect(out).toContain(
+        "the running daemon (0.0.1) holds destructive calls while config.json says never",
+      );
+      expect(out).toContain("the restart keeps what the daemon does");
+      expect(out).toContain("5. restart the daemon (0.0.1 to");
+      out = "";
+      // A live call waiting for a decision forbids the restart; an orphaned one does not.
+      const now = Date.now();
+      daemon.holds.create({
+        receipt: "live-1",
+        tool: "delete_page",
+        toolClass: "destructive",
+        reason: "test",
+        arguments: {},
+        createdAt: now,
+        expiresAt: now + 60_000,
+        upstream: "u",
+        server: "g",
+        mode: "pre",
+      });
+      expect(await main(["up", "--dry-run"])).toBe(0);
+      expect(out).toContain("not yet, 1 call waits for a decision");
+      expect(out).toContain("sayagain approve|reject <receipt>");
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("ui --no-open prints the page URL with the token of the running daemon", async () => {
     const daemon = await startDaemon({
       registry: { servers: {} },
