@@ -296,6 +296,89 @@ fixture harness where each task is its own cluster (the shape of 5.3).
 - Nothing else changes: the outcomes, their order, the sign convention, the
   decision rule and the arms are as amended earlier on 2026-09-06.
 
+### 5.6 Fault-injection harness (each task its own cluster)
+
+Pre-registered 2026-09-06. The first version of this instrument was wrong in
+four ways that all flattered the boundary, found by review before anything was
+published: the stand-in operator was never wired to the event the boundary
+emits, so no held call was ever decided; a held response carries
+`isError: false`, so the agent scored it as a successful write; the treatment
+arm silently declined work and nothing counted work left undone; and the
+metric named for M9 measured a world-side quantity while M9 is defined
+caller-side. The corrected instrument is described here, and every outcome is
+now reported in both directions.
+
+The 5.4 A/B flips its coin per session, and one developer produces about
+twenty independent sessions a month, so the outcomes that cluster inside a
+session cannot be measured there in a useful time. This protocol buys
+independence instead of waiting for it: each task is its own cluster, and the
+same task runs twice against the same seeded faults, once through the boundary
+and once past it.
+
+```bash
+node scripts/experiment/harness.mjs --tasks 60 --seeds 1,2,3,7,11 --operator approve|reject
+```
+
+- **The upstream** (`scripts/experiment/fault-server.mjs`) is a real stdio MCP
+  server that fails on a seed, logs every call it actually ran, and writes down
+  every side effect that really happened. Server-side faults: a call that fails
+  once and then works, and a write that lands and then loses its answer. Caller-side:
+  an argument of the wrong type, and a call whose precondition does not hold.
+  The fault is drawn on the logical step, not on the argument bytes, so a repair
+  or a retry by either side meets the same fault and the arms stay matched by
+  construction.
+- **The agent** is a fixed recovery policy, not a model: it retries a timeout
+  88% of the time (M2) and gives a step at most three attempts. The cap is a
+  parameter (`--attempts`), because M17 is a median of 0 and a mean of 1.8
+  calls to recover and no single cap follows from that. The duplicate counts
+  move with it.
+- **The operator** is a stand-in with one rule, `--operator approve|reject`.
+  It is part of the treatment, and the two rules give different answers, so
+  both are reported.
+- **Seeds** are pre-registered as 1, 2, 3, 7 and 11, pooled. One seed is one
+  draw of the fault pattern, and choosing it after seeing results would be
+  choosing the result.
+- **Outcomes**, paired per task, control minus treatment, with a t interval
+  over tasks: writes that happened and nobody knows about, writes the agent
+  could not resolve, writes believed that never happened, records left in the
+  wrong state, non-idempotent and total duplicate executions, calls the server
+  actually ran, calls and bytes spent recovering, failures the agent saw, calls
+  made, and bytes delivered. All twelve are printed; none is dropped for being
+  unflattering.
+
+**Fault model, corrected 2026-09-06.** The first cut lost a write's answer
+on every attempt, which is an outage rather than a lost answer and made any
+arm that retries look worse than one that does not. A write now loses its
+answer once and a second attempt answers. Every number below is from that
+model.
+
+**Result, 300 paired tasks over the five seeds, boundary as of 0.17.0
+(ADR-0013).** Without the read-back, the boundary matches the control arm on
+every harm count (silent unknowns 0.02, non-idempotent duplicates 0.03,
+records in the wrong state 0) and takes most of the recovery off the agent
+(failures seen 0.82 to 0.28, calls spent recovering 1.60 to 0.54). With the
+read-back on, the duplicates fall to zero and the silent unknowns to zero,
+both distinguishable, and the bytes spent recovering fall from 180 to 148.
+The server runs 5.37 calls per task against 5.30, which is the verifiers, and
+the bytes delivered to the agent roughly double, which is the receipts. With
+a rejecting operator the harm counts are the same and records are left in the
+wrong state 0.26 times per task: a destructive call declined before it is sent
+has no outcome to read back. The 0.16.0 claim that an approving operator
+doubled execution was the permanent-loss artefact and is withdrawn.
+
+**The placebo.** `--placebo` runs the treatment arm with the boundary in its
+control mode, which forwards and records and does nothing else. Over the same
+300 tasks every row is exactly zero except the two byte rows, which carry the
+receipts. That is the instrument's own evidence that it is not measuring
+itself; it is run alongside every reported result.
+
+What this protocol can support: a claim about what the boundary does to a
+stated failure distribution under a stated recovery policy and a stated
+operator rule. What it cannot support: a claim about what real models do, or
+about traffic whose failure mix differs from the one injected. It is the
+internally valid half of the pair; 5.4 on organic traffic is the externally
+valid half, and neither is the proof alone.
+
 ### 5.5 Registry scan (whitepaper launch)
 
 Run `@sayagain/lint` over every server in the public registry that

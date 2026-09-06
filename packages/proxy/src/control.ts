@@ -67,6 +67,8 @@ export interface ReplayOutcome {
   replayOf: string;
   isError: boolean;
   text: string;
+  /** How the failure was classed, when there was one; a verifier reads this to tell absent from unsure. */
+  errorClass?: string;
 }
 
 export interface ControlHandlers {

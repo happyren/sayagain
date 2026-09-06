@@ -554,6 +554,122 @@ describe("lifecycle", () => {
     }
   });
 
+  it("reads a lost write back before deciding: answers when it landed, re-sends when it did not, holds when it cannot tell", async () => {
+    const h = harness({ hold: "destructive", holdWaitMs: 200 });
+    try {
+      await h.handshake();
+      // The write landed and the answer was lost: the verifier finds it, the agent is told once.
+      h.call(1, "lost_write", { id: "a" });
+      const found = await h.waitFor(1);
+      expect(meta(found)["sh.sayagain/status"]).toBe("executed");
+      expect(meta(found)["sh.sayagain/verified"]).toEqual({ tool: "landed", effect: "result" });
+      expect(JSON.stringify(found)).toContain("Do not repeat it");
+      expect(h.wrapped.holds.list()).toEqual([]); // nothing waited for an operator
+      // The answer was lost and nothing landed: the verifier says so, and one re-send is safe.
+      h.call(2, "vanished_write", { id: "b" });
+      const resent = await h.waitFor(2);
+      expect(meta(resent)["sh.sayagain/status"]).toBe("executed");
+      expect(meta(resent)["sh.sayagain/verified"]).toBeUndefined(); // the second send answered itself
+      // A verifier that is not read-only is not run; the hold is the fallback.
+      h.call(3, "unverifiable_write", { id: "c" });
+      const held = await h.waitFor(3);
+      expect(meta(held)["sh.sayagain/status"]).toBe("held");
+      await h.finish();
+      const rows = h.ledger.rows;
+      const a = rows.filter((r) => r.tool === "lost_write");
+      expect(a.map((r) => [r.status, r.isError, r.verified])).toEqual([
+        ["executed", true, undefined], // the attempt that lost its answer
+        ["executed", false, "present"], // answered on the verifier's word
+      ]);
+      const probe = rows.find((r) => r.tool === "landed" && r.verifies === a[0]?.receipt);
+      expect(probe).toMatchObject({ toolClass: "read-only", isError: false });
+      const b = rows.filter((r) => r.tool === "vanished_write");
+      expect(b.at(-1)).toMatchObject({
+        status: "executed",
+        isError: false,
+        verified: "absent",
+        attempts: 2,
+      });
+      expect(
+        rows.filter((r) => r.tool === "landed" && r.verifies === b[0]?.receipt)[0]?.isError,
+      ).toBe(true);
+    } finally {
+      await h.finish();
+    }
+  });
+
+  it("reads a held-then-approved delete back by absence, and holds when the verifier cannot answer or cannot be resolved", async () => {
+    const h = harness({ hold: "destructive", holdWaitMs: 2000 });
+    try {
+      await h.handshake();
+      h.call(0, "lost_write", { id: "d" }); // so there is something to delete
+      await h.waitFor(0);
+      // Destructive: held before it is sent; approved; the answer is then lost; the record is gone.
+      h.call(1, "lost_delete", { id: "d" });
+      const hold = await h.pendingHold();
+      expect(hold).toBeDefined();
+      h.wrapped.holds.decide((hold as { receipt: string }).receipt, "approve");
+      const done = await h.waitFor(1);
+      expect(meta(done)["sh.sayagain/status"]).toBe("executed");
+      expect(meta(done)["sh.sayagain/verified"]).toEqual({ tool: "landed", effect: "absence" });
+      // The verifier answered with a failure that is not an absence: nothing is known, so hold.
+      h.call(2, "unready_write", { id: "u" });
+      expect(meta(await h.waitFor(2))["sh.sayagain/status"]).toBe("held");
+      // The declaration refers to a result the boundary does not have: not honoured, so hold.
+      h.call(3, "badtemplate_write", { id: "b" });
+      expect(meta(await h.waitFor(3))["sh.sayagain/status"]).toBe("held");
+      await h.finish();
+      const rows = h.ledger.rows;
+      expect(rows.filter((r) => r.tool === "lost_delete").at(-1)).toMatchObject({
+        status: "executed",
+        verified: "present",
+      });
+      // The unready probe ran and failed, and no re-send followed it.
+      expect(rows.filter((r) => r.tool === "unready")).toHaveLength(1);
+      expect(rows.filter((r) => r.tool === "unready_write").map((r) => r.status)).toEqual([
+        "executed",
+        "held",
+      ]);
+      expect(rows.some((r) => r.verifies !== undefined && r.status === "dead-lettered")).toBe(
+        false,
+      );
+    } finally {
+      await h.finish();
+    }
+  });
+
+  it("holds the write when the verifier never answers, and leaves no dead letter behind", async () => {
+    const h = harness({ hold: "destructive", holdWaitMs: 200 }, { replayTimeoutMs: 300 });
+    try {
+      await h.handshake();
+      h.call(1, "hangverify_write", { id: "h" });
+      // The probe times out at 300 ms; the call must then be held, not left hanging for the sweep.
+      expect(meta(await h.waitFor(1, 3000))["sh.sayagain/status"]).toBe("held");
+      // Before shutdown, which dead-letters any call still held: the probe itself was never one.
+      expect(h.wrapped.deadLetters.list()).toEqual([]);
+      const probe = h.ledger.rows.find((r) => r.tool === "hang_probe");
+      expect(probe).toMatchObject({ isError: true, status: "executed" });
+      expect(probe?.verifies).toBeDefined();
+      await h.finish();
+      expect(h.wrapped.deadLetters.list().some((d) => d.tool === "hang_probe")).toBe(false);
+    } finally {
+      await h.finish();
+    }
+  });
+
+  it("does not read a write back when the policy says not to", async () => {
+    const h = harness({ hold: "destructive", verify: false, holdWaitMs: 200 });
+    try {
+      await h.handshake();
+      h.call(1, "lost_write", { id: "a" });
+      expect(meta(await h.waitFor(1))["sh.sayagain/status"]).toBe("held");
+      await h.finish();
+      expect(h.ledger.rows.some((r) => r.tool === "landed")).toBe(false);
+    } finally {
+      await h.finish();
+    }
+  });
+
   it("in the control arm forwards, records and does nothing else", async () => {
     const h = harness({ hold: "destructive" }, { arm: "control" });
     try {

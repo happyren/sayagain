@@ -6,6 +6,140 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-06
+
+### Added
+
+- Verification before resumption (ADR-0013, spec v0.1.8 section 8.3). A tool
+  may declare `sh.sayagain/verify` in its `tools/list` `_meta`: the read-only
+  tool that says whether its effect is present, an argument template over the
+  original call, and whether success or a not-found failure proves it (a
+  deletion reads as an absence). After a write ends with an unknown outcome,
+  the boundary runs the verifier before deciding: present, and the call is
+  answered as executed with `sh.sayagain/verified` on the result; absent, and
+  one re-send goes out without a hold, since the world said nothing landed;
+  inconclusive, and the call is held as before. A verifier that is not
+  read-only is ignored. The read-back is one of the boundary's own calls with
+  its own ledger row, marked `verifies` with the receipt it checked. On by
+  default, off with `verify: false` in the policy.
+- `@sayagain/lint` rule `annotations/verify` (informational): a tool that is
+  neither read-only nor idempotent declares how to read its effect back. Rule
+  set 2026-09-06.1; grades do not move.
+- The harness gained `--verify on|off` and `--placebo`. The placebo runs the
+  treatment arm with the boundary in its control mode, so any difference
+  outside the byte rows is the instrument measuring itself. Over 300 paired
+  tasks the placebo shows zero on every such row.
+
+### Result
+
+300 paired tasks over the pre-registered seeds. A write loses its answer
+once and a second attempt answers; the first cut lost every attempt, which is
+an outage rather than a lost answer, and inflated the duplicate counts of any
+arm that retries. Every outcome is printed; a positive difference means the
+control arm had more of it, and the last three rows are what the boundary
+costs.
+
+Approving operator, read-back off against on:
+
+| per task | control | off | on |
+|---|---|---|---|
+| writes that happened, unknown to all | 0.02 | 0.02 | 0.00 |
+| writes the agent could not resolve | 0.00 | 0.00 | 0.00 |
+| writes believed that never happened | 0.00 | 0.00 | 0.00 |
+| records left in the wrong state | 0.00 | 0.00 | 0.00 |
+| non-idempotent writes run twice | 0.03 | 0.03 | 0.00 |
+| any write run twice | 0.05 | 0.05 | 0.02 |
+| calls the server actually ran | 5.30 | 5.34 | 5.37 |
+| calls the agent spent recovering | 1.60 | 0.54 | 0.48 |
+| bytes the agent spent recovering | 180 | 178 | 148 |
+| failures the agent saw | 0.82 | 0.28 | 0.24 |
+| calls the agent made | 5.30 | 4.78 | 4.74 |
+| bytes delivered to the agent | 542 | 1040 | 1016 |
+
+Without the read-back the boundary matches the control arm on every harm
+count and halves what the agent has to handle. With it, the duplicates the
+agent's own retries cause fall to zero and the silent unknowns to zero, both
+distinguishable, and the bytes spent recovering fall as well. The server runs
+the verifiers (5.37 calls against 5.30) and the receipts double the bytes
+delivered; both stay printed.
+
+With a rejecting operator the harm counts are the same as with read-back on,
+and records are left in the wrong state 0.26 times per task against zero in
+control: a destructive call declined before it is sent has no outcome to read
+back, and an operator who declines every delete gets no deletes.
+
+The placebo, the boundary in its control mode over the same 300 tasks, shows
+exactly zero on every row but the two byte rows.
+
+### Note
+
+The first cut of this instrument reported that the boundary halved
+unacknowledged writes and removed double execution. Those results were
+artifacts of four defects found in review before release: the stand-in
+operator was never wired to the event the boundary emits, a held response was
+scored as a successful write, work the treatment arm declined was never
+counted, and the metric named for M9 measured a different quantity from the
+one M9 defines. A second review then found the read-back re-sending on any
+"semantic" failure of the verifier rather than only on an absence, honouring
+a template it could not resolve as a literal, and never reaching a destructive
+call at all; all three are fixed and tested, and the fault model's permanent
+loss, which produced the "approving doubles execution" figure, is corrected
+above.
+
+## [0.16.0] - 2026-09-06
+
+### Added
+
+- The fault-injection harness (`scripts/experiment/`, pre-registered as
+  docs/measurement.md 5.6). Each task is its own cluster, and the same task is
+  run twice against the same seeded faults, once through the boundary and once
+  past it, so 300 paired observations take under a minute where the organic
+  A/B needs a session apiece. The upstream is a real stdio MCP server that
+  fails on a seed, logs every call it actually ran, and writes down every side
+  effect that really happened, so what the agent believes can be checked
+  against what the world did. Faults are drawn on the logical step, so a repair
+  or a retry by either side meets the same fault.
+- Twelve outcomes, reported in both directions, including the ones that count
+  against the boundary: work left undone, writes believed that never happened,
+  duplicate execution, and the calls the server actually ran.
+
+### Result
+
+300 paired tasks over the pre-registered seeds. **Neither operator rule is a
+clean win, and that is the finding.**
+
+With an approving operator, the boundary moves work off the agent and adds it
+elsewhere:
+
+| outcome, per task | control | treatment | difference | 95% interval |
+|---|---|---|---|---|
+| failures the agent saw | 0.92 | 0.44 | 0.48 | 0.41 to 0.55 |
+| calls the agent spent recovering | 1.65 | 0.71 | 0.94 | 0.80 to 1.08 |
+| non-idempotent writes run twice | 0.06 | 0.15 | -0.09 | -0.15 to -0.04 |
+| calls the server actually ran | 5.35 | 5.62 | -0.27 | -0.39 to -0.15 |
+| writes that happened, unknown to all | 0.05 | 0.05 | 0.00 | 0 to 0 |
+| bytes delivered to the agent | 549 | 1127 | -577 | -621 to -533 |
+
+With a rejecting operator the trade reverses: writes nobody knows about fall
+from 0.05 to 0.01 and double execution falls to zero, but records are left in
+the wrong state 0.29 times per task against zero in control. H6 asks for a
+reduction in cost without breaking the workload; declining held calls breaks
+it.
+
+The boundary converts a silent unknown into a decision, and the decision is
+lossy either way because it is taken without checking whether the write landed.
+Verification before resumption is what the harness points at next.
+
+### Note
+
+The first cut of this instrument reported that the boundary halved
+unacknowledged writes and removed double execution. Those results were
+artifacts of four defects found in review before release: the stand-in operator
+was never wired to the event the boundary emits, a held response was scored as
+a successful write, work the treatment arm declined was never counted, and the
+metric named for M9 measured a different quantity from the one M9 defines. The
+numbers above come from the corrected instrument.
+
 ## [0.15.0] - 2026-09-06
 
 ### Added

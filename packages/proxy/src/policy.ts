@@ -1,5 +1,10 @@
 /** Tool classification and the hold policy (ADR-0004). */
-import { classify, type ToolAnnotations, type ToolClass } from "@sayagain/sdk";
+import {
+  classify,
+  type ToolAnnotations,
+  type ToolClass,
+  type VerifyDeclaration,
+} from "@sayagain/sdk";
 
 export type HoldMode = "destructive" | "always" | "never";
 
@@ -24,6 +29,11 @@ export interface PolicyOptions {
   repairWindowMs: number;
   /** Append one actionable sentence to final failures. */
   rewriteErrors: boolean;
+  /**
+   * After a write ends with an unknown outcome, read its effect back through the verifier the tool
+   * declares (spec 8.3) before re-sending or holding it. A decision taken blind is lossy either way.
+   */
+  verify: boolean;
 }
 
 export const DEFAULT_POLICY: PolicyOptions = {
@@ -37,11 +47,14 @@ export const DEFAULT_POLICY: PolicyOptions = {
   repairsPerTask: 3,
   repairWindowMs: 600_000,
   rewriteErrors: true,
+  verify: true,
 };
 
 export class ToolClassifier {
   private readonly annotations = new Map<string, ToolAnnotations>();
   private readonly schemas = new Map<string, unknown>();
+  /** A tool's `_meta`: the section 8 declarations, read from tools/list. */
+  private readonly declarations = new Map<string, Record<string, unknown>>();
   private resolveReady: (() => void) | undefined;
   /** Resolves the first time annotations are learned. Callers wait on it with a timeout. */
   readonly ready: Promise<void>;
@@ -59,13 +72,16 @@ export class ToolClassifier {
     let n = 0;
     for (const t of tools) {
       if (typeof t !== "object" || t === null) continue;
-      const { name, annotations, inputSchema } = t as {
+      const { name, annotations, inputSchema, _meta } = t as {
         name?: unknown;
         annotations?: unknown;
         inputSchema?: unknown;
+        _meta?: unknown;
       };
       if (typeof name !== "string") continue;
       if (inputSchema !== undefined) this.schemas.set(name, inputSchema);
+      if (typeof _meta === "object" && _meta !== null && !Array.isArray(_meta))
+        this.declarations.set(name, _meta as Record<string, unknown>);
       this.annotations.set(
         name,
         typeof annotations === "object" && annotations !== null
@@ -89,6 +105,7 @@ export class ToolClassifier {
   reset(): void {
     this.annotations.clear();
     this.schemas.clear();
+    this.declarations.clear();
     if (this.resolveReady === undefined)
       (this as { ready: Promise<void> }).ready = new Promise((resolve) => {
         this.resolveReady = resolve;
@@ -136,6 +153,40 @@ export class ToolClassifier {
 
   schemaOf(tool: string): unknown {
     return this.schemas.get(tool);
+  }
+
+  /** The tool's `sh.sayagain/verify` declaration (spec 8.3), if it is well formed. */
+  verifyOf(tool: string): VerifyDeclaration | undefined {
+    const raw = this.declarations.get(tool)?.["sh.sayagain/verify"];
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+    const d = raw as Record<string, unknown>;
+    if (typeof d.tool !== "string" || !d.tool) return undefined;
+    const out: VerifyDeclaration = { tool: d.tool };
+    if (d.arguments !== undefined) {
+      if (typeof d.arguments !== "object" || d.arguments === null || Array.isArray(d.arguments))
+        return undefined;
+      const args: Record<string, string> = {};
+      for (const [k, v] of Object.entries(d.arguments as Record<string, unknown>)) {
+        if (typeof v !== "string") return undefined;
+        args[k] = v;
+      }
+      out.arguments = args;
+    }
+    if (d.effect !== undefined) {
+      if (d.effect !== "result" && d.effect !== "absence") return undefined;
+      out.effect = d.effect;
+    }
+    // A verifier that names nothing from the call reads something else, and would find every
+    // write present. Spec 8.3 asks for a read by identity.
+    const refs = Object.values(out.arguments ?? {}).filter((v) => v.startsWith("$arguments."));
+    if (!refs.length) return undefined;
+    if (
+      Object.values(out.arguments ?? {}).some(
+        (v) => v.startsWith("$") && !v.startsWith("$arguments."),
+      )
+    )
+      return undefined;
+    return out;
   }
 }
 

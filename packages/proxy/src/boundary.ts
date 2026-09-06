@@ -4,7 +4,7 @@
  * without processes.
  */
 import { createHash, randomBytes, randomInt } from "node:crypto";
-import { META, type Status, type ToolClass } from "@sayagain/sdk";
+import { META, type Status, type ToolClass, type VerifyDeclaration } from "@sayagain/sdk";
 import { classifyError, type ErrorClass, guidanceFor } from "./errors.js";
 import type { JsonRpcId, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse } from "./jsonrpc.js";
 import { isRequest, isResponse } from "./jsonrpc.js";
@@ -80,6 +80,10 @@ export interface PendingCall {
   lastFailure?: Failure;
   /** Which budget the repair counted against: the client's task, or a time window (spec 3.3 fallback). */
   budget?: "task" | "window";
+  /** This is the boundary's own read-back of another call's effect: that call's receipt. */
+  verifies?: string;
+  /** The outcome was unknown and the boundary read it back (spec 8.3): what it found. */
+  verified?: "present" | "absent";
 }
 
 export interface BoundaryState {
@@ -306,6 +310,8 @@ export function baseRow(
   };
   if (call.task !== undefined) row.task = call.task;
   if (call.arm !== undefined) row.arm = call.arm;
+  if (call.verifies !== undefined) row.verifies = call.verifies;
+  if (call.verified !== undefined) row.verified = call.verified;
   if (call.session !== undefined) row.session = call.session;
   if (call.server !== undefined) row.server = call.server;
   if (call.held) row.held = { ...call.held };
@@ -572,6 +578,64 @@ export function abandonedResponse(call: PendingCall, reason: string): JsonRpcRes
       code: -32000,
       message: `Say Again: ${reason}. Receipt ${call.receipt}; the call is dead-lettered for an operator to replay.`,
       data: { [META.receipt]: call.receipt, [META.status]: "dead-lettered" },
+    },
+  };
+}
+
+/**
+ * The verifier's arguments from its declaration and the original call: a literal stays as it is and
+ * `$arguments.<name>` takes the original's value. Null when a reference names nothing the call sent,
+ * so the boundary verifies nothing rather than something else.
+ */
+export function resolveVerifyArguments(
+  decl: VerifyDeclaration,
+  original: unknown,
+): Record<string, unknown> | null {
+  const source =
+    typeof original === "object" && original !== null && !Array.isArray(original)
+      ? (original as Record<string, unknown>)
+      : {};
+  const out: Record<string, unknown> = {};
+  let references = 0;
+  for (const [key, template] of Object.entries(decl.arguments ?? {})) {
+    const ref = /^\$arguments\.([A-Za-z0-9_-]+)$/.exec(template);
+    if (!ref) {
+      // Any other reference ($result.x, a typo) is a declaration the boundary cannot honour. A
+      // literal it passes through; a verifier is a read on the same server and can take one.
+      if (template.startsWith("$")) return null;
+      out[key] = template;
+      continue;
+    }
+    const name = ref[1] as string;
+    if (!Object.hasOwn(source, name)) return null;
+    out[key] = source[name];
+    references++;
+  }
+  // A read that names nothing from the call reads something else, and would call every write present.
+  return references ? out : null;
+}
+
+/** The answer for a write whose outcome was unknown until the boundary read it back and found it. */
+export function verifiedResponse(
+  call: PendingCall,
+  decl: VerifyDeclaration,
+  text: string,
+): JsonRpcResponse {
+  return {
+    jsonrpc: "2.0",
+    id: call.id,
+    result: {
+      content: [
+        {
+          type: "text",
+          text: `${call.tool} was applied: the server timed out after the request was sent, and ${decl.tool} confirms the effect is present. Do not repeat it.${text ? ` (${text.slice(0, 200)})` : ""}`,
+        },
+      ],
+      _meta: {
+        [META.receipt]: call.receipt,
+        [META.status]: "executed",
+        [META.verified]: { tool: decl.tool, effect: decl.effect ?? "result" },
+      },
     },
   };
 }

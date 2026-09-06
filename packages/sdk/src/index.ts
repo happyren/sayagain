@@ -20,6 +20,10 @@ export const META = {
   boundary: `${META_PREFIX}boundary`,
   duplicateOf: `${META_PREFIX}duplicate-of`,
   replayOf: `${META_PREFIX}replay-of`,
+  /** Tool declaration (spec 8.3): how to read a write's effect back. */
+  verify: `${META_PREFIX}verify`,
+  /** Result note: the write's outcome was unknown and the boundary read it back before answering. */
+  verified: `${META_PREFIX}verified`,
 } as const;
 
 /** Transport header carrying task-level intent (spec section 4). */
@@ -54,6 +58,18 @@ export const REPAIR_BUDGET = { perCall: 1, perTask: 3 } as const;
 
 /** Tool classification used by the hold policy (ADR-0004). */
 export type ToolClass = "read-only" | "idempotent-write" | "write" | "destructive";
+
+/**
+ * Spec 8.3: the read-only call that says whether this tool's effect is present. `arguments` values
+ * are literals or `$arguments.<name>` references to the original call. With `effect: "result"` a
+ * successful verifier result means the effect is present; with `"absence"` a not-found failure
+ * does, which is how a delete is verified.
+ */
+export interface VerifyDeclaration {
+  tool: string;
+  arguments?: Record<string, string>;
+  effect?: "result" | "absence";
+}
 
 /** The subset of MCP tool annotations the classifier reads. */
 export interface ToolAnnotations {

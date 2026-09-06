@@ -203,7 +203,10 @@ const streamOf = (r: LedgerRow): string =>
  */
 export function finalRows(rows: LedgerRow[]): LedgerRow[] {
   const last = new Map<string, LedgerRow>();
-  for (const r of rows) if (r.replayOf === undefined) last.set(r.receipt, r);
+  // A replay is the operator's act and a read-back is the boundary's: neither is a call the agent
+  // made, so neither opens a recovery window or counts as one of its failures.
+  for (const r of rows)
+    if (r.replayOf === undefined && r.verifies === undefined) last.set(r.receipt, r);
   return rows.filter((r) => last.get(r.receipt) === r);
 }
 

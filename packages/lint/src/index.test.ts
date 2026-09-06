@@ -21,6 +21,10 @@ const good: ToolDefinition = {
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   _meta: {
     "sh.sayagain/compensation": { tool: "close_issue", arguments: { number: "$result.number" } },
+    "sh.sayagain/verify": {
+      tool: "find_issue",
+      arguments: { repo: "$arguments.repo", title: "$arguments.title" },
+    },
   },
 };
 
@@ -101,14 +105,44 @@ describe("lintTool", () => {
   it("asks a write that cannot be repeated to say how it is undone", () => {
     const { _meta, ...bare } = good;
     const ids = lintTool(bare).map((x) => x.rule);
-    expect(ids).toEqual(["annotations/compensation"]);
+    expect(ids).toEqual(["annotations/compensation", "annotations/verify"]);
     expect(grade(lintTool(bare))).toBe("A"); // informational: the grade does not move
+    // Declaring how to read the effect back clears the second; a delete reads it as an absence.
+    expect(
+      lintTool({
+        ...bare,
+        _meta: {
+          "sh.sayagain/compensation": { none: "cannot be undone" },
+          "sh.sayagain/verify": {
+            tool: "find_issue",
+            arguments: { repo: "$arguments.repo" },
+            effect: "absence",
+          },
+        },
+      }),
+    ).toEqual([]);
+    // A declaration the boundary would refuse is reported, so it is not mistaken for a promise kept.
+    const refused = (verify: unknown) =>
+      lintTool({ ...bare, _meta: { "sh.sayagain/verify": verify } })
+        .filter((x) => x.rule === "annotations/verify")
+        .map((x) => x.message);
+    expect(refused({ tool: "get_issue", arguments: { number: "$result.number" } })[0]).toContain(
+      "cannot resolve",
+    );
+    expect(refused({ tool: "list_issues", arguments: {} })[0]).toContain("reads nothing");
+    expect(refused({ tool: "get_issue", arguments: { id: "$arguments.id" } })[0]).toContain(
+      "does not take",
+    );
+    expect(refused({ tool: "", arguments: { repo: "$arguments.repo" } })[0]).toContain(
+      "names no tool",
+    );
+    // Saying the effect cannot be undone settles compensation; reading it back is still asked for.
     expect(
       lintTool({
         ...bare,
         _meta: { "sh.sayagain/compensation": { none: "an email cannot be unsent" } },
-      }),
-    ).toEqual([]);
+      }).map((x) => x.rule),
+    ).toEqual(["annotations/verify"]);
     expect(
       lintTool({
         ...bare,
