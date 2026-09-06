@@ -12,7 +12,12 @@
 // held write as a success is worse off than one told plainly that the call failed.
 //
 // Usage: node scripts/experiment/harness.mjs [--tasks 60] [--seeds 1,2,3,7,11] [--operator approve|reject]
-//                                            [--flaky 0.06] [--lost 0.03] [--attempts 3] [--json out.json]
+//                                            [--verify on|off] [--placebo] [--flaky 0.06] [--lost 0.03]
+//                                            [--attempts 3] [--json out.json]
+//
+// --placebo runs the treatment arm with the boundary in its control mode, which forwards and records
+// and does nothing else. Every row but the byte counts should then show no difference; if one does,
+// the instrument is measuring itself and not the boundary.
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -38,7 +43,10 @@ const OPERATOR = String(arg("operator", "approve"));
 const FLAKY = Number(arg("flaky", 0.06));
 const LOST = Number(arg("lost", 0.03));
 const ATTEMPTS = Number(arg("attempts", 3));
+const VERIFY = String(arg("verify", "on"));
+const PLACEBO = process.argv.includes("--placebo");
 const JSON_OUT = arg("json", null);
+if (VERIFY !== "on" && VERIFY !== "off") throw new Error("--verify must be on or off");
 for (const [name, value] of [
   ["flaky", FLAKY],
   ["lost", LOST],
@@ -255,7 +263,8 @@ async function throughBoundary(env, run) {
     announce: false,
     learned: false,
     log: () => {},
-    policy: { hold: "destructive", holdWaitMs: 2000 },
+    policy: { hold: "destructive", holdWaitMs: 2000, verify: VERIFY === "on" },
+    ...(PLACEBO ? { arm: "control" } : {}),
   });
   // The operator is part of the treatment (ADR-0011). This one decides at once and always the same
   // way, so the arm measures the boundary plus a stated rule rather than a person's judgement.
@@ -445,6 +454,8 @@ async function main() {
     pairs: arms.control.length,
     policy: POLICY,
     operator: OPERATOR,
+    verify: VERIFY === "on",
+    placebo: PLACEBO,
     faults: { flaky: FLAKY, lost: LOST },
     differences: diffs,
   };
@@ -468,7 +479,12 @@ async function main() {
     `Fault-injection harness: ${arms.control.length} paired tasks (${TASKS} per seed, seeds ${SEEDS.join(",")}), docs/measurement.md 5.6`,
     `Faults: a call fails once then works ${Math.round(100 * FLAKY)}% of the time; a write lands then loses its answer ${Math.round(100 * LOST)}% of the time.`,
     `Agent: retries a timeout ${Math.round(100 * POLICY.retryProbability)}% of the time, at most ${POLICY.maxAttemptsPerStep} attempts a step, and is not a model.`,
-    `Operator: a stand-in that answers every held call "${OPERATOR}", at once.`,
+    `Operator: a stand-in that answers every held call "${OPERATOR}", at once. Read-back of a lost write before deciding (spec 8.3): ${VERIFY}.`,
+    ...(PLACEBO
+      ? [
+          "PLACEBO: the treatment arm's boundary is in its control mode and does nothing but forward and record. Any difference below, outside the byte rows, is an artifact of this instrument.",
+        ]
+      : []),
     "",
     `  ${"per task".padEnd(38)} ${"control".padStart(8)} ${"treatment".padStart(10)} ${"difference".padStart(11)}   95% interval        tasks +/-`,
   ];

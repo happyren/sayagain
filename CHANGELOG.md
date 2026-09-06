@@ -6,6 +6,53 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-06
+
+### Added
+
+- Verification before resumption (ADR-0013, spec v0.1.8 section 8.3). A tool
+  may declare `sh.sayagain/verify` in its `tools/list` `_meta`: the read-only
+  tool that says whether its effect is present, an argument template over the
+  original call, and whether success or a not-found failure proves it (a
+  deletion reads as an absence). After a write ends with an unknown outcome,
+  the boundary runs the verifier before deciding: present, and the call is
+  answered as executed with `sh.sayagain/verified` on the result; absent, and
+  one re-send goes out without a hold, since the world said nothing landed;
+  inconclusive, and the call is held as before. A verifier that is not
+  read-only is ignored. The read-back is one of the boundary's own calls with
+  its own ledger row, marked `verifies` with the receipt it checked. On by
+  default, off with `verify: false` in the policy.
+- `@sayagain/lint` rule `annotations/verify` (informational): a tool that is
+  neither read-only nor idempotent declares how to read its effect back. Rule
+  set 2026-09-06.1; grades do not move.
+- The harness gained `--verify on|off` and `--placebo`. The placebo runs the
+  treatment arm with the boundary in its control mode, so any difference
+  outside the byte rows is the instrument measuring itself. Over 300 paired
+  tasks the placebo shows zero on every such row.
+
+### Result
+
+300 paired tasks over the pre-registered seeds, approving operator:
+
+| outcome, per task | control | read-back off | read-back on |
+|---|---|---|---|
+| non-idempotent writes run twice | 0.06 | 0.15 | 0.00 |
+| writes that happened, unknown to all | 0.05 | 0.05 | 0.03 |
+| records left in the wrong state | 0.00 | 0.00 | 0.00 |
+| failures the agent saw | 0.92 | 0.44 | 0.35 |
+| calls the agent spent recovering | 1.65 | 0.71 | 0.61 |
+| calls the server actually ran | 5.35 | 5.62 | 5.55 |
+| bytes delivered to the agent | 549 | 1127 | 1068 |
+
+The read-back turns the approving operator's double execution from a
+distinguishable harm into zero, while every agent-side gain stays and the
+work still gets done. The server runs the verifiers, and the receipts double
+the bytes; both are printed. With a rejecting operator, destructive calls are
+still held before they are sent and left undone (0.26 records per task),
+which is the hold policy doing what it was told and is unchanged by this
+release.
+
+
 ## [0.16.0] - 2026-09-06
 
 ### Added

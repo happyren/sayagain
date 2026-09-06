@@ -240,6 +240,11 @@ Explicitly not built
   ledger by hand. The numbers it moves: the share of host-configured servers
   whose calls reach the boundary, and the count of doctor errors and warnings
   on a first run.
+- Verification before resumption (0.17.0, ADR-0013): the harness showed a
+  hold decided blind is lossy either way, so a tool may now declare how to
+  read its effect back (spec 8.3) and the boundary looks before it re-sends
+  or holds. The harness result moved from a partial negative to a clean
+  positive on double execution, with the costs still printed.
 - The proof, second half (docs/measurement.md 5.6, 0.16.0): the
   fault-injection harness buys the independence the organic A/B cannot wait
   for, by making every task its own cluster. It is the internally valid half;

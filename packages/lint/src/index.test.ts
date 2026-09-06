@@ -21,6 +21,7 @@ const good: ToolDefinition = {
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   _meta: {
     "sh.sayagain/compensation": { tool: "close_issue", arguments: { number: "$result.number" } },
+    "sh.sayagain/verify": { tool: "get_issue", arguments: { number: "$result.number" } },
   },
 };
 
@@ -101,14 +102,29 @@ describe("lintTool", () => {
   it("asks a write that cannot be repeated to say how it is undone", () => {
     const { _meta, ...bare } = good;
     const ids = lintTool(bare).map((x) => x.rule);
-    expect(ids).toEqual(["annotations/compensation"]);
+    expect(ids).toEqual(["annotations/compensation", "annotations/verify"]);
     expect(grade(lintTool(bare))).toBe("A"); // informational: the grade does not move
+    // Declaring how to read the effect back clears the second; a delete reads it as an absence.
+    expect(
+      lintTool({
+        ...bare,
+        _meta: {
+          "sh.sayagain/compensation": { none: "cannot be undone" },
+          "sh.sayagain/verify": {
+            tool: "get_issue",
+            arguments: { number: "$arguments.number" },
+            effect: "absence",
+          },
+        },
+      }),
+    ).toEqual([]);
+    // Saying the effect cannot be undone settles compensation; reading it back is still asked for.
     expect(
       lintTool({
         ...bare,
         _meta: { "sh.sayagain/compensation": { none: "an email cannot be unsent" } },
-      }),
-    ).toEqual([]);
+      }).map((x) => x.rule),
+    ).toEqual(["annotations/verify"]);
     expect(
       lintTool({
         ...bare,

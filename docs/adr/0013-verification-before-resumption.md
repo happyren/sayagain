@@ -1,0 +1,88 @@
+# ADR-0013: A write whose outcome is unknown is read back before it is re-sent or held
+
+- Status: Accepted
+- Date: 2026-09-06
+
+## Context
+
+The fault-injection harness (docs/measurement.md 5.6) put the boundary in
+front of a server that fails the way real ones do, and measured both arms
+against a truth log of what really happened. The result was not the one the
+thesis wanted. When a write timed out after it was sent, the boundary held it
+and asked an operator; with an operator who approves, the call was re-sent and
+ran twice (0.06 duplicate executions per task rose to 0.15); with one who
+declines, the record was left in the wrong state 0.26 times per task against
+zero without the boundary. The hold converted a silent unknown into a decision,
+and the decision was lossy in either direction, because it was taken without
+knowing whether the write had landed.
+
+The boundary had the means to know. Most servers that create something also
+expose a way to read it back, and spec section 8 already lets a tool declare
+how it relates to others.
+
+## Decision
+
+**A tool MAY declare how to read its effect back**, `sh.sayagain/verify` in
+its `tools/list` `_meta` (spec 8.3): a read-only tool on the same server, an
+argument template over the original call's arguments, and whether the
+verifier's success or its not-found failure proves the effect is present. A
+deletion is verified by an absence.
+
+**After a write ends with an unknown outcome, the boundary runs the verifier
+before deciding anything**, when the tool declares one and the verifier is
+classed read-only. If the effect is present, the original call is answered as
+executed, with `sh.sayagain/verified` on the result saying which tool was
+asked, and the agent is told not to repeat it. If the effect is absent, the
+world has said that nothing landed, so one re-send cannot duplicate anything,
+and the call is sent again without a hold. If the verifier is inconclusive
+(it failed for any other reason, or the template named an argument the call
+did not carry), the boundary holds the call exactly as before.
+
+**The read-back is counted as the work it is.** The verifier is one of the
+boundary's own calls and gets its own ledger row, marked with the receipt it
+checked. The harness's "calls the server actually ran" row rises by it, and
+that row is reported.
+
+**It is on by default and off by policy** (`verify: false`), because a
+boundary that can look should look, and an operator who wants every unknown
+outcome to reach them can say so.
+
+**The linter asks for the declaration** (`annotations/verify`, informational)
+on any tool that is neither read-only nor idempotent, beside the existing
+request for a compensation. The index's grades do not move; the rule set
+version does.
+
+## Alternatives considered
+
+- **Re-send on approval, as before.** That is what the harness measured, and
+  it doubles execution on the writes that matter most.
+- **Never re-send; always hold and let the operator verify by hand.** That is
+  the rejecting rule, and it leaves work undone at a rate the harness put at a
+  quarter of a task. It also asks the operator to do by hand what the server
+  can answer in one call.
+- **Infer a verifier from names** (`create_x` reads back with `get_x`). A
+  guess in the one place where a wrong guess re-executes a write. The
+  declaration is the server's own word and costs it one line.
+- **Use the idempotency declaration instead** (8.1). Right for tools that
+  have one, and the boundary already treats an idempotent write as safe to
+  retry. Most creates and deletes are not idempotent, and a verifier is the
+  honest alternative to pretending they are.
+
+## Consequences
+
+- With the read-back on, the harness's approving operator no longer causes
+  double execution (0.15 per task falls to zero), silent unknowns fall from
+  0.05 to 0.03 per task, and records are left in the wrong state no more
+  often than without the boundary. Failures the agent sees fall from 0.92 to
+  0.35 per task and calls spent recovering from 1.65 to 0.61. The server runs
+  slightly more calls, 5.55 against 5.35, which is the verifiers, and the
+  bytes delivered to the agent roughly double, which is the receipts. Both
+  costs are reported.
+- The rejecting rule still leaves destructive work undone, because a
+  destructive call is held before it is sent and there is nothing to read
+  back. That is the hold policy doing what it was asked; an operator who
+  declines every delete gets no deletes.
+- A verifier that is not read-only is ignored, which keeps a bad declaration
+  from turning a read-back into a second write.
+- The spec moves to v0.1.8. Servers that already declare compensation gain
+  one more line to write; the harness's own server writes it.

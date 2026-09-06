@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1.7                                      |
+| Status         | Draft v0.1.8                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -260,7 +260,7 @@ values.
 
 ## 8. Tool declarations
 
-Two keys a server MAY set in a tool definition's `_meta` (MCP allows
+Three keys a server MAY set in a tool definition's `_meta` (MCP allows
 reverse-DNS keys there). They describe the tool, not a call, so a boundary
 reads them from `tools/list`. Neither changes what the server does.
 
@@ -295,10 +295,35 @@ commitment the client declared (a later document). A boundary MUST NOT run
 one automatically for a single call, and MUST NOT run one on another
 server than the one that declared it.
 
+### 8.3 `sh.sayagain/verify` (object)
+
+```json
+{ "tool": "get_record", "arguments": { "id": "$arguments.id" }, "effect": "result" }
+```
+
+The read-only call that says whether this tool's effect is present in the
+world: a tool name on the same server and an argument template in the
+language of 8.2 (`$arguments.<name>` only, since there is no result to
+refer to). `effect` says how to read the verifier's answer: `"result"` (the
+default) means a successful result proves the effect is present; `"absence"`
+means a not-found failure proves it, which is how a deletion is verified.
+
+A boundary MAY run the verifier on its own after a call to this tool ends
+with an unknown outcome (a timeout after the request was sent), before it
+re-sends the call or holds it for an operator. It MUST NOT do so unless the
+verifier is read-only (declared `readOnlyHint: true`, or classed read-only
+by the operator), and MUST NOT run it on another server than the one that
+declared it. A verifier that fails for any reason other than the declared
+absence is inconclusive, and the boundary proceeds as if nothing had been
+declared. A result the boundary answered on the strength of a verifier
+carries `sh.sayagain/verified` in its `_meta` with the verifier's tool name
+and the effect read.
+
 Note: `@sayagain/lint` reports a tool that is neither read-only nor
 idempotent and carries no `sh.sayagain/compensation` key as informational
-(`annotations/compensation`). That is a product convention, not part of
-this document's conformance.
+(`annotations/compensation`), and likewise one that carries no
+`sh.sayagain/verify` key (`annotations/verify`). Those are product
+conventions, not part of this document's conformance.
 
 ## 9. Security considerations
 
@@ -332,3 +357,4 @@ and the schema shim (section 7) are optional features.
 - v0.1.5 (2026-09-05): `boundary.ledger` enumerated and `boundary.hold` added to 5.5.
 - v0.1.6 (2026-09-05): `repair.rule` may be `learned:<rule>` for a coercion the boundary derived from its own ledger (5.4).
 - v0.1.7 (2026-09-05): section 8, tool declarations: `sh.sayagain/idempotency` and `sh.sayagain/compensation` in a tool's `_meta`; former sections 8 to 10 are now 9 to 11.
+- v0.1.8 (2026-09-06): 8.3, `sh.sayagain/verify`, the read-only call that says whether a write's effect is present, and `sh.sayagain/verified` on a result the boundary answered on its strength.

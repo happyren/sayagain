@@ -346,8 +346,8 @@ node scripts/experiment/harness.mjs --tasks 60 --seeds 1,2,3,7,11 --operator app
   made, and bytes delivered. All twelve are printed; none is dropped for being
   unflattering.
 
-**Result, 300 paired tasks over the five seeds.** Neither operator rule is a
-clean win, and that is the finding.
+**Result, 300 paired tasks over the five seeds, boundary as of 0.16.0.**
+Neither operator rule is a clean win, and that is the finding.
 
 With an approving operator, the boundary takes work off the agent and adds it
 elsewhere: failures the agent saw fall from 0.92 to 0.44 per task and calls
@@ -369,6 +369,24 @@ resumption: on an unknown outcome, read the state back before re-sending. The
 idempotency and compensation declarations in `spec/intent-metadata.md` section
 8 are what would make that possible, which is an argument for the spec rather
 than a result about it.
+
+**Result, the same 300 tasks, boundary as of 0.17.0 (ADR-0013).** With
+the read-back declared and on, the approving operator's double execution
+falls from 0.15 per task to zero, writes nobody knows about fall from 0.05 to
+0.03, and no record is left in the wrong state. Failures the agent sees fall
+from 0.92 to 0.35 and calls spent recovering from 1.65 to 0.61. The server
+runs 5.55 calls per task against 5.35, which is the verifiers, and the bytes
+delivered to the agent roughly double, which is the receipts. `--verify off`
+reproduces the 0.16.0 table, so the read-back is what moved the duplicate
+row. The rejecting operator still leaves destructive work undone at 0.26
+records per task, because a destructive call is held before it is sent and
+there is nothing to read back.
+
+**The placebo.** `--placebo` runs the treatment arm with the boundary in its
+control mode, which forwards and records and does nothing else. Over the same
+300 tasks every row is exactly zero except the two byte rows, which carry the
+receipts. That is the instrument's own evidence that it is not measuring
+itself; it is run alongside every reported result.
 
 What this protocol can support: a claim about what the boundary does to a
 stated failure distribution under a stated recovery policy and a stated

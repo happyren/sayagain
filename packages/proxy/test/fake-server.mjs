@@ -5,6 +5,9 @@ const rl = createInterface({ input: process.stdin });
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 let calls = 0;
 const flaky = new Map(); // tool -> remaining failures
+const landed = new Set(); // ids whose lost_write really executed
+const lostOnce = new Set(); // keys that have already lost one answer
+const VERIFY = { "sh.sayagain/verify": { tool: "landed", arguments: { id: "$arguments.id" } } };
 const asks = new Map(); // id -> resolver for a request the server made of the client
 const strictSchema = {
   type: "object",
@@ -57,6 +60,16 @@ rl.on("line", (line) => {
             annotations: { readOnlyHint: true },
           },
           { name: "crash", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+          // A write that lands and then loses its answer, and one that loses its answer without
+          // landing; both say how to read the effect back (spec 8.3).
+          { name: "lost_write", inputSchema: { type: "object" }, _meta: VERIFY },
+          { name: "vanished_write", inputSchema: { type: "object" }, _meta: VERIFY },
+          { name: "landed", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+          {
+            name: "unverifiable_write",
+            inputSchema: { type: "object" },
+            _meta: { "sh.sayagain/verify": { tool: "create_page", arguments: {} } },
+          },
         ],
       },
     });
@@ -136,6 +149,23 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id, method: args.method ?? "ping", params: {} });
     } else if (name === "crash") {
       process.exit(Number(args.code ?? 3));
+    } else if (
+      name === "lost_write" ||
+      name === "vanished_write" ||
+      name === "unverifiable_write"
+    ) {
+      const key = `${name}:${args.id}`;
+      if (!lostOnce.has(key)) {
+        lostOnce.add(key);
+        if (name !== "vanished_write") landed.add(args.id); // it happened; the answer is what is lost
+        fail("Error: Request timed out");
+      } else {
+        landed.add(args.id);
+        ok();
+      }
+    } else if (name === "landed") {
+      if (landed.has(args.id)) ok();
+      else fail(`Error: record '${args.id}' not found`);
     } else ok();
   } else if (msg.method === "ping") {
     send({ jsonrpc: "2.0", id: msg.id, result: {} });

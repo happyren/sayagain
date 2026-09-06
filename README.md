@@ -57,6 +57,7 @@ sayagain import --host all --rewrite # register every server and point each host
 sayagain eject --host all            # and back
 sayagain doctor                      # what is wrong with the setup, and the command that fixes each one
 sayagain classes --all --suggest     # how every tool is classed, and what its name implies where they differ
+node scripts/experiment/harness.mjs  # the fault-injection harness: the boundary against a server that fails on a seed, paired per task
 
 # Or by hand: register upstreams, start the daemon, point hosts at it.
 sayagain add notion -- npx -y @notionhq/notion-mcp-server

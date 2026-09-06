@@ -5,7 +5,7 @@
  * `wrap` and the daemon are thin shells around this class.
  */
 import { EventEmitter } from "node:events";
-import { META, type ToolClass } from "@sayagain/sdk";
+import { META, type ToolClass, type VerifyDeclaration } from "@sayagain/sdk";
 import {
   ANNOUNCEMENT,
   abandonedResponse,
@@ -26,9 +26,11 @@ import {
   type PendingCall,
   pendingFor,
   registerPending,
+  resolveVerifyArguments,
   rewriteServerMessage,
   shapeOf,
   unansweredResponse,
+  verifiedResponse,
   withArguments,
 } from "./boundary.js";
 import type { ReplayOutcome } from "./control.js";
@@ -649,7 +651,10 @@ export class Boundary extends EventEmitter {
     this.resolveWaiter(call, { isError: true, text: reason });
   }
 
-  private resolveWaiter(call: PendingCall, outcome: { isError: boolean; text: string }): void {
+  private resolveWaiter(
+    call: PendingCall,
+    outcome: { isError: boolean; text: string; errorClass?: string },
+  ): void {
     const waiter = this.replayWaiters.get(keyOf(call.id));
     if (!waiter) return;
     clearTimeout(waiter.timer);
@@ -915,10 +920,76 @@ export class Boundary extends EventEmitter {
       this.state.pending.delete(keyOf(call.id));
       call.lastFailure = failure;
       this.record(failedAttemptRow(call, this.state.upstreamName, failure, bytes, now));
+      // A hold decided blind is lossy either way: approving re-sends a write that may have landed,
+      // declining abandons one that may not have. If the tool says how to read its effect back,
+      // look before deciding (spec 8.3). Once per call, and never for a replay.
+      const decl =
+        this.policy.verify && call.verified === undefined && call.replayOf === undefined
+          ? this.classifier.verifyOf(call.tool)
+          : undefined;
+      if (decl && this.classifier.classOf(decl.tool) === "read-only") {
+        void this.verifyThenDecide(call, failure, decl);
+        return true;
+      }
       this.park(call, `write failed with unknown outcome: ${failure.signature}`, "unknown-outcome");
       return true;
     }
     return false;
+  }
+
+  /**
+   * Read a write's effect back through its declared verifier, then answer, re-send or hold. The
+   * verifier is one of the boundary's own calls and gets its own ledger row, marked with the
+   * receipt it checked, so the read-back is counted as the work it is.
+   */
+  private async verifyThenDecide(
+    call: PendingCall,
+    failure: Failure,
+    decl: VerifyDeclaration,
+  ): Promise<void> {
+    const reason = `write failed with unknown outcome: ${failure.signature}`;
+    const args = resolveVerifyArguments(decl, call.arguments);
+    if (args === null) {
+      this.park(call, reason, "unknown-outcome");
+      return;
+    }
+    const id = ownId(this.state, "verify");
+    const req: JsonRpcRequest = {
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: decl.tool, arguments: args },
+    };
+    const rawLine = `${JSON.stringify(req)}\n`;
+    const probe = describeCall(req, rawLine, "read-only", Buffer.byteLength(rawLine));
+    probe.verifies = call.receipt;
+    probe.server = this.name;
+    if (call.arm !== undefined) probe.arm = call.arm;
+    if (call.session !== undefined) probe.session = call.session;
+    const outcome = await this.execute(probe);
+    const effect = decl.effect ?? "result";
+    // "result": a good answer proves the effect, a not-found failure proves its absence.
+    // "absence": the other way round, which is how a deletion reads.
+    const present = effect === "result" ? !outcome.isError : outcome.errorClass === "semantic";
+    const absent = effect === "result" ? outcome.errorClass === "semantic" : !outcome.isError;
+    if (present) {
+      call.verified = "present";
+      const now = Date.now();
+      this.record(baseRow(call, this.state.upstreamName, "executed", 0, now));
+      const message = verifiedResponse(call, decl, outcome.text);
+      this.settle(call, { receipt: call.receipt, result: message.result, at: now });
+      if (!this.state.ownIds.delete(keyOf(call.id))) this.deliver(message);
+      this.resolveWaiter(call, { isError: false, text: "verified: the effect is present" });
+      return;
+    }
+    if (absent) {
+      // The world says nothing landed, so a second send cannot duplicate anything.
+      call.verified = "absent";
+      call.attempts++;
+      this.forward(call);
+      return;
+    }
+    this.park(call, reason, "unknown-outcome");
   }
 
   /** Send one of the boundary's own calls and resolve with its outcome (or a timeout). */
@@ -1143,7 +1214,11 @@ export class Boundary extends EventEmitter {
         const isError = row?.isError ?? true;
         if (!isError && call.replayOf !== undefined)
           this.deadLetters.resolve(call.replayOf, call.receipt);
-        this.resolveWaiter(call, { isError, text });
+        this.resolveWaiter(call, {
+          isError,
+          text,
+          ...(row?.errorClass !== undefined ? { errorClass: row.errorClass } : {}),
+        });
       }
     }
     if (swallow) return;

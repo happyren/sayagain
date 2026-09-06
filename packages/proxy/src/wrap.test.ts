@@ -554,6 +554,63 @@ describe("lifecycle", () => {
     }
   });
 
+  it("reads a lost write back before deciding: answers when it landed, re-sends when it did not, holds when it cannot tell", async () => {
+    const h = harness({ hold: "destructive", holdWaitMs: 200 });
+    try {
+      await h.handshake();
+      // The write landed and the answer was lost: the verifier finds it, the agent is told once.
+      h.call(1, "lost_write", { id: "a" });
+      const found = await h.waitFor(1);
+      expect(meta(found)["sh.sayagain/status"]).toBe("executed");
+      expect(meta(found)["sh.sayagain/verified"]).toEqual({ tool: "landed", effect: "result" });
+      expect(JSON.stringify(found)).toContain("Do not repeat it");
+      expect(h.wrapped.holds.list()).toEqual([]); // nothing waited for an operator
+      // The answer was lost and nothing landed: the verifier says so, and one re-send is safe.
+      h.call(2, "vanished_write", { id: "b" });
+      const resent = await h.waitFor(2);
+      expect(meta(resent)["sh.sayagain/status"]).toBe("executed");
+      expect(meta(resent)["sh.sayagain/verified"]).toBeUndefined(); // the second send answered itself
+      // A verifier that is not read-only is not run; the hold is the fallback.
+      h.call(3, "unverifiable_write", { id: "c" });
+      const held = await h.waitFor(3);
+      expect(meta(held)["sh.sayagain/status"]).toBe("held");
+      await h.finish();
+      const rows = h.ledger.rows;
+      const a = rows.filter((r) => r.tool === "lost_write");
+      expect(a.map((r) => [r.status, r.isError, r.verified])).toEqual([
+        ["executed", true, undefined], // the attempt that lost its answer
+        ["executed", false, "present"], // answered on the verifier's word
+      ]);
+      const probe = rows.find((r) => r.tool === "landed" && r.verifies === a[0]?.receipt);
+      expect(probe).toMatchObject({ toolClass: "read-only", isError: false });
+      const b = rows.filter((r) => r.tool === "vanished_write");
+      expect(b.at(-1)).toMatchObject({
+        status: "executed",
+        isError: false,
+        verified: "absent",
+        attempts: 2,
+      });
+      expect(
+        rows.filter((r) => r.tool === "landed" && r.verifies === b[0]?.receipt)[0]?.isError,
+      ).toBe(true);
+    } finally {
+      await h.finish();
+    }
+  });
+
+  it("does not read a write back when the policy says not to", async () => {
+    const h = harness({ hold: "destructive", verify: false, holdWaitMs: 200 });
+    try {
+      await h.handshake();
+      h.call(1, "lost_write", { id: "a" });
+      expect(meta(await h.waitFor(1))["sh.sayagain/status"]).toBe("held");
+      await h.finish();
+      expect(h.ledger.rows.some((r) => r.tool === "landed")).toBe(false);
+    } finally {
+      await h.finish();
+    }
+  });
+
   it("in the control arm forwards, records and does nothing else", async () => {
     const h = harness({ hold: "destructive" }, { arm: "control" });
     try {

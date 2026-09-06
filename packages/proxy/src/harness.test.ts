@@ -52,6 +52,22 @@ describe("fault-injection harness", () => {
     expect(numbers(approve())).not.toBe(numbers(reject));
   });
 
+  it("shows no difference when the boundary only observes: the instrument is not measuring itself", () => {
+    const out = run(["--tasks", "8", "--seeds", "3", "--placebo"]);
+    expect(out).toContain("PLACEBO");
+    for (const row of [
+      "failures the agent saw",
+      "calls the agent spent recovering",
+      "non-idempotent writes run twice",
+      "records left in the wrong state",
+    ]) {
+      const line = out.split("\n").find((l) => l.includes(row)) ?? "";
+      expect(line, row).not.toContain("distinguishable");
+      // The difference column reads 0 when the two arms did the same work.
+      expect(line.replace(row, "").trim().split(/\s+/)[2], row).toBe("0");
+    }
+  });
+
   it("refuses a fault rate it cannot use", () => {
     expect(() => run(["--tasks", "1", "--flaky", "six"])).toThrow();
     expect(() => run(["--tasks", "1", "--operator", "maybe"])).toThrow();

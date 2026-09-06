@@ -49,6 +49,10 @@ export interface LedgerRow {
   budget?: "task" | "window";
   /** The A/B arm the call's session was in (docs/measurement.md 5.4); absent outside an experiment. */
   arm?: "control" | "treatment";
+  /** This row is the boundary's own read-back of another call's effect: that call's receipt. */
+  verifies?: string;
+  /** The call's outcome was unknown and the boundary read it back (spec 8.3): what it found. */
+  verified?: "present" | "absent";
 }
 
 export interface Ledger {

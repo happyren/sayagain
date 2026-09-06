@@ -14,5 +14,6 @@
 | [0010](0010-index-as-a-static-artefact.md) | The index is a static artefact built from the scan and the contributions; hosting is a repository variable | Accepted |
 | [0011](0011-the-ab-protocol-inside-the-boundary.md) | The A/B protocol runs inside the boundary, with a control arm that observes only | Accepted |
 | [0012](0012-the-boundary-explains-its-own-setup.md) | The boundary explains its own setup, and proposes classes it will not apply on its own | Accepted |
+| [0013](0013-verification-before-resumption.md) | A write whose outcome is unknown is read back before it is re-sent or held | Accepted |
 
 Template: [0000-template.md](0000-template.md).

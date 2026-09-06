@@ -88,12 +88,21 @@ const TOOLS = [
     description: "Create a record.",
     inputSchema: RECORD_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    // Spec 8.3: a boundary may read the effect back before re-sending a call whose answer was lost.
+    _meta: { "sh.sayagain/verify": { tool: "get_record", arguments: { id: "$arguments.id" } } },
   },
   {
     name: "delete_record",
     description: "Delete a record and everything under it.",
     inputSchema: RECORD_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    _meta: {
+      "sh.sayagain/verify": {
+        tool: "get_record",
+        arguments: { id: "$arguments.id" },
+        effect: "absence",
+      },
+    },
   },
 ];
 const WRITES = new Set(["set_status", "create_record", "delete_record"]);
