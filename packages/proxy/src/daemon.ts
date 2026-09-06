@@ -27,7 +27,7 @@ import { type Decision, type Hold, HoldQueue } from "./holds.js";
 import { isRequest, isResponse, type JsonRpcMessage, keyOfId, parseMessage } from "./jsonrpc.js";
 import { LearnedStore, upstreamReport } from "./learned.js";
 import type { OtlpExporter } from "./otlp.js";
-import { DEFAULT_POLICY } from "./policy.js";
+import { DEFAULT_POLICY, type HoldMode } from "./policy.js";
 import {
   loadRegistry,
   type Registry,
@@ -286,13 +286,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
    * policy, so `sayagain classes --write` takes effect without restarting an upstream.
    */
   const policySeen = new Map<string, string>();
-  const applyPolicies = (servers: Record<string, ServerConfig>): number => {
+  const applyPolicies = (servers: Record<string, ServerConfig>, holdDefault?: HoldMode): number => {
     let changed = 0;
     for (const [name, b] of boundaries) {
       const cfg = servers[name];
       if (!cfg) continue;
       const classes = cfg.classes ?? {};
-      const hold = cfg.hold ?? DEFAULT_POLICY.hold;
+      const hold = cfg.hold ?? holdDefault ?? DEFAULT_POLICY.hold;
       const shape = JSON.stringify([hold, Object.entries(classes).sort()]);
       if (policySeen.get(name) === shape) continue;
       const first = !policySeen.has(name);
@@ -305,6 +305,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       changed++;
     }
     return changed;
+  };
+
+  /**
+   * Re-read config.json and push what changed into the boundaries already running: the class
+   * tables, each server's hold mode, and the daemon-level hold default that servers without one
+   * inherit. Every path that re-reads the file goes through here, so none of them can drop the default.
+   */
+  const refreshFromFile = (): number => {
+    const fresh = loadRegistry();
+    options.registry.servers = fresh.servers;
+    options.registry.daemon = { ...(options.registry.daemon ?? {}), ...(fresh.daemon ?? {}) };
+    if (fresh.daemon?.hold === undefined) delete options.registry.daemon.hold;
+    return applyPolicies(fresh.servers, options.registry.daemon.hold);
   };
 
   const boundaryFor = (name: string): Boundary | undefined => {
@@ -326,7 +339,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       learned,
       policy: {
         ...(config.classes ? { classes: config.classes } : {}),
-        ...(config.hold ? { hold: config.hold } : {}),
+        ...((config.hold ?? options.registry.daemon?.hold)
+          ? { hold: (config.hold ?? options.registry.daemon?.hold) as HoldMode }
+          : {}),
       },
     };
     const b = new Boundary(coreOptions);
@@ -681,16 +696,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return res.end(text);
     }
     if (req.method === "POST" && path === "/api/policy/reload") {
-      let servers: Record<string, ServerConfig>;
       try {
-        servers = loadRegistry().servers;
+        return json(res, 200, { ok: true, servers: refreshFromFile() });
       } catch (err) {
         return json(res, 500, {
           error: `could not read the registry: ${err instanceof Error ? err.message : String(err)}`,
         });
       }
-      options.registry.servers = servers;
-      return json(res, 200, { ok: true, servers: applyPolicies(servers) });
     }
     if (req.method === "GET" && path === "/api/health") {
       return json(res, 200, {
@@ -701,15 +713,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         ledger: options.stores.kind,
         otlp: options.otlp?.endpoint ?? null,
         arm: options.arm ?? null,
+        hold: options.registry.daemon?.hold ?? null,
       });
     }
     if (req.method === "GET" && path === "/api/servers") {
       let servers = options.registry.servers;
       if (existsSync(registryPath())) {
         try {
-          servers = loadRegistry().servers;
-          options.registry.servers = servers;
-          applyPolicies(servers);
+          refreshFromFile();
+          servers = options.registry.servers;
         } catch {
           // keep the snapshot
         }

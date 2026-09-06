@@ -186,6 +186,18 @@ describe("doctor", () => {
     ).toContain("coinflip");
   });
 
+  it("says when holds are off, and how to turn them on", () => {
+    const observe = doctorFindings({
+      ...base,
+      daemon: { ...base.daemon, holdDefault: "never" },
+    });
+    expect(find(observe, "holds are off")).toMatchObject({
+      severity: "note",
+      fix: "sayagain up --hold",
+    });
+    expect(find(doctorFindings(base), "holds are off")).toBeUndefined();
+  });
+
   it("orders findings by severity", () => {
     const f = doctorFindings({
       ...base,

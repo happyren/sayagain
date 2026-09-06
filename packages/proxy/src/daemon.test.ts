@@ -109,6 +109,32 @@ describe("daemon", () => {
     }
   };
 
+  it("keeps the daemon-level hold default when the page or status re-reads the registry", async () => {
+    // `sayagain up` writes daemon.hold: never; the page's own /api/servers call re-reads the file
+    // and must not put every boundary back on hold-by-default while the page says holds are off.
+    const registry = {
+      servers: {
+        fake: { transport: "stdio" as const, command: process.execPath, args: [fixture] },
+      },
+      daemon: { hold: "never" as const },
+    };
+    saveRegistry(registry);
+    const d = await boot("memory", { registry });
+    const before = await rpc(d, "fake", initMsg);
+    expect(meta(before.body)["sh.sayagain/boundary"]).toMatchObject({ hold: "never" });
+    expect(((await api(d, "/api/health")) as Obj).hold).toBe("never");
+    await api(d, "/api/servers");
+    await api(d, "/api/policy/reload", { method: "POST" });
+    const after = await rpc(d, "fake", initMsg);
+    expect(meta(after.body)["sh.sayagain/boundary"]).toMatchObject({ hold: "never" });
+    // Turning holds on is a change to the file, picked up by the same re-read.
+    saveRegistry({ ...registry, daemon: { hold: "destructive" } });
+    await api(d, "/api/servers");
+    const on = await rpc(d, "fake", initMsg);
+    expect(meta(on.body)["sh.sayagain/boundary"]).toMatchObject({ hold: "destructive" });
+    expect(((await api(d, "/api/health")) as Obj).hold).toBe("destructive");
+  });
+
   it("serves a registered upstream over HTTP with receipts, and rejects bad tokens and unknown names", async () => {
     const d = await boot();
     expect((await rpc(d, "fake", initMsg, { token: "wrong" })).status).toBe(401);

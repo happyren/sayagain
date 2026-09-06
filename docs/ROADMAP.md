@@ -240,6 +240,13 @@ Explicitly not built
   ledger by hand. The numbers it moves: the share of host-configured servers
   whose calls reach the boundary, and the count of doctor errors and warnings
   on a first run.
+- One command up (0.19.0, ADR-0014): `sayagain up` prints its plan, wraps
+  every server the hosts have configured, starts the daemon, brings up the
+  page and ends with `doctor`; `sayagain down` puts it all back. It observes
+  first, because the harness's one result against the boundary in every cell
+  is work left undone by a hold nobody answers, and a read-back now works
+  without a hold. Onboarding is the throughput of evidence: every machine
+  that runs `up` is sessions for the A/B and shapes for the index.
 - The harness, calibrated (0.18.0, docs/measurement.md 5.6): the faults are
   now drawn per step from the failure-class mix the 30-day audit measured,
   at its rate, so the boundary is scored against the traffic it will meet;

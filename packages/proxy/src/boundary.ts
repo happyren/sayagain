@@ -89,6 +89,8 @@ export interface PendingCall {
    * the operator decided. A verifier answer that matches it proves nothing about the call.
    */
   preImage?: Promise<EffectState>;
+  /** The boundary gave up on this call (a sweep, a timer, the upstream gone): a read-back still in flight answers nothing. */
+  abandoned?: boolean;
 }
 
 /** What a verifier found: the call's effect is in the world, is not, or it could not say. */

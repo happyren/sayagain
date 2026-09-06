@@ -132,7 +132,10 @@ more of the boundary's own read-only calls, with its own ledger row marked
 with the receipt it checked.
 
 A write that is not held before sending has no pre-image, and a verifier
-that finds its effect present is read as before. That leaves the create-on-
+that finds its effect present is read as before, with one exception added
+with ADR-0014: an absence is the natural state of most things, so a
+verifier whose effect is an absence proves the call only against a
+pre-image that read a presence, and without one it is inconclusive. That leaves the create-on-
 an-existing-id case open for unheld writes; it is rarer than the destructive
 case, since the agent chose the id, and reading before every verifiable
 write would cost a call on the path where nothing goes wrong. It is

@@ -20,7 +20,7 @@
 // and not against the traffic it was built for.
 //
 // Usage: node scripts/experiment/harness.mjs [--tasks 60] [--seeds 1,2,3,7,11]
-//          [--operator approve|reject|absent] [--verify on|off] [--placebo]
+//          [--operator approve|reject|absent] [--verify on|off] [--hold destructive|never] [--placebo]
 //          [--mix measured|fixable] [--fail-rate 0.051] [--lost 0.01] [--attempts 3]
 //          [--server "<command>"] [--sweep] [--json out.json] [--dump tasks.jsonl]
 //
@@ -58,6 +58,8 @@ const SEEDS = String(arg("seeds", "1,2,3,7,11"))
   .filter(Boolean);
 const OPERATOR = String(arg("operator", "approve"));
 const VERIFY = String(arg("verify", "on"));
+/** The hold mode: `never` is the unattended install (`sayagain up`), where no call waits for anyone. */
+const HOLD = String(arg("hold", "destructive"));
 const PLACEBO = flag("placebo");
 const MIX = String(arg("mix", "measured"));
 const FAIL_RATE = Number(arg("fail-rate", 0.051));
@@ -78,6 +80,8 @@ for (const [name, value] of [
 if (!["approve", "reject", "absent"].includes(OPERATOR))
   throw new Error("--operator must be approve, reject or absent");
 if (VERIFY !== "on" && VERIFY !== "off") throw new Error("--verify must be on or off");
+if (HOLD !== "destructive" && HOLD !== "never")
+  throw new Error("--hold must be destructive or never");
 if (MIX !== "measured" && MIX !== "fixable") throw new Error("--mix must be measured or fixable");
 
 /**
@@ -361,7 +365,7 @@ async function throughBoundary(env, run, cell) {
     log: () => {},
     // An absent operator never decides, so a held call waits out the short wait and comes back STANDBY.
     policy: {
-      hold: "destructive",
+      hold: cell.hold ?? "destructive",
       holdWaitMs: cell.operator === "absent" ? 250 : 2000,
       verify: cell.verify === "on",
     },
@@ -630,7 +634,9 @@ function render(result, cell, build) {
     `Fault-injection harness: ${result.pairs} paired tasks (${TASKS} per seed, seeds ${SEEDS.join(",")}), docs/measurement.md 5.6; boundary ${build.version} (dist ${build.dist})`,
     `Faults: ${(100 * FAIL_RATE).toFixed(1)}% of steps fail, classes in the ${MIX} mix (${mix}), each step drawing from the classes it can carry, which over these tasks injected ${injectedShares(result.injected)}; a write loses its answer once ${(100 * LOST).toFixed(0)}% of the time; the boundary's own reads draw from the same mix at the same rate.`,
     `Agent: retries a timeout ${Math.round(100 * POLICY.retryTimeout)}% of the time and an unclassifiable error ${Math.round(100 * POLICY.retryOther)}%, never a permission error, at most ${cell.attempts} attempts a step; it is not a model.`,
-    `Operator: ${cell.operator === "absent" ? "nobody; a held call waits out the short wait and comes back STANDBY" : `a stand-in that answers every held call "${cell.operator}", at once`}. Read-back of a lost write before deciding (spec 8.3): ${cell.verify}.`,
+    cell.hold === "never"
+      ? `Holds: off, the unattended install (sayagain up): no call waits for anyone, and a lost write is read back where the tool says how (spec 8.3): ${cell.verify}.`
+      : `Operator: ${cell.operator === "absent" ? "nobody; a held call waits out the short wait and comes back STANDBY" : `a stand-in that answers every held call "${cell.operator}", at once`}. Read-back of a lost write before deciding (spec 8.3): ${cell.verify}.`,
     ...(SERVER
       ? [
           `Server: ${SERVER}, behind the chaos shim; the state row cannot be read from outside and is n/a.`,
@@ -727,7 +733,13 @@ async function main() {
     boundary: build,
   };
   if (!SWEEP) {
-    const cell = { operator: OPERATOR, verify: VERIFY, attempts: ATTEMPTS, placebo: PLACEBO };
+    const cell = {
+      operator: OPERATOR,
+      verify: VERIFY,
+      hold: HOLD,
+      attempts: ATTEMPTS,
+      placebo: PLACEBO,
+    };
     const result = await runOnce(cell);
     if (JSON_OUT)
       writeFileSync(

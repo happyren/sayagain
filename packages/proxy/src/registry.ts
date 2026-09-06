@@ -51,6 +51,11 @@ export interface Registry {
     /** The A/B protocol's arm mode for the daemon (docs/measurement.md 5.4). */
     /** The A/B arm mode `serve --arm` persisted; "off" ends the experiment and is what `--arm off` stores. */
     arm?: "control" | "treatment" | "coinflip" | "daily" | "off";
+    /**
+     * The hold mode for servers that set none of their own. `sayagain up` writes "never" so a fresh
+     * install observes first; `sayagain up --hold` removes it and the default (ADR-0004) is back.
+     */
+    hold?: HoldMode;
   };
   /** `sayagain contribute` settings (ADR-0009): contributor id, consent, endpoint, weekly. */
   contribute?: {

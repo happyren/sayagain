@@ -705,6 +705,45 @@ describe("lifecycle", () => {
     }
   });
 
+  it("reads a write back without a hold when holds are off, and answers what it cannot tell as the failure it was", async () => {
+    // The unattended install (sayagain up): nothing waits for anyone, and the read-back still does
+    // what it can. Present: answered as executed. Absent: sent once more. Neither: the failure, as it
+    // would have been without a read-back, and never a hold.
+    const h = harness({ hold: "never", holdWaitMs: 200 }, { replayTimeoutMs: 300 });
+    try {
+      await h.handshake();
+      h.call(1, "lost_write", { id: "n1" });
+      const found = await h.waitFor(1);
+      expect(meta(found)["sh.sayagain/status"]).toBe("executed");
+      expect(meta(found)["sh.sayagain/verified"]).toEqual({ tool: "landed", effect: "result" });
+      h.call(2, "vanished_write", { id: "n2" });
+      const resent = await h.waitFor(2);
+      expect(meta(resent)["sh.sayagain/status"]).toBe("executed");
+      expect(meta(resent)["sh.sayagain/verified"]).toBeUndefined();
+      h.call(3, "unready_write", { id: "n3" });
+      const asItWas = await h.waitFor(3);
+      expect((asItWas.result as { isError: boolean }).isError).toBe(true);
+      expect(meta(asItWas)["sh.sayagain/status"]).not.toBe("held");
+      // A delete of a record that never was: nothing was held, so there is no pre-image, and an
+      // absence proves nothing without one. The agent gets the timeout it got, never "applied".
+      h.call(4, "lost_delete", { id: "ghost" });
+      const ghost = await h.waitFor(4);
+      expect((ghost.result as { isError: boolean }).isError).toBe(true);
+      expect(meta(ghost)["sh.sayagain/verified"]).toBeUndefined();
+      expect(h.wrapped.holds.list()).toHaveLength(0);
+      const rows = h.ledger.rows;
+      expect(rows.filter((r) => r.status === "held")).toHaveLength(0);
+      expect(rows.filter((r) => r.tool === "lost_write").at(-1)?.verified).toBe("present");
+      expect(rows.filter((r) => r.tool === "unready").at(-1)?.verifies).toBeDefined();
+      expect(rows.filter((r) => r.tool === "unready_write").at(-1)).toMatchObject({
+        isError: true,
+        status: "executed",
+      });
+    } finally {
+      await h.finish();
+    }
+  });
+
   it("does not read a write back when the policy says not to", async () => {
     const h = harness({ hold: "destructive", verify: false, holdWaitMs: 200 });
     try {

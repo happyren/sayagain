@@ -6,6 +6,56 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-06
+
+### Added
+
+- `sayagain up`: the whole onboarding in one command (ADR-0014). It prints a
+  numbered plan before it changes anything: which servers it will wrap and
+  for which hosts, that it will start the daemon, that it will bring up the
+  daemon's page and where, and whether anything will wait for the operator.
+  Then it imports every server with rewrite, starts the daemon if none is
+  running (or reloads a running one), prints the page's URL (`--open` opens
+  it), names the traffic that stays outside and why, and ends with
+  `sayagain doctor`. `--dry-run` prints the plan and the per-host dry run;
+  `--no-start` leaves the daemon to you.
+- `sayagain down`: every host back the way it was, the daemon stopped, the
+  ledger, holds and backups kept. It says when the daemon did not stop, and
+  exits 1 when an entry it cannot restore would start the daemon again
+  (`--prune` removes it). `sayagain stop` no longer reports a daemon that is
+  still answering as stopped.
+- A fresh install observes first. The first `up` writes `daemon.hold:
+  "never"` in `config.json`, the hold mode for servers with none of their
+  own; `sayagain up --hold` writes `destructive` (ADR-0004's default)
+  explicitly, `--observe` writes `never` again, and a later plain `up` keeps
+  the mode it finds and says so. A running daemon picks the change up on
+  reload, `/api/health` reports it, the page shows it, and `doctor` says
+  when holds are off and how to turn them on. Every path on which the
+  daemon re-reads `config.json` keeps the default (the page's own requests
+  once dropped it; a test pins it).
+- A read-back without a hold. With holds off, a write whose outcome is
+  unknown is still read back through its declared verifier (spec 8.3):
+  present, and it is answered as executed; absent, and it is sent once
+  more; neither, and it gets the failure it got, never a hold. Nothing is
+  held, so no pre-image is read, and a verifier that reads an absence (a
+  delete's effect) proves nothing without one: such a call gets the
+  failure it got, and the agent's own retry hears the truth. A read-back
+  whose call the boundary gave up on meanwhile answers nothing.
+- The harness gains `--hold never`, the unattended-install cell
+  (docs/measurement.md 5.6).
+
+### Result
+
+The unattended install, 300 paired tasks over the pre-registered seeds. At
+the measured rate every harm row matches the control arm and the server
+runs 0.01 more calls a task; at the stress rate non-idempotent duplicates
+fall from 0.07 a task to 0.01, the same as with an approving operator, at
+0.14 more server calls against that operator's 0.31, with nobody deciding
+anything. What holds add is the stop before a destructive call goes, at the
+price the absent-operator cells measured: 0.18 (measured rate) and 0.10
+(stress) records a task left undone.
+
+
 ## [0.18.0] - 2026-09-06
 
 ### Added
