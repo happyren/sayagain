@@ -13,26 +13,52 @@ All notable changes to this project are documented here. The format follows
 - The fault-injection harness (`scripts/experiment/`, pre-registered as
   docs/measurement.md 5.6). Each task is its own cluster, and the same task is
   run twice against the same seeded faults, once through the boundary and once
-  past it, so two hundred paired observations take under a minute where the
-  organic A/B needs a session apiece. The upstream is a real stdio MCP server
-  that fails on a seed and writes down every side effect that really happened,
-  so what the agent believes can be checked against what the world did.
-- A first run, 200 tasks at seed 7, control minus treatment per task:
+  past it, so 300 paired observations take under a minute where the organic
+  A/B needs a session apiece. The upstream is a real stdio MCP server that
+  fails on a seed, logs every call it actually ran, and writes down every side
+  effect that really happened, so what the agent believes can be checked
+  against what the world did. Faults are drawn on the logical step, so a repair
+  or a retry by either side meets the same fault.
+- Twelve outcomes, reported in both directions, including the ones that count
+  against the boundary: work left undone, writes believed that never happened,
+  duplicate execution, and the calls the server actually ran.
 
-  | outcome | control | treatment | difference | 95% interval |
-  |---|---|---|---|---|
-  | writes the agent never learned about | 0.07 | 0.03 | 0.05 | 0.02 to 0.08 |
-  | non-idempotent writes run twice | 0.08 | 0.00 | 0.08 | 0.03 to 0.13 |
-  | calls spent recovering | 1.73 | 0.74 | 0.98 | 0.78 to 1.19 |
-  | failures the agent saw | 0.99 | 0.41 | 0.58 | 0.46 to 0.71 |
-  | bytes spent recovering | 199 | 244 | -45 | -94 to 4 |
+### Result
 
-  The boundary halves the writes whose outcome nobody learns, removes the
-  double execution, and takes about 60% of the failures off the agent. It does
-  not reduce the bytes: the receipt it stamps on every result costs about what
-  the avoided retries save, on this failure mix. That row is reported rather
-  than netted off.
+300 paired tasks over the pre-registered seeds. **Neither operator rule is a
+clean win, and that is the finding.**
 
+With an approving operator, the boundary moves work off the agent and adds it
+elsewhere:
+
+| outcome, per task | control | treatment | difference | 95% interval |
+|---|---|---|---|---|
+| failures the agent saw | 0.92 | 0.44 | 0.48 | 0.41 to 0.55 |
+| calls the agent spent recovering | 1.65 | 0.71 | 0.94 | 0.80 to 1.08 |
+| non-idempotent writes run twice | 0.06 | 0.15 | -0.09 | -0.15 to -0.04 |
+| calls the server actually ran | 5.35 | 5.62 | -0.27 | -0.39 to -0.15 |
+| writes that happened, unknown to all | 0.05 | 0.05 | 0.00 | 0 to 0 |
+| bytes delivered to the agent | 549 | 1127 | -577 | -621 to -533 |
+
+With a rejecting operator the trade reverses: writes nobody knows about fall
+from 0.05 to 0.01 and double execution falls to zero, but records are left in
+the wrong state 0.29 times per task against zero in control. H6 asks for a
+reduction in cost without breaking the workload; declining held calls breaks
+it.
+
+The boundary converts a silent unknown into a decision, and the decision is
+lossy either way because it is taken without checking whether the write landed.
+Verification before resumption is what the harness points at next.
+
+### Note
+
+The first cut of this instrument reported that the boundary halved
+unacknowledged writes and removed double execution. Those results were
+artifacts of four defects found in review before release: the stand-in operator
+was never wired to the event the boundary emits, a held response was scored as
+a successful write, work the treatment arm declined was never counted, and the
+metric named for M9 measured a different quantity from the one M9 defines. The
+numbers above come from the corrected instrument.
 
 ## [0.15.0] - 2026-09-06
 

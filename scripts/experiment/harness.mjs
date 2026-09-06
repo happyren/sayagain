@@ -3,14 +3,16 @@
 // Why it exists: the organic A/B flips its coin per session, and one developer produces about
 // twenty independent sessions a month, so anything that clusters inside a session cannot be
 // measured there in a useful time. Here each task is its own cluster and each task is run twice,
-// once through the boundary and once past it, against the same seeded faults. Sixty tasks give
-// sixty independent paired observations in a minute.
+// once through the boundary and once past it, against the same seeded faults.
 //
-// What it can say: what the boundary does to a stated failure distribution. What it cannot say:
-// what real agents do, because the agent here is a fixed policy, not a model. Both halves are
-// stated in the report it prints.
+// What it can say: what the boundary does to a stated failure distribution under a stated recovery
+// policy and a stated operator rule. What it cannot say: what real models do. Every outcome is
+// reported in both directions, because a boundary can fail by doing too little as easily as by
+// doing too much. A held call that nobody decides leaves work undone, and an agent that reads a
+// held write as a success is worse off than one told plainly that the call failed.
 //
-// Usage: node scripts/experiment/harness.mjs [--tasks 60] [--seed 1] [--json out.json]
+// Usage: node scripts/experiment/harness.mjs [--tasks 60] [--seeds 1,2,3,7,11] [--operator approve|reject]
+//                                            [--flaky 0.06] [--lost 0.03] [--attempts 3] [--json out.json]
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,19 +29,34 @@ const arg = (name, fallback) => {
   return i === -1 ? fallback : process.argv[i + 1];
 };
 const TASKS = Number(arg("tasks", 60));
-const SEED = String(arg("seed", "1"));
+/** Several seeds, pooled: one seed is one draw of the fault pattern, and choosing it chooses a result. */
+const SEEDS = String(arg("seeds", "1,2,3,7,11"))
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const OPERATOR = String(arg("operator", "approve"));
+const FLAKY = Number(arg("flaky", 0.06));
+const LOST = Number(arg("lost", 0.03));
+const ATTEMPTS = Number(arg("attempts", 3));
 const JSON_OUT = arg("json", null);
+for (const [name, value] of [
+  ["flaky", FLAKY],
+  ["lost", LOST],
+  ["attempts", ATTEMPTS],
+  ["tasks", TASKS],
+])
+  if (!Number.isFinite(value)) throw new Error(`--${name} must be a number`);
+if (OPERATOR !== "approve" && OPERATOR !== "reject")
+  throw new Error("--operator must be approve or reject");
 
 // ---------------------------------------------------------------- the agent
 
 /**
- * A fixed recovery policy, not a model. Its numbers come from the transcripts the baseline read
- * (M2 retry rate 88%, M17 a median of 0 and a mean of 1.8 calls to recover), so the control arm
- * spends roughly what a real agent spends. It is deterministic given the seed.
+ * A fixed recovery policy, not a model. The retry rate is M2 from the transcripts (88%); the
+ * attempt cap is a parameter, because the measured M17 is a median of 0 and a mean of 1.8 calls to
+ * recover and no single cap follows from that. `--attempts` shows what the cap is worth.
  */
-const POLICY = { retryProbability: 0.88, maxAttemptsPerStep: 3 };
-/** What the stand-in operator does with every held call: approve or reject. */
-const OPERATOR = String(arg("operator", "approve"));
+const POLICY = { retryProbability: 0.88, maxAttemptsPerStep: ATTEMPTS };
 
 const rng = (seedText) => {
   let a = 0;
@@ -68,39 +85,53 @@ function makeTask(i, seed) {
   if (rnd() < 0.25) steps.push({ tool: "get_record", args: { id: `missing-${i}` }, write: false });
   steps.push({ tool: "set_status", args: { id, status: "done" }, write: true });
   steps.push({ tool: "get_record", args: { id }, write: false });
-  if (rnd() < 0.2) steps.push({ tool: "delete_record", args: { id }, write: true });
-  const deleted = steps.some((s) => s.tool === "delete_record");
-  return { id: i, steps, wants: deleted ? [] : [{ id, status: "done" }] };
+  const deletes = rnd() < 0.2;
+  if (deletes) steps.push({ tool: "delete_record", args: { id }, write: true });
+  // The state the task means to leave behind: nothing if it deleted the record, else the record, done.
+  return { id: i, steps, wants: deletes ? {} : { [id]: "done" } };
 }
 
-/** Run one task against a client, applying the policy to whatever comes back. */
+const STATUS = "sh.sayagain/status";
+const HELD = "sh.sayagain/held";
+
+/**
+ * Run one task, applying the policy to whatever comes back. A held call is neither a success nor a
+ * plain failure: the boundary is saying the outcome is not known yet. Reading it as either one
+ * would be the instrument scoring itself.
+ */
 async function runTask(task, call, seed) {
   const rnd = rng(`${seed}:agent:${task.id}`);
   let calls = 0;
   let visibleFailures = 0;
   let bytes = 0;
-  // The failure tax as section 4 defines it: what came back on a failed call and on everything the
-  // agent did afterwards to get past it. The rest is ordinary traffic.
   let recoveryBytes = 0;
-  // The same quantity without the bytes: a receipt on every response makes a byte count favour the
-  // arm that stamps nothing, while a count of calls spent recovering is free of that.
   let recoveryCalls = 0;
   const believed = new Set(); // writes the agent was told succeeded
+  const unknown = new Set(); // writes whose outcome the agent never learned
 
-  for (const step of task.steps) {
-    let args = { ...step.args };
+  for (const [index, step] of task.steps.entries()) {
+    // The fault is drawn on the logical step, so a repair or a retry by either side meets the same one.
+    let args = { ...step.args, __step: `${task.id}:${index}` };
     let verified = false;
     let recovering = false;
+    const key = `${step.tool}:${step.args.id}`;
     for (let attempt = 1; attempt <= POLICY.maxAttemptsPerStep; attempt++) {
       const res = await call(step.tool, args);
       calls++;
       bytes += res.bytes;
-      if (recovering || res.isError) {
+      const held = res.meta?.[STATUS] === "held";
+      if (recovering || res.isError || held) {
         recoveryBytes += res.bytes;
         recoveryCalls++;
       }
+      if (held) {
+        // A "pre" or "repaired" hold was never sent; an "unknown-outcome" hold may have landed.
+        if (step.write && res.meta?.[HELD]?.mode === "unknown-outcome") unknown.add(key);
+        if (res.isError) visibleFailures++;
+        break; // the boundary asked the agent not to repeat it
+      }
       if (!res.isError) {
-        if (step.write) believed.add(`${step.tool}:${step.args.id}`);
+        if (step.write) believed.add(key);
         break;
       }
       visibleFailures++;
@@ -113,7 +144,10 @@ async function runTask(task, call, seed) {
       }
       if (/not found/.test(text) && !verified) {
         verified = true;
-        const probe = await call("search_records", { query: args.id ?? "" });
+        const probe = await call("search_records", {
+          query: args.id ?? "",
+          __step: `${task.id}:${index}p`,
+        });
         calls++;
         bytes += probe.bytes;
         recoveryBytes += probe.bytes;
@@ -121,10 +155,12 @@ async function runTask(task, call, seed) {
         break; // the precondition does not hold; a real agent moves on
       }
       if (/timed out/.test(text) && rnd() < POLICY.retryProbability) continue;
+      // Out of attempts on a write: it was told the call failed, and it does not know whether it did.
+      if (step.write) unknown.add(key);
       break;
     }
   }
-  return { calls, visibleFailures, bytes, recoveryBytes, recoveryCalls, believed };
+  return { calls, visibleFailures, bytes, recoveryBytes, recoveryCalls, believed, unknown };
 }
 
 // ---------------------------------------------------------------- transports
@@ -157,7 +193,12 @@ function client(write, onLine) {
       const { msg, bytes } = await request("tools/call", { name, arguments: args });
       const result = msg.result ?? {};
       const text = (result.content ?? []).map((c) => c.text ?? "").join(" ");
-      return { isError: Boolean(result.isError) || Boolean(msg.error), text, bytes };
+      return {
+        isError: Boolean(result.isError) || Boolean(msg.error),
+        text,
+        bytes,
+        meta: result._meta,
+      };
     },
   };
 }
@@ -168,12 +209,9 @@ const INIT = {
   clientInfo: { name: "harness", version: "1" },
 };
 
-/** The control arm: the agent talks to the server, with nothing in between. */
-async function direct(env, run) {
-  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, ...env } });
+const lineReader = (stream, listeners) => {
   let buffer = "";
-  const listeners = [];
-  child.stdout.on("data", (d) => {
+  stream.on("data", (d) => {
     buffer += d;
     let i = buffer.indexOf("\n");
     while (i !== -1) {
@@ -183,6 +221,13 @@ async function direct(env, run) {
       i = buffer.indexOf("\n");
     }
   });
+};
+
+/** The control arm: the agent talks to the server, with nothing in between. */
+async function direct(env, run) {
+  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, ...env } });
+  const listeners = [];
+  lineReader(child.stdout, listeners);
   const c = client(
     (s) => child.stdin.write(s),
     (l) => listeners.push(l),
@@ -210,27 +255,15 @@ async function throughBoundary(env, run) {
     announce: false,
     learned: false,
     log: () => {},
-    // Holds are the mechanism for a write whose outcome nobody knows, so they stay on and the
-    // harness stands in for the operator below. holdWaitMs is short because that operator is instant.
-    policy: { hold: "destructive", holdWaitMs: 250 },
+    policy: { hold: "destructive", holdWaitMs: 2000 },
   });
-  // The operator is part of the treatment (ADR-0011). This one decides at once, always the same way,
-  // so the arm measures the boundary and a fixed decision rule rather than a person's judgement.
-  wrapped.holds.on("hold", (h) => {
+  // The operator is part of the treatment (ADR-0011). This one decides at once and always the same
+  // way, so the arm measures the boundary plus a stated rule rather than a person's judgement.
+  wrapped.boundary.on("hold", (h) => {
     setImmediate(() => wrapped.holds.decide(h.receipt, OPERATOR));
   });
-  let buffer = "";
   const listeners = [];
-  output.on("data", (d) => {
-    buffer += d;
-    let i = buffer.indexOf("\n");
-    while (i !== -1) {
-      const line = buffer.slice(0, i);
-      buffer = buffer.slice(i + 1);
-      for (const l of listeners) l(line);
-      i = buffer.indexOf("\n");
-    }
-  });
+  lineReader(output, listeners);
   const c = client(
     (s) => input.write(s),
     (l) => listeners.push(l),
@@ -250,60 +283,110 @@ const truthOf = (path) =>
     .filter(Boolean)
     .map((l) => JSON.parse(l));
 
-/** What the world did, against what the agent was told. */
+/** What the world did, against what the agent was told, in both directions. */
 function measure(task, run, truth) {
-  const effects = truth.map((e) => `${e.effect}:${e.id}`);
   const counts = new Map();
-  for (const e of effects) counts.set(e, (counts.get(e) ?? 0) + 1);
-  // Repeating set_status leaves the same status, so a second one costs nothing. Repeating a create
-  // or a delete is the duplicate that matters.
-  const unsafe = [...counts.entries()]
+  const state = new Map();
+  for (const e of truth) {
+    const key = `${e.effect}:${e.id}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (e.effect === "create") state.set(e.id, "new");
+    else if (e.effect === "set_status") state.set(e.id, e.status);
+    else if (e.effect === "delete") state.delete(e.id);
+  }
+  const tool = { create: "create_record", set_status: "set_status", delete: "delete_record" };
+  const happened = new Set(
+    [...counts.keys()].map((k) => {
+      const [effect, id] = k.split(":");
+      return `${tool[effect]}:${id}`;
+    }),
+  );
+
+  // The world changed, the agent believes it did not, and nothing else knows either: the silent
+  // unknown the boundary exists to remove. A held call is unknown too, but it is not silent.
+  let silentUnknown = 0;
+  for (const key of happened) if (!run.believed.has(key) && !run.unknown.has(key)) silentUnknown++;
+  // The agent believes a write landed and it never did: the mirror error, which a boundary that
+  // answered optimistically would produce. Counted so the metric set is not one-sided.
+  let phantomBelief = 0;
+  for (const key of run.believed) if (!happened.has(key)) phantomBelief++;
+
+  // Work the task meant to leave behind and did not. A boundary that held everything would score
+  // well on every harm count, and this is the row that says what that costs.
+  let workNotDone = 0;
+  for (const [id, status] of Object.entries(task.wants))
+    if (state.get(id) !== status) workNotDone++;
+  for (const id of state.keys()) if (!(id in task.wants)) workNotDone++;
+
+  const unsafeDuplicates = [...counts.entries()]
     .filter(([key]) => !key.startsWith("set_status:"))
     .reduce((a, [, n]) => a + (n - 1), 0);
-  const intended = {
-    create: "create_record",
-    set_status: "set_status",
-    delete: "delete_record",
-  };
-  let unacknowledged = 0;
-  for (const [key] of counts) {
-    const [effect, id] = key.split(":");
-    const tool = intended[effect];
-    if (tool && !run.believed.has(`${tool}:${id}`)) unacknowledged++;
-  }
   const duplicates = [...counts.values()].reduce((a, n) => a + (n - 1), 0);
+
   return {
     task: task.id,
-    calls: run.calls,
-    visibleFailures: run.visibleFailures,
-    recoveryBytes: run.recoveryBytes,
-    recoveryCalls: run.recoveryCalls,
-    bytes: run.bytes,
-    effects: effects.length,
+    silentUnknown,
+    unknownOutcome: run.unknown.size,
+    phantomBelief,
+    workNotDone,
+    unsafeDuplicates,
     duplicates,
-    unsafeDuplicates: unsafe,
-    unacknowledged,
+    upstreamCalls: run.upstreamCalls,
+    recoveryCalls: run.recoveryCalls,
+    recoveryBytes: run.recoveryBytes,
+    visibleFailures: run.visibleFailures,
+    calls: run.calls,
+    bytes: run.bytes,
   };
 }
 
 // ---------------------------------------------------------------- statistics
 
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+/** Student's t at 95%: honest at the small end, where the tests run. */
+const tQuantile = (df) => {
+  if (df < 1) return Number.POSITIVE_INFINITY;
+  const small = [12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228];
+  if (df <= 10) return small[df - 1];
+  if (df <= 20) return 2.086;
+  if (df <= 30) return 2.042;
+  if (df <= 60) return 2.0;
+  return 1.96;
+};
+
 /** Paired difference over tasks: each task is one independent observation, so a t interval fits. */
 function paired(control, treatment, key) {
   const d = control.map((c, i) => c[key] - treatment[i][key]);
   const n = d.length;
   const m = mean(d);
-  const sd = n > 1 ? Math.sqrt(d.reduce((a, x) => a + (x - m) ** 2, 0) / (n - 1)) : 0;
-  const se = n ? sd / Math.sqrt(n) : 0;
-  const t = 1.96 + 2.4 / n; // a small-sample widening of the normal quantile
+  const r = (x) => +x.toFixed(2);
+  const plus = d.filter((x) => x > 0).length;
+  const minus = d.filter((x) => x < 0).length;
+  if (n < 2)
+    return {
+      control: r(mean(control.map((x) => x[key]))),
+      treatment: r(mean(treatment.map((x) => x[key]))),
+      delta: r(m),
+      low: null,
+      high: null,
+      distinguishable: false,
+      plus,
+      minus,
+    };
+  const sd = Math.sqrt(d.reduce((a, x) => a + (x - m) ** 2, 0) / (n - 1));
+  const se = sd / Math.sqrt(n);
+  const low = r(m - tQuantile(n - 1) * se);
+  const high = r(m + tQuantile(n - 1) * se);
   return {
-    control: +mean(control.map((x) => x[key])).toFixed(2),
-    treatment: +mean(treatment.map((x) => x[key])).toFixed(2),
-    delta: +m.toFixed(2),
-    low: +(m - t * se).toFixed(2),
-    high: +(m + t * se).toFixed(2),
-    distinguishable: m - t * se > 0 || m + t * se < 0,
+    control: r(mean(control.map((x) => x[key]))),
+    treatment: r(mean(treatment.map((x) => x[key]))),
+    delta: r(m),
+    low,
+    high,
+    // Read off the bounds as printed, so the flag and the interval never disagree.
+    distinguishable: low > 0 || high < 0,
+    plus,
+    minus,
   };
 }
 
@@ -312,19 +395,28 @@ function paired(control, treatment, key) {
 async function main() {
   const dir = mkdtempSync(join(tmpdir(), "sayagain-fault-"));
   const arms = { control: [], treatment: [] };
-  const boundaryRows = [];
   try {
-    for (let i = 0; i < TASKS; i++) {
-      const task = makeTask(i, SEED);
-      for (const armName of ["control", "treatment"]) {
-        const truthPath = join(dir, `${armName}-${i}.jsonl`);
-        writeFileSync(truthPath, "");
-        // The same seed in both arms, so the same calls meet the same faults.
-        const env = { FAULT_SEED: `${SEED}:${i}`, FAULT_TRUTH: truthPath };
-        const runner = armName === "control" ? direct : throughBoundary;
-        const out = await runner(env, (c) => runTask(task, c.call, SEED));
-        if (out.rows) boundaryRows.push(...out.rows);
-        arms[armName].push(measure(task, out, truthOf(truthPath)));
+    for (const seed of SEEDS) {
+      for (let i = 0; i < TASKS; i++) {
+        const task = makeTask(i, seed);
+        for (const armName of ["control", "treatment"]) {
+          const truthPath = join(dir, `${armName}-${seed}-${i}.jsonl`);
+          const callsPath = join(dir, `${armName}-${seed}-${i}.calls`);
+          writeFileSync(truthPath, "");
+          writeFileSync(callsPath, "");
+          // The same seed in both arms, so the same logical step meets the same fault.
+          const env = {
+            FAULT_SEED: `${seed}:${i}`,
+            FAULT_TRUTH: truthPath,
+            FAULT_CALLS: callsPath,
+            FAULT_FLAKY: String(FLAKY),
+            FAULT_LOST: String(LOST),
+          };
+          const runner = armName === "control" ? direct : throughBoundary;
+          const out = await runner(env, (c) => runTask(task, c.call, seed));
+          out.upstreamCalls = readFileSync(callsPath, "utf8").split("\n").filter(Boolean).length;
+          arms[armName].push(measure(task, out, truthOf(truthPath)));
+        }
       }
     }
   } finally {
@@ -332,8 +424,13 @@ async function main() {
   }
 
   const keys = [
-    "unacknowledged",
+    "silentUnknown",
+    "unknownOutcome",
+    "phantomBelief",
+    "workNotDone",
     "unsafeDuplicates",
+    "duplicates",
+    "upstreamCalls",
     "recoveryCalls",
     "recoveryBytes",
     "visibleFailures",
@@ -343,48 +440,49 @@ async function main() {
   const diffs = Object.fromEntries(keys.map((k) => [k, paired(arms.control, arms.treatment, k)]));
   const report = {
     generatedAt: new Date().toISOString(),
-    tasks: TASKS,
-    seed: SEED,
+    tasksPerSeed: TASKS,
+    seeds: SEEDS,
+    pairs: arms.control.length,
     policy: POLICY,
     operator: OPERATOR,
+    faults: { flaky: FLAKY, lost: LOST },
     differences: diffs,
   };
   if (JSON_OUT) writeFileSync(JSON_OUT, `${JSON.stringify(report, null, 2)}\n`);
 
   const label = {
-    unacknowledged: "writes it never learned about",
+    silentUnknown: "writes that happened, unknown to all",
+    unknownOutcome: "writes the agent could not resolve",
+    phantomBelief: "writes believed that never happened",
+    workNotDone: "records left in the wrong state",
     unsafeDuplicates: "non-idempotent writes run twice",
-    recoveryCalls: "calls spent recovering",
-    recoveryBytes: "bytes spent recovering",
+    duplicates: "any write run twice",
+    upstreamCalls: "calls the server actually ran",
+    recoveryCalls: "calls the agent spent recovering",
+    recoveryBytes: "bytes the agent spent recovering",
     visibleFailures: "failures the agent saw",
     calls: "calls the agent made",
-    bytes: "bytes delivered in all",
+    bytes: "bytes delivered to the agent",
   };
   const lines = [
-    `Fault-injection harness: ${TASKS} tasks, seed ${SEED}, each run twice against the same faults (docs/measurement.md 5.6)`,
+    `Fault-injection harness: ${arms.control.length} paired tasks (${TASKS} per seed, seeds ${SEEDS.join(",")}), docs/measurement.md 5.6`,
+    `Faults: a call fails once then works ${Math.round(100 * FLAKY)}% of the time; a write lands then loses its answer ${Math.round(100 * LOST)}% of the time.`,
+    `Agent: retries a timeout ${Math.round(100 * POLICY.retryProbability)}% of the time, at most ${POLICY.maxAttemptsPerStep} attempts a step, and is not a model.`,
+    `Operator: a stand-in that answers every held call "${OPERATOR}", at once.`,
     "",
-    `  ${"per task".padEnd(30)} ${"control".padStart(9)} ${"treatment".padStart(10)} ${"difference".padStart(11)}   95% interval`,
+    `  ${"per task".padEnd(38)} ${"control".padStart(8)} ${"treatment".padStart(10)} ${"difference".padStart(11)}   95% interval        tasks +/-`,
   ];
   for (const k of keys) {
     const d = diffs[k];
+    const interval = d.low === null ? "not estimable" : `${d.low} to ${d.high}`;
     lines.push(
-      `  ${label[k].padEnd(30)} ${String(d.control).padStart(9)} ${String(d.treatment).padStart(10)} ${String(d.delta).padStart(11)}   ${d.low} to ${d.high}${d.distinguishable ? "  distinguishable" : ""}`,
+      `  ${label[k].padEnd(38)} ${String(d.control).padStart(8)} ${String(d.treatment).padStart(10)} ${String(d.delta).padStart(11)}   ${interval.padEnd(19)} ${d.plus}/${d.minus}${d.distinguishable ? "  distinguishable" : ""}`,
     );
   }
   lines.push("");
   lines.push(
-    `The agent is a fixed policy (retries a timeout ${Math.round(POLICY.retryProbability * 100)}% of the time, at most ${POLICY.maxAttemptsPerStep} attempts a step), not a model.`,
+    "A positive difference means the control arm had more of it. On the last three rows more is not worse, it is what the boundary costs.",
   );
-  lines.push(
-    `Held calls are decided by a stand-in operator that always says ${OPERATOR}; the operator is part of the treatment, so the rule is stated rather than hidden.`,
-  );
-  lines.push(
-    "So this measures what the boundary does to a stated failure distribution, not what a model would do with it.",
-  );
-  lines.push(
-    "Bytes in all include the receipt the boundary stamps on every result, which is why that row favours the control arm; the recovery row is the failure tax.",
-  );
-  lines.push(`Boundary rows written: ${boundaryRows.length}.`);
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 

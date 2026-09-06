@@ -14,37 +14,46 @@ const server = fileURLToPath(
  * the numbers themselves come from a real run with hundreds.
  */
 describe("fault-injection harness", () => {
-  it("runs both arms against the same faults and reports paired differences", () => {
+  const run = (args: string[]) =>
+    execFileSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 300_000 });
+
+  it("runs both arms and reports every outcome the protocol names", () => {
     expect(existsSync(script)).toBe(true);
     expect(existsSync(server)).toBe(true);
-    const out = execFileSync(process.execPath, [script, "--tasks", "6", "--seed", "harness-test"], {
-      encoding: "utf8",
-      timeout: 120_000,
-    });
-    expect(out).toContain("Fault-injection harness: 6 tasks");
-    // Every outcome the protocol names has to appear, or the report has quietly stopped measuring one.
+    const out = run(["--tasks", "6", "--seeds", "1"]);
+    expect(out).toContain("6 paired tasks");
     for (const row of [
-      "writes it never learned about",
+      "writes that happened, unknown to all",
+      "writes the agent could not resolve",
+      "writes believed that never happened",
+      "records left in the wrong state",
       "non-idempotent writes run twice",
-      "calls spent recovering",
-      "failures the agent saw",
-      "bytes delivered in all",
+      "calls the server actually ran",
+      "calls the agent spent recovering",
+      "bytes delivered to the agent",
     ])
       expect(out).toContain(row);
     // The two things the report must always say about itself.
-    expect(out).toContain("not a model");
-    expect(out).toContain("stand-in operator");
+    expect(out).toContain("is not a model");
+    expect(out).toContain("stand-in that answers every held call");
   });
 
-  it("is reproducible: the same seed gives the same numbers", () => {
-    const run = () =>
-      execFileSync(process.execPath, [script, "--tasks", "4", "--seed", "fixed"], {
-        encoding: "utf8",
-        timeout: 120_000,
-      })
+  it("is reproducible, and the operator's rule changes the answer", () => {
+    const approve = () => run(["--tasks", "8", "--seeds", "3", "--operator", "approve"]);
+    expect(approve()).toBe(approve()); // the same seed gives the same numbers
+    const reject = run(["--tasks", "8", "--seeds", "3", "--operator", "reject"]);
+    const numbers = (text: string) =>
+      text
         .split("\n")
-        .filter((l) => l.includes("failures the agent saw"))
+        .filter((l) => l.includes("records left in the wrong state"))
         .join("");
-    expect(run()).toBe(run());
+    // An operator who declines every held call leaves work undone; one who approves does not. If
+    // these ever match, the stand-in has stopped being wired to the boundary.
+    expect(numbers(approve())).not.toBe(numbers(reject));
+  });
+
+  it("refuses a fault rate it cannot use", () => {
+    expect(() => run(["--tasks", "1", "--flaky", "six"])).toThrow();
+    expect(() => run(["--tasks", "1", "--operator", "maybe"])).toThrow();
   });
 });

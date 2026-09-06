@@ -14,18 +14,28 @@ import { createInterface } from "node:readline";
 
 const seedText = process.env.FAULT_SEED ?? "0";
 const truthPath = process.env.FAULT_TRUTH;
+const callsPath = process.env.FAULT_CALLS;
 const flakyRate = Number(process.env.FAULT_FLAKY ?? "0.06");
 const lostRate = Number(process.env.FAULT_LOST ?? "0.03");
 
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 
-/** A stable 32-bit hash, so a key always draws the same fault for a given seed. */
+/**
+ * A stable 32-bit hash, so a key always draws the same fault for a given seed. The final mix is not
+ * decoration: without it two keys differing in one character land within a thousandth of each
+ * other, and every step of a task draws nearly the same number, so faults arrive in clumps.
+ */
 const hash = (text) => {
   let h = 2166136261;
   for (let i = 0; i < text.length; i++) {
     h ^= text.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
+  h ^= h >>> 16;
+  h = Math.imul(h, 2246822507);
+  h ^= h >>> 13;
+  h = Math.imul(h, 3266489909);
+  h ^= h >>> 16;
   return h >>> 0;
 };
 /** A number in [0,1) from a key: the fault draw, fixed for the life of a run. */
@@ -89,7 +99,12 @@ const TOOLS = [
 const WRITES = new Set(["set_status", "create_record", "delete_record"]);
 
 const handleCall = (id, name, args) => {
-  const key = `${name}:${JSON.stringify(args ?? {})}`;
+  // Every call the server really ran, whoever sent it: the honest denominator for a claim about
+  // the failure tax, since a boundary that retries has not removed the work, it has moved it.
+  if (callsPath) appendFileSync(callsPath, `${name}\n`);
+  // The fault is drawn on the logical step the caller names, not on the argument bytes, so a repair
+  // or a retry by either side meets the same fault. Without this the arms face different draws.
+  const key = args?.__step ? `step:${args.__step}` : `${name}:${JSON.stringify(args ?? {})}`;
   const n = (attempts.get(key) ?? 0) + 1;
   attempts.set(key, n);
 
