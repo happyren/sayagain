@@ -90,7 +90,7 @@ interface Routed {
   at: number;
 }
 
-type FailureAction = "retry" | "repair" | "hold" | "final";
+type FailureAction = "retry" | "repair" | "hold" | "verify" | "final";
 
 const MAX_START_BACKOFF_MS = 30_000;
 
@@ -903,7 +903,9 @@ export class Boundary extends EventEmitter {
     if (failure.errorClass === "retryable") {
       const safe = call.toolClass === "read-only" || call.toolClass === "idempotent-write";
       if (safe) return call.attempts < this.policy.retryAttempts ? "retry" : "final";
-      if (this.policy.hold === "never") return "final";
+      // With holds off, an unknown outcome is still read back when the tool says how (spec 8.3);
+      // what the read-back cannot settle is answered as the failure it was, never held.
+      if (this.policy.hold === "never") return this.canVerify(call) ? "verify" : "final";
       // A call already held for its outcome is not held twice. One held before it was sent (and
       // approved) can still have that outcome read back, which is the only reason to go on.
       if (call.held) return call.held.mode === "pre" && this.canVerify(call) ? "hold" : "final";
@@ -921,7 +923,12 @@ export class Boundary extends EventEmitter {
   }
 
   /** Try to recover a failed call. Returns true when the response was consumed and must not be forwarded. */
-  private recover(call: PendingCall, failure: Failure, bytes: number): boolean {
+  private recover(
+    call: PendingCall,
+    failure: Failure,
+    bytes: number,
+    msg: JsonRpcMessage,
+  ): boolean {
     if (call.arm === "control") return false; // the control arm never retries, repairs or holds
     const now = Date.now();
     const action = this.decideOnFailure(call, failure, now);
@@ -971,6 +978,22 @@ export class Boundary extends EventEmitter {
         `arguments repaired (${repaired.changes.map((c) => `${c.path} ${c.rule}`).join(", ")}); approve to send`,
         "repaired",
       );
+      return true;
+    }
+    if (action === "verify") {
+      // Holds are off. The call stays pending while its effect is read back: present, and it is
+      // answered as executed; absent, and it is sent once more; neither, and it gets the failure it
+      // got, as it would have without a read-back. Nothing waits for anyone.
+      call.lastFailure = failure;
+      const decl = this.classifier.verifyOf(call.tool);
+      if (!decl) return false;
+      const asItWas = () => this.finishResponse(msg, call, bytes);
+      void this.verifyThenDecide(call, failure, decl, asItWas).catch((err: unknown) => {
+        this.log(
+          `sayagain: could not read ${call.tool} back (${err instanceof Error ? err.message : String(err)})`,
+        );
+        asItWas();
+      });
       return true;
     }
     if (action === "hold") {
@@ -1047,14 +1070,22 @@ export class Boundary extends EventEmitter {
     return { state: present ? "present" : absent ? "absent" : "inconclusive", text: outcome.text };
   }
 
-  /** Read a write's effect back after an unknown outcome, then answer, re-send or hold. */
+  /**
+   * Read a write's effect back after an unknown outcome, then answer, re-send or hold. With holds
+   * off, `otherwise` says what to do with a read-back that could not tell.
+   */
   private async verifyThenDecide(
     call: PendingCall,
     failure: Failure,
     decl: VerifyDeclaration,
+    otherwise?: () => void,
   ): Promise<void> {
     const reason = `write failed with unknown outcome: ${failure.signature}`;
     const key = keyOf(call.id);
+    const inconclusive = (why: string) => {
+      if (otherwise) otherwise();
+      else this.park(call, why, "unknown-outcome");
+    };
     // A call held before it was sent had its effect read then; one that was not has no pre-image.
     const before = call.preImage === undefined ? undefined : await call.preImage;
     const { state, text } = await this.readEffect(call, decl);
@@ -1062,17 +1093,16 @@ export class Boundary extends EventEmitter {
       // The effect was there before the call went, or the read could not say, so finding it now
       // says nothing about the call: a delete of a record that never was, a create of one that
       // already did. Answering it as executed would be the boundary believing on the agent's behalf.
-      this.park(
-        call,
+      inconclusive(
         before === "present"
           ? `${reason}; ${decl.tool} found the effect present before the call was sent, so its presence now does not show the call ran`
           : `${reason}; ${decl.tool} could not read the effect before the call was sent, so its presence now does not show the call ran`,
-        "unknown-outcome",
       );
       return;
     }
     if (state === "present") {
       call.verified = "present";
+      this.state.pending.delete(key); // still registered when holds are off; already gone from a hold
       const now = Date.now();
       this.record(baseRow(call, this.state.upstreamName, "executed", 0, now));
       const message = verifiedResponse(call, decl, text);
@@ -1096,7 +1126,7 @@ export class Boundary extends EventEmitter {
       this.forward(call);
       return;
     }
-    this.park(call, reason, "unknown-outcome");
+    inconclusive(reason);
   }
 
   /** Send one of the boundary's own calls and resolve with its outcome (or a timeout). */
@@ -1275,8 +1305,16 @@ export class Boundary extends EventEmitter {
 
     const pending = pendingFor(msg, this.state);
     const failure = pending ? failureOf(msg) : null;
-    if (pending && failure && this.recover(pending, failure, bytes)) return;
+    if (pending && failure && this.recover(pending, failure, bytes, msg)) return;
+    this.finishResponse(msg, pending, bytes);
+  }
 
+  /** Rewrite an upstream response for the host it belongs to, record it and deliver it. */
+  private finishResponse(
+    msg: JsonRpcMessage,
+    pending: PendingCall | undefined,
+    bytes: number,
+  ): void {
     // In the control arm the model sees the upstream's words: no guidance, no learned hint.
     const armOfResponse =
       "id" in msg && msg.id !== null && msg.id !== undefined

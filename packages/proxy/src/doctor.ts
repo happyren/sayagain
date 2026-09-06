@@ -65,6 +65,8 @@ export interface DoctorInput {
     arm?: string | null | undefined;
     /** The address the daemon listens on. */
     listen?: string | undefined;
+    /** The hold mode for servers with none of their own: "never" is what `sayagain up` writes. */
+    holdDefault?: string | null | undefined;
   };
   hosts: DoctorHost[];
   servers: DoctorServer[];
@@ -130,6 +132,14 @@ export function doctorFindings(input: DoctorInput): Finding[] {
           : undefined,
     });
   }
+  if (input.daemon.holdDefault === "never")
+    add({
+      severity: "note",
+      title: "holds are off: no call waits for a decision",
+      detail:
+        "sayagain up starts this way, so a fresh install observes first. Destructive calls and writes with an unknown outcome go through; a write the boundary can read back is still read back. Turn holds on once the page has shown you what the boundary sees.",
+      fix: "sayagain up --hold",
+    });
 
   if (input.launcherCaveat)
     add({

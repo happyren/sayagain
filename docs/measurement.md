@@ -387,7 +387,11 @@ node scripts/experiment/harness.mjs --tasks 60 --seeds 1,2,3,7,11 --operator app
   approve|reject|absent`: approve everything at once, decline everything at
   once, or never answer, so a held call waits out the short wait and comes
   back STANDBY. It is part of the treatment, and the three rules give
-  different answers, so all three are reported.
+  different answers, so all three are reported. `--hold never` is the
+  fourth configuration and the one `sayagain up` installs (ADR-0014): no
+  call is ever held, nobody is asked, and a lost write is read back where
+  its tool says how; what the read-back cannot settle is answered as the
+  failure it was.
 - **Seeds** are pre-registered as 1, 2, 3, 7 and 11, pooled. One seed is one
   draw of the fault pattern, and choosing it after seeing results would be
   choosing the result.
@@ -458,6 +462,24 @@ unresolved 0.09 to 0, none of it opaque. The same stress run through the
 chaos shim, with the fault server behind it as a stand-in, gives the same
 harm rows (duplicates 0.07 to 0.01, failures seen 2.30 to 1.81) with the
 state row n/a, which is what the shim can and cannot see.
+
+**The unattended install (`--hold never`), both rates, same seeds.** This
+is the configuration `sayagain up` installs (ADR-0014): no call is held and
+nobody is asked. At the measured rate every harm row matches the control
+arm (silent unknowns 0 and 0, unresolved 0.06 and 0.06, phantom 0 and 0,
+wrong state 0.10 and 0.10, non-idempotent duplicates 0.01 and 0), failures
+seen fall from 0.37 to 0.32 and calls spent recovering from 0.53 to 0.44,
+and the server runs 0.01 more calls a task, which is the verifiers alone.
+At the stress rate non-idempotent duplicates fall from 0.07 to 0.01,
+distinguishable, the same as with an approving operator and at 0.13 more
+server calls a task against that operator's 0.31; failures seen fall from
+2.30 to 1.85 and calls spent recovering from 3.11 to 2.35; records in the
+wrong state are 0.38 against 0.37 and unresolved writes 0.40 against 0.37.
+With the read-back off, the duplicates stay at 0.07 in both arms and the
+recovery rows shrink (3.11 to 2.61). So the boundary's measured benefit
+does not need an operator; what an operator adds is the stop before a
+destructive call goes, which no row here measures and which the sweep
+prices at 0.10 to 0.18 records a task left undone when nobody answers.
 
 **The sweep, at the stress rate.** Eighteen cells, operator rule by
 read-back by attempt cap, 300 paired tasks each. Across every cell: silent

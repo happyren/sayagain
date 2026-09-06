@@ -6,6 +6,45 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-06
+
+### Added
+
+- `sayagain up`: the whole onboarding in one command (ADR-0014). It prints a
+  numbered plan before it changes anything: which servers it will wrap and
+  for which hosts, that it will start the daemon, that it will bring up the
+  daemon's page and where, and whether anything will wait for the operator.
+  Then it imports every server with rewrite, starts the daemon if none is
+  running (or reloads a running one), prints the page's URL (`--open` opens
+  it), names the traffic that stays outside and why, and ends with
+  `sayagain doctor`. `--dry-run` prints the plan and the per-host dry run;
+  `--no-start` leaves the daemon to you.
+- `sayagain down`: every host back the way it was, the daemon stopped, the
+  ledger, holds and backups kept.
+- A fresh install observes first. `up` writes `daemon.hold: "never"` in
+  `config.json`, the hold mode for servers with none of their own; a running
+  daemon picks it up on reload, `/api/health` reports it, and `doctor` says
+  it is on and how to turn holds on: `sayagain up --hold`, which removes the
+  default so ADR-0004's hold-by-default is back.
+- A read-back without a hold. With holds off, a write whose outcome is
+  unknown is still read back through its declared verifier (spec 8.3):
+  present, and it is answered as executed; absent, and it is sent once
+  more; neither, and it gets the failure it got, never a hold.
+- The harness gains `--hold never`, the unattended-install cell
+  (docs/measurement.md 5.6).
+
+### Result
+
+The unattended install, 300 paired tasks over the pre-registered seeds. At
+the measured rate every harm row matches the control arm and the server
+runs 0.01 more calls a task; at the stress rate non-idempotent duplicates
+fall from 0.07 a task to 0.01, the same as with an approving operator, at
+0.13 more server calls against that operator's 0.31, with nobody deciding
+anything. What holds add is the stop before a destructive call goes, at the
+price the sweep measured when nobody answers: 0.10 to 0.18 records a task
+left undone.
+
+
 ## [0.18.0] - 2026-09-06
 
 ### Added

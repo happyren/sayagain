@@ -180,6 +180,53 @@ describe("cli onboarding", () => {
     await expect(main(["classes", "--all"])).rejects.toThrow(/no daemon is running/);
   });
 
+  it("up says what it will do first, wraps every host, writes the observe default; down puts it all back", async () => {
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({ mcpServers: { g: { command: "g" } } }),
+    );
+    mkdirSync(join(dir, ".cursor"), { recursive: true });
+    writeFileSync(
+      join(dir, ".cursor", "mcp.json"),
+      JSON.stringify({ mcpServers: { c: { url: "https://c/mcp" } } }),
+    );
+    const config = () =>
+      JSON.parse(readFileSync(join(dir, "sayagain", "config.json"), "utf8")) as {
+        servers: Record<string, unknown>;
+        daemon?: { hold?: string };
+      };
+    // The plan comes first, and it says a page is coming.
+    expect(await main(["up", "--dry-run"])).toBe(0);
+    expect(out).toContain("will:");
+    expect(out).toContain("/ui");
+    expect(out).toContain("observe first");
+    expect(out).toContain("[dry-run]");
+    expect(out).not.toContain("page: http");
+    out = "";
+    expect(await main(["up", "--no-start"])).toBe(0);
+    expect(config().daemon?.hold).toBe("never");
+    expect(Object.keys(config().servers).sort()).toEqual(["c", "g"]);
+    const claude = JSON.parse(readFileSync(join(dir, ".claude.json"), "utf8")) as {
+      mcpServers: Record<string, { args?: string[] }>;
+    };
+    expect(claude.mcpServers.g?.args).toEqual(["stdio", "g"]);
+    expect(out).toContain("sayagain up --hold");
+    out = "";
+    // Turning holds on is a second, explicit step.
+    expect(await main(["up", "--hold", "--no-start"])).toBe(0);
+    expect(config().daemon?.hold).toBeUndefined();
+    expect(out).toContain("hold destructive calls");
+    out = "";
+    expect(await main(["down"])).toBe(0);
+    expect(
+      (JSON.parse(readFileSync(join(dir, ".claude.json"), "utf8")) as { mcpServers: unknown })
+        .mcpServers,
+    ).toEqual({ g: { command: "g" } });
+    expect(config().servers).toEqual({});
+    expect(out).toContain("kept");
+    expect(out).toContain("no daemon was running");
+  });
+
   it("ui --no-open prints the page URL with the token of the running daemon", async () => {
     const daemon = await startDaemon({
       registry: { servers: {} },

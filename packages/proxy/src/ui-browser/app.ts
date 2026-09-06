@@ -116,7 +116,7 @@ async function renderServers(): Promise<void> {
     api<Json>("/api/health"),
   ]);
   $("#servers").innerHTML =
-    `<p>daemon ${esc(health.version)} · pid ${esc(health.pid)} · store ${esc(health.ledger)} · spans ${health.otlp ? `to ${esc(health.otlp)}` : "not exported"}</p>` +
+    `<p>daemon ${esc(health.version)} · pid ${esc(health.pid)} · store ${esc(health.ledger)} · spans ${health.otlp ? `to ${esc(health.otlp)}` : "not exported"} · holds ${health.hold === "never" ? "off: observing, nothing waits for you (sayagain up --hold turns them on)" : "on"}</p>` +
     table(
       ["server", "transport", "target", "state", "sessions", "url"],
       servers.map((s) => [
