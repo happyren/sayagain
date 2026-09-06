@@ -307,6 +307,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return changed;
   };
 
+  /**
+   * Re-read config.json and push what changed into the boundaries already running: the class
+   * tables, each server's hold mode, and the daemon-level hold default that servers without one
+   * inherit. Every path that re-reads the file goes through here, so none of them can drop the default.
+   */
+  const refreshFromFile = (): number => {
+    const fresh = loadRegistry();
+    options.registry.servers = fresh.servers;
+    options.registry.daemon = { ...(options.registry.daemon ?? {}), ...(fresh.daemon ?? {}) };
+    if (fresh.daemon?.hold === undefined) delete options.registry.daemon.hold;
+    return applyPolicies(fresh.servers, options.registry.daemon.hold);
+  };
+
   const boundaryFor = (name: string): Boundary | undefined => {
     const existing = boundaries.get(name);
     if (existing) return existing;
@@ -683,21 +696,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return res.end(text);
     }
     if (req.method === "POST" && path === "/api/policy/reload") {
-      let fresh: Registry;
       try {
-        fresh = loadRegistry();
+        return json(res, 200, { ok: true, servers: refreshFromFile() });
       } catch (err) {
         return json(res, 500, {
           error: `could not read the registry: ${err instanceof Error ? err.message : String(err)}`,
         });
       }
-      options.registry.servers = fresh.servers;
-      options.registry.daemon = { ...(options.registry.daemon ?? {}), ...(fresh.daemon ?? {}) };
-      if (fresh.daemon?.hold === undefined) delete options.registry.daemon.hold;
-      return json(res, 200, {
-        ok: true,
-        servers: applyPolicies(fresh.servers, options.registry.daemon.hold),
-      });
     }
     if (req.method === "GET" && path === "/api/health") {
       return json(res, 200, {
@@ -715,9 +720,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       let servers = options.registry.servers;
       if (existsSync(registryPath())) {
         try {
-          servers = loadRegistry().servers;
-          options.registry.servers = servers;
-          applyPolicies(servers);
+          refreshFromFile();
+          servers = options.registry.servers;
         } catch {
           // keep the snapshot
         }

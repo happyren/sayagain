@@ -232,5 +232,5 @@ export async function stopDaemon(timeoutMs = 8000): Promise<boolean> {
     if (!info || info.pid !== d.pid) return true;
     if (!(await daemonHealthy(info, 500))) return true;
   }
-  return true;
+  return false; // still answering after the deadline: the caller says so rather than "stopped"
 }

@@ -35,16 +35,25 @@ servers it will wrap and for which hosts, that it will start the daemon,
 that it will bring up the daemon's page and where, and whether anything
 will wait for the operator), then imports every server with rewrite, starts
 the daemon if none is running, prints the page's URL (`--open` opens it),
-says which traffic stays outside and why, and ends with `sayagain doctor`.
+says which traffic stays outside and why, and ends with `sayagain doctor`
+(`--no-start` leaves the daemon to you and skips that last step).
 `sayagain down` puts every host back, stops the daemon, and keeps the
-ledger, holds and backups. `--dry-run` prints the plan and changes nothing.
+ledger, holds and backups; it exits 1 when an entry it cannot restore
+would start the daemon again. `--dry-run` prints the plan and changes
+nothing.
 
-**A fresh install observes first.** `up` writes a daemon-level hold default
-of `never` (`daemon.hold` in `config.json`), which servers with a hold mode
-of their own override. Receipts, dedupe, safe retries, argument repair and
-error guidance are on; nothing waits for a person. `sayagain up --hold`
-removes the default, and the boundary as shipped (ADR-0004) is back. The
-page and `sayagain doctor` both say which mode is on and how to change it.
+**A fresh install observes first.** The first `up` writes a daemon-level
+hold default of `never` (`daemon.hold` in `config.json`), which servers
+with a hold mode of their own override. Receipts, dedupe, safe retries,
+argument repair and error guidance are on; nothing waits for a person, and
+a repaired call goes without approval. `sayagain up --hold` writes
+`destructive`, ADR-0004's default, explicitly; `--observe` writes `never`
+again; a later plain `up` keeps whatever mode it finds and says so, so a
+re-run after a host rewrote its file cannot quietly turn holds off. The
+persisted default governs every daemon start from then on (`serve`, and
+`add` without `--hold`); `wrap` reads no registry. The page says which mode
+is on and how to change it; `sayagain doctor` says so whenever holds are
+off.
 
 **A read-back does not need a hold.** With holds off, a write whose outcome
 is unknown is still read back through the verifier its tool declares
@@ -58,9 +67,11 @@ and the narrow reading of absence were, and both apply here.
 - One command, one restart of the hosts, and the plan is on the screen
   before anything changes. What the command cannot do is named in its own
   output rather than discovered from the ledger.
-- ADR-0004's hold-by-default still governs `wrap`, `serve` and `add`; `up`
-  is the one path that starts without it, and it says so on every run of
-  `doctor` until `--hold` is given.
+- ADR-0004's hold-by-default is now a persisted default rather than a
+  constant: `up` sets it, `serve` and `add` inherit it, `wrap` never sees
+  it. Every path that re-reads `config.json` in the daemon goes through one
+  refresh, so the page's own requests cannot drop it (the first cut's page
+  did exactly that, and a test pins it now).
 - The harness gains `--hold never`, the unattended-install cell. Over 300
   paired tasks (docs/measurement.md 5.6): at the measured rate every harm
   row matches the control arm and nothing is left undone, at 0.01 more

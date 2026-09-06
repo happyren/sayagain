@@ -79,7 +79,7 @@ import {
   type Scope,
   type Target,
 } from "./hosts.js";
-import { ensureLauncher, launcherCaveat } from "./launcher.js";
+import { ensureLauncher, launcherCaveat, launcherPath } from "./launcher.js";
 import { type Intervention, LearnedStore, upstreamReport } from "./learned.js";
 import { defaultLedgerPath, JsonlLedger, type LedgerRow, readLedger } from "./ledger.js";
 import { daemonUrlFor, ejectHost, importHost, inspectHost, installHost } from "./onboarding.js";
@@ -118,13 +118,16 @@ import { wrap } from "./wrap.js";
 
 const USAGE = `sayagain ${PROXY_VERSION}
 
-  sayagain up [--hold] [--open] [--project] [--dry-run] [--no-start]
+  sayagain up [--hold [destructive|always|never] | --observe] [--open] [--project] [--dry-run] [--no-start]
       One command: wrap every server your hosts have configured, start the daemon, and bring up its page.
-      Says what it will do before it does it. Observes first: nothing waits for you until you run it again
-      with --hold, which holds destructive calls and writes with an unknown outcome for your decision.
-      --open opens the page when the daemon is up; --dry-run prints the plan and changes nothing.
+      Says what it will do before it does it. A first run observes: nothing waits for you until you run it
+      again with --hold, which holds destructive calls and writes with an unknown outcome for your decision;
+      later runs keep the mode they find, and --observe turns holds off again. --open opens the page when
+      the daemon is up; --dry-run prints the plan and changes nothing; --no-start leaves the daemon to you
+      and skips the doctor run at the end; --project includes the project-scope files under this directory.
   sayagain down [--keep] [--prune] [--project] [--dry-run]
       Put every host back the way it was and stop the daemon. The ledger, holds and backups stay.
+      --keep leaves the servers registered; --prune also removes entries whose server is no longer registered.
   sayagain wrap [options] -- <server command> [args...]
       Run the boundary in-process around one stdio MCP server.
       --ledger <path>          JSONL ledger (default ~/.sayagain/ledger.jsonl)
@@ -905,8 +908,19 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (command === "stop") {
-    process.stdout.write((await stopDaemon()) ? "stopping daemon\n" : "no daemon running\n");
-    return 0;
+    const running = await liveDaemon();
+    if (!running) {
+      process.stdout.write("no daemon running\n");
+      return 0;
+    }
+    if (await stopDaemon()) {
+      process.stdout.write("daemon stopped\n");
+      return 0;
+    }
+    process.stderr.write(
+      `the daemon (pid ${running.pid}) did not stop within 8 s; it is still answering\n`,
+    );
+    return 1;
   }
 
   if (command === "ui") {
@@ -1151,7 +1165,7 @@ export async function main(argv: string[]): Promise<number> {
     }));
     const caveat = launcherCaveat();
     const status = live ? await daemonStatus() : null;
-    const health = (status?.health ?? {}) as { arm?: unknown };
+    const health = (status?.health ?? {}) as { arm?: unknown; hold?: unknown };
     const input = {
       cliVersion: PROXY_VERSION,
       daemon: live
@@ -1160,7 +1174,8 @@ export async function main(argv: string[]): Promise<number> {
             version: live.version,
             arm: typeof health.arm === "string" ? health.arm : null,
             listen: `${live.host}:${live.port}`,
-            holdDefault: registry.daemon?.hold ?? null,
+            // What the running boundaries use, not what the file says.
+            holdDefault: typeof health.hold === "string" ? health.hold : null,
           }
         : { running: false, holdDefault: registry.daemon?.hold ?? null },
       hosts: hostRows,
@@ -1180,7 +1195,22 @@ export async function main(argv: string[]): Promise<number> {
 
   if (command === "up" || command === "down") {
     const opts = [...rest];
-    const hold = command === "up" ? takeFlag(opts, "--hold") : false;
+    /** `--hold` takes an optional mode; bare, it is ADR-0004's destructive. `--observe` is `--hold never`. */
+    let holdArg: HoldMode | undefined;
+    if (command === "up") {
+      const at = opts.indexOf("--hold");
+      if (at !== -1) {
+        const next = opts[at + 1];
+        if (next === "destructive" || next === "always" || next === "never") {
+          holdArg = next;
+          opts.splice(at, 2);
+        } else {
+          holdArg = "destructive";
+          opts.splice(at, 1);
+        }
+      }
+      if (takeFlag(opts, "--observe")) holdArg = "never";
+    }
     const open = command === "up" ? takeFlag(opts, "--open") : false;
     const noStart = command === "up" ? takeFlag(opts, "--no-start") : false;
     const keep = command === "down" ? takeFlag(opts, "--keep") : false;
@@ -1198,8 +1228,14 @@ export async function main(argv: string[]): Promise<number> {
     let failed = false;
 
     if (command === "down") {
+      const running = await liveDaemon();
+      if (dryRun)
+        process.stdout.write(
+          `[dry-run] would put ${targets.length} host file(s) back, forget the hold default, and ${running ? `stop the daemon (pid ${running.pid})` : "find no daemon to stop"}\n`,
+        );
       if (!targets.length)
         process.stdout.write("no host config files found; nothing to put back\n");
+      let left = 0;
       for (const t of targets) {
         try {
           const r = ejectHost(t, undefined, { log, dryRun, keep, prune });
@@ -1207,23 +1243,36 @@ export async function main(argv: string[]): Promise<number> {
             `${dryRun ? "[dry-run] " : ""}${label(t)}\n  restored ${r.restored.length}${list(r.restored)}, removed ${r.removed.length}${list(r.removed)}, unregistered ${r.unregistered.length}${list(r.unregistered)}\n`,
           );
           for (const l of r.left) process.stdout.write(`  left ${l.name}: ${l.reason}\n`);
+          left += r.left.length;
           if (r.backup) process.stdout.write(`  backup: ${r.backup}\n`);
         } catch (err) {
           failed = true;
           process.stderr.write(`${label(t)}\n  error: ${errorOf(err)}\n`);
         }
       }
-      if (dryRun) return failed ? 1 : 0;
-      const fresh = loadRegistry();
-      if (fresh.daemon?.hold !== undefined) {
-        delete fresh.daemon.hold;
-        saveRegistry(fresh);
+      if (left)
+        process.stdout.write(
+          `${left} ${left === 1 ? "entry still points" : "entries still point"} at Say Again and would start the daemon again at the next host start; sayagain down --prune removes them\n`,
+        );
+      if (dryRun) return failed || left ? 1 : 0;
+      const stopped = running ? await stopDaemon() : false;
+      if (running && !stopped) {
+        failed = true;
+        process.stderr.write(
+          `the daemon (pid ${running.pid}) did not stop within 8 s and keeps its current hold mode; try: sayagain stop\n`,
+        );
+      } else {
+        const fresh = loadRegistry();
+        if (fresh.daemon?.hold !== undefined) {
+          delete fresh.daemon.hold;
+          saveRegistry(fresh);
+        }
+        process.stdout.write(running ? "daemon stopped\n" : "no daemon was running\n");
       }
-      process.stdout.write((await stopDaemon()) ? "daemon stopped\n" : "no daemon was running\n");
       process.stdout.write(
         `kept: the ledger, holds and backups in ${sayagainHome()} (sayagain audit and sayagain report still read them)\nrestart the hosts to pick up the change\n`,
       );
-      return failed ? 1 : 0;
+      return failed || left ? 1 : 0;
     }
 
     // ---- up: say what will happen, then do it in that order.
@@ -1243,16 +1292,30 @@ export async function main(argv: string[]): Promise<number> {
     const total = counted.reduce((a, c) => a + c.servers.length, 0);
     const already = counted.reduce((a, c) => a + c.wrapped.length, 0);
     const hostLabels = [...new Set(targets.map((t) => HOSTS[t.host].label))];
-    const daemonUrl = daemonUrlFor(loadRegistry());
+    const registry = loadRegistry();
+    const daemonUrl = daemonUrlFor(registry);
+    // A first install observes; a later run keeps the mode it finds unless told otherwise, so a
+    // second `up` after `up --hold` does not quietly turn holds off again.
+    const current = registry.daemon?.hold;
+    const mode: HoldMode = holdArg ?? current ?? "never";
+    const modeLine =
+      mode === "never"
+        ? "  4. observe first: nothing waits for you. Receipts, safe retries, repairs and read-backs are on; holds are off until you run: sayagain up --hold"
+        : mode === "always"
+          ? "  4. hold every write for your decision in that page (two minutes, then STANDBY until you decide)"
+          : "  4. hold destructive calls and writes with an unknown outcome for your decision in that page (two minutes, then STANDBY until you decide)";
     process.stdout.write(
       `${[
         `Say Again ${PROXY_VERSION} will:`,
-        `  1. wrap the ${total} server(s) ${hostLabels.join(", ")} ${hostLabels.length === 1 ? "has" : "have"} configured${already ? ` (${already} already through Say Again)` : ""}, keeping the keys the hosts use; a backup of each file goes beside it`,
-        `  2. start the boundary as a daemon at ${daemonUrl} and keep it running; the hosts reach it through ~/.sayagain/bin/sayagain`,
+        `  1. wrap the ${total} server(s) ${hostLabels.join(", ")} ${hostLabels.length === 1 ? "has" : "have"} configured${already ? ` (${already} already through Say Again)` : ""}, keeping the keys the hosts use; a backup of each file goes to ${homePath("backups")}`,
+        `  2. start the boundary as a daemon at ${daemonUrl} and keep it running; the hosts reach it through ${launcherPath()}`,
         `  3. bring up its page at ${daemonUrl}/ui: every call and what became of it, the holds inbox, the weekly report${open ? " (opened once the daemon is up)" : " (sayagain ui opens it; --open opens it now)"}`,
-        hold
-          ? "  4. hold destructive calls and writes with an unknown outcome for your decision in that page (two minutes, then STANDBY until you decide)"
-          : "  4. observe first: nothing waits for you. Receipts, safe retries, repairs and read-backs are on; holds are off until you run: sayagain up --hold",
+        modeLine,
+        ...(current !== undefined && current !== mode
+          ? [
+              `     holds were ${current === "never" ? "off" : "on"}; this run turns them ${mode === "never" ? "off" : "on"}`,
+            ]
+          : []),
         "",
       ].join("\n")}`,
     );
@@ -1265,15 +1328,10 @@ export async function main(argv: string[]): Promise<number> {
         "note: Claude Code is running; it rewrites ~/.claude.json when a session ends and may undo this change. Close sessions first, or run this again afterwards.\n",
       );
     // The hold default goes first, so the daemon starts with it and a running one can reload it.
-    if (!dryRun) {
+    if (!dryRun && current !== mode) {
       const fresh = loadRegistry();
-      const want: HoldMode | undefined = hold ? undefined : "never";
-      if (fresh.daemon?.hold !== want) {
-        fresh.daemon = { ...(fresh.daemon ?? {}) };
-        if (want) fresh.daemon.hold = want;
-        else delete fresh.daemon.hold;
-        saveRegistry(fresh);
-      }
+      fresh.daemon = { ...(fresh.daemon ?? {}), hold: mode };
+      saveRegistry(fresh);
     }
     for (const t of targets) {
       try {
@@ -1294,12 +1352,15 @@ export async function main(argv: string[]): Promise<number> {
     const caveat = launcherCaveat();
     if (caveat) process.stderr.write(`note: ${caveat}\n`);
     let info = await liveDaemon();
+    let reloadFailed = false;
     if (info) {
       try {
         await daemonReloadPolicy();
       } catch (err) {
+        reloadFailed = true;
+        failed = true;
         process.stderr.write(
-          `the running daemon refused the policy reload (${errorOf(err)}); it keeps its old hold mode until it restarts: sayagain stop && sayagain serve --detach\n`,
+          `the running daemon refused the policy reload (${errorOf(err)}); it keeps its previous hold mode until it restarts: sayagain stop && sayagain serve --detach\n`,
         );
       }
       process.stdout.write(
@@ -1333,9 +1394,11 @@ export async function main(argv: string[]): Promise<number> {
         "",
         "outside: servers a host provides itself (Claude Code's browser, computer use and session tools) never pass through a config file and stay where they are; sayagain audit shows how much of your traffic that is",
         "restart the hosts to pick up the change",
-        hold
-          ? "holds are on: destructive calls and writes with an unknown outcome wait for you in the page; sayagain holds lists them"
-          : "holds are off: nothing waits for you; once the page has shown you what the boundary sees, turn them on with: sayagain up --hold",
+        reloadFailed
+          ? "the running daemon keeps its previous hold mode until it restarts"
+          : mode === "never"
+            ? "holds are off: nothing waits for you; once the page has shown you what the boundary sees, turn them on with: sayagain up --hold"
+            : "holds are on: destructive calls and writes with an unknown outcome wait for you in the page (sayagain holds lists them); sayagain up --observe turns them off",
         "",
       ].join("\n"),
     );

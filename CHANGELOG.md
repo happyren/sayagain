@@ -20,12 +20,19 @@ All notable changes to this project are documented here. The format follows
   `sayagain doctor`. `--dry-run` prints the plan and the per-host dry run;
   `--no-start` leaves the daemon to you.
 - `sayagain down`: every host back the way it was, the daemon stopped, the
-  ledger, holds and backups kept.
-- A fresh install observes first. `up` writes `daemon.hold: "never"` in
-  `config.json`, the hold mode for servers with none of their own; a running
-  daemon picks it up on reload, `/api/health` reports it, and `doctor` says
-  it is on and how to turn holds on: `sayagain up --hold`, which removes the
-  default so ADR-0004's hold-by-default is back.
+  ledger, holds and backups kept. It says when the daemon did not stop, and
+  exits 1 when an entry it cannot restore would start the daemon again
+  (`--prune` removes it). `sayagain stop` no longer reports a daemon that is
+  still answering as stopped.
+- A fresh install observes first. The first `up` writes `daemon.hold:
+  "never"` in `config.json`, the hold mode for servers with none of their
+  own; `sayagain up --hold` writes `destructive` (ADR-0004's default)
+  explicitly, `--observe` writes `never` again, and a later plain `up` keeps
+  the mode it finds and says so. A running daemon picks the change up on
+  reload, `/api/health` reports it, the page shows it, and `doctor` says
+  when holds are off and how to turn them on. Every path on which the
+  daemon re-reads `config.json` keeps the default (the page's own requests
+  once dropped it; a test pins it).
 - A read-back without a hold. With holds off, a write whose outcome is
   unknown is still read back through its declared verifier (spec 8.3):
   present, and it is answered as executed; absent, and it is sent once
