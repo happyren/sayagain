@@ -84,6 +84,7 @@ import { type Intervention, LearnedStore, upstreamReport } from "./learned.js";
 import { defaultLedgerPath, JsonlLedger, type LedgerRow, readLedger } from "./ledger.js";
 import { daemonUrlFor, ejectHost, importHost, inspectHost, installHost } from "./onboarding.js";
 import { OtlpExporter, otlpHeadersFromEnv, resolveOtlpEndpoint } from "./otlp.js";
+import { hostRowsFor } from "./overview.js";
 import { type HoldMode, parseClassOverrides } from "./policy.js";
 import {
   addServer,
@@ -156,7 +157,8 @@ const USAGE = `sayagain ${PROXY_VERSION}
       resolved from the daemon's environment at spawn; so does a \${VAR} inside --header or --env values.
   sayagain remove <name> | sayagain list | sayagain status | sayagain stop
   sayagain ui [--no-open]
-      Open the operator page (holds inbox, servers, dead letters, ledger, tools, errors, report); starts the daemon if needed.
+      Open the operator page: an overview (is it working, what the boundary did, what to do next), then the holds
+      inbox, servers, dead letters, ledger, tools, errors, report and learn screens; starts the daemon if needed.
   sayagain doctor [--no-probe] [--json]
       Check the whole setup and print the command that fixes each finding: servers a host still calls
       directly, a server configured in one project only, a stdio server the daemon starts without the
@@ -293,7 +295,6 @@ function takeFlag(args: string[], name: string): boolean {
   return true;
 }
 
-/** Is a Claude Code session running? It rewrites ~/.claude.json when it exits. */
 /** The operator page's URL for a running daemon, with the token the page needs. */
 function uiUrl(info: DaemonInfo): string {
   // daemon.json is the user's own 0600 file, but the URL still goes to another program: only a
@@ -329,6 +330,7 @@ async function openInBrowser(url: string): Promise<void> {
   child.unref();
 }
 
+/** Is a Claude Code session running? It rewrites ~/.claude.json when it exits. */
 function claudeCodeRunning(): boolean {
   if (process.platform === "win32") return false;
   try {
@@ -1099,25 +1101,7 @@ export async function main(argv: string[]): Promise<number> {
     }
 
     // ---- doctor
-    const hostRows = hostFiles(process.cwd(), ["user", "local", "project"]).map((f) => {
-      const base = {
-        label: HOSTS[f.host].label,
-        host: f.host as string,
-        scope: f.scope as string,
-        file: f.file,
-        project: f.project,
-        exists: f.exists,
-        servers: [] as string[],
-        wrapped: [] as string[],
-        error: undefined as string | undefined,
-      };
-      if (!f.exists) return base;
-      try {
-        return { ...base, ...inspectHost(f) };
-      } catch (err) {
-        return { ...base, error: err instanceof Error ? err.message : String(err) };
-      }
-    });
+    const hostRows = hostRowsFor(process.cwd(), ["user", "local", "project"]);
     const servers: DoctorServer[] = [];
     for (const [name, cfg] of Object.entries(registry.servers)) {
       // The project a host ran this server in, recorded by import; older registries have none.
@@ -1309,7 +1293,7 @@ export async function main(argv: string[]): Promise<number> {
         `Say Again ${PROXY_VERSION} will:`,
         `  1. wrap the ${total} server(s) ${hostLabels.join(", ")} ${hostLabels.length === 1 ? "has" : "have"} configured${already ? ` (${already} already through Say Again)` : ""}, keeping the keys the hosts use; a backup of each file goes to ${homePath("backups")}`,
         `  2. start the boundary as a daemon at ${daemonUrl} and keep it running; the hosts reach it through ${launcherPath()}`,
-        `  3. bring up its page at ${daemonUrl}/ui: every call and what became of it, the holds inbox, the weekly report${open ? " (opened once the daemon is up)" : " (sayagain ui opens it; --open opens it now)"}`,
+        `  3. bring up its page at ${daemonUrl}/ui: whether calls are flowing, what the boundary did, what to do next; the holds inbox, the ledger and the weekly report behind it${open ? " (opened once the daemon is up)" : " (sayagain ui opens it; --open opens it now)"}`,
         modeLine,
         ...(current !== undefined && current !== mode
           ? [

@@ -232,3 +232,15 @@ export function removeDaemonInfo(pid: number = process.pid): void {
   if (current && current.pid !== pid) return;
   rmSync(daemonInfoPath(), { force: true });
 }
+
+/** "host:port" as the daemon listens on it; the host defaults to loopback. */
+export function parseListen(listen: string): { host: string; port: number } {
+  const at = listen.lastIndexOf(":");
+  const hostRaw = at >= 0 ? listen.slice(0, at) : "";
+  const portRaw = at >= 0 ? listen.slice(at + 1) : listen;
+  const host = hostRaw || "127.0.0.1";
+  const port = Number(portRaw);
+  if (!/^\d+$/.test(portRaw) || port > 65535)
+    throw new Error(`--listen expects host:port, got ${JSON.stringify(listen)}`);
+  return { host: host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host, port };
+}

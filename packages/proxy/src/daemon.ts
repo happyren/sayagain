@@ -26,10 +26,13 @@ import { Boundary } from "./core.js";
 import { type Decision, type Hold, HoldQueue } from "./holds.js";
 import { isRequest, isResponse, type JsonRpcMessage, keyOfId, parseMessage } from "./jsonrpc.js";
 import { LearnedStore, upstreamReport } from "./learned.js";
+import type { LedgerRow } from "./ledger.js";
 import type { OtlpExporter } from "./otlp.js";
+import { overviewFor } from "./overview.js";
 import { DEFAULT_POLICY, type HoldMode } from "./policy.js";
 import {
   loadRegistry,
+  parseListen,
   type Registry,
   registryPath,
   removeDaemonInfo,
@@ -128,17 +131,6 @@ function json(
   res.end(text);
 }
 
-export function parseListen(listen: string): { host: string; port: number } {
-  const at = listen.lastIndexOf(":");
-  const hostRaw = at >= 0 ? listen.slice(0, at) : "";
-  const portRaw = at >= 0 ? listen.slice(at + 1) : listen;
-  const host = hostRaw || "127.0.0.1";
-  const port = Number(portRaw);
-  if (!/^\d+$/.test(portRaw) || port > 65535)
-    throw new Error(`--listen expects host:port, got ${JSON.stringify(listen)}`);
-  return { host: host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host, port };
-}
-
 /** One host that presented an Mcp-Session-Id: its POSTs settle here; its GET stream carries the rest. */
 class HostSession implements Session {
   readonly waiters = new Map<string, { settle: (msg: JsonRpcMessage) => void }>();
@@ -187,6 +179,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     );
   const token = options.token ?? randomBytes(24).toString("base64url");
   const tokenBuf = Buffer.from(token);
+  const startedAt = new Date().toISOString();
   const holds = new HoldQueue();
   const learned = options.learned ?? new LearnedStore();
   const relearn = (minEvidence?: number) => {
@@ -589,6 +582,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   /** The 0.6 analysis over the daemon's own ledger, for the page. */
+  /**
+   * The ledger, read at most once every few seconds: the page's first screen and its report both
+   * want it, refresh on every burst of rows, and a JSONL ledger is parsed whole each time.
+   */
+  let ledgerCache: { at: number; rows: LedgerRow[] } | undefined;
+  const recentLedger = (): LedgerRow[] => {
+    const now = Date.now();
+    if (ledgerCache && now - ledgerCache.at < 5000) return ledgerCache.rows;
+    const rows = options.stores.readLedger();
+    ledgerCache = { at: now, rows };
+    return rows;
+  };
+
   const analysisRows = (url: URL, withPrevious: boolean) => {
     const sinceRaw = url.searchParams.get("since") ?? "7d";
     const since = parseSince(sinceRaw);
@@ -597,13 +603,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const minRaw = Number(url.searchParams.get("minCalls") ?? "10");
     const minCalls = Number.isFinite(minRaw) ? Math.max(1, Math.floor(minRaw)) : 10;
     const from = withPrevious ? new Date(since.getTime() - (Date.now() - since.getTime())) : since;
-    const rows = options.stores
-      .readLedger()
-      .filter(
-        (r) =>
-          Date.parse(r.ts) >= from.getTime() &&
-          (!server || r.upstream === server || r.server === server),
-      );
+    const rows = recentLedger().filter(
+      (r) =>
+        Date.parse(r.ts) >= from.getTime() &&
+        (!server || r.upstream === server || r.server === server),
+    );
     return { rows, since, minCalls };
   };
 
@@ -742,6 +746,44 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             sessions: b?.sessionCount ?? 0,
             url: `${daemonUrl}/mcp/${name}`,
           };
+        }),
+      );
+    }
+    if (req.method === "GET" && path === "/api/overview") {
+      // The first screen: the last seven days, every server, the doctor's findings. Composed here
+      // so the page asks once and the command line can print the same thing.
+      if (existsSync(registryPath())) {
+        try {
+          refreshFromFile(); // a server registered since the last look is on the page too
+        } catch {
+          // keep the snapshot
+        }
+      }
+      const from = Date.now() - 7 * 86_400_000;
+      const rows = recentLedger().filter((r) => Date.parse(r.ts) >= from);
+      const live: Record<string, { ready: boolean; upstream: string | null; sessions: number }> =
+        {};
+      for (const [name, b] of boundaries)
+        live[name] = { ready: b.upstreamReady, upstream: b.upstreamName, sessions: b.sessionCount };
+      return json(
+        res,
+        200,
+        overviewFor({
+          registry: options.registry,
+          version: options.version,
+          listen: `${host}:${port}`,
+          arm: options.arm ?? null,
+          startedAt,
+          rows,
+          live,
+          holds: holds.list().map((h) => ({
+            receipt: h.receipt,
+            tool: h.tool,
+            server: h.server,
+            createdAt: h.createdAt,
+            orphaned: h.orphaned,
+          })),
+          cwd: process.cwd(),
         }),
       );
     }
@@ -913,7 +955,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       host: infoHost,
       port: boundPort,
       token,
-      startedAt: new Date().toISOString(),
+      startedAt,
       version: options.version,
     });
 
