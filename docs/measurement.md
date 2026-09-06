@@ -471,15 +471,21 @@ wrong state 0.10 and 0.10, non-idempotent duplicates 0.01 and 0), failures
 seen fall from 0.37 to 0.32 and calls spent recovering from 0.53 to 0.44,
 and the server runs 0.01 more calls a task, which is the verifiers alone.
 At the stress rate non-idempotent duplicates fall from 0.07 to 0.01,
-distinguishable, the same as with an approving operator and at 0.13 more
+distinguishable, the same as with an approving operator and at 0.14 more
 server calls a task against that operator's 0.31; failures seen fall from
-2.30 to 1.85 and calls spent recovering from 3.11 to 2.35; records in the
+2.30 to 1.86 and calls spent recovering from 3.11 to 2.36; records in the
 wrong state are 0.38 against 0.37 and unresolved writes 0.40 against 0.37.
 With the read-back off, the duplicates stay at 0.07 in both arms and the
-recovery rows shrink (3.11 to 2.61). So the boundary's measured benefit
-does not need an operator; what an operator adds is the stop before a
-destructive call goes, which no row here measures and which the sweep
-prices at 0.10 to 0.18 records a task left undone when nobody answers.
+recovery rows shrink (3.11 to 2.61). Two things this cell cannot show:
+nothing is held, so no pre-image is read, and the server-call row is
+smaller than the approving operator's by exactly those reads; and a
+verifier that reads an absence is inconclusive here (ADR-0014), so the
+phantom row's zero is the rule doing its work on the one delete-of-nothing
+these seeds hold rather than evidence about a case they do not contain. So
+the boundary's measured benefit does not need an operator; what an operator
+adds is the stop before a destructive call goes, which no row here
+measures and which the absent-operator cells price at 0.18 (measured
+rate) and 0.10 (stress) records a task left undone.
 
 **The sweep, at the stress rate.** Eighteen cells, operator rule by
 read-back by attempt cap, 300 paired tasks each. Across every cell: silent

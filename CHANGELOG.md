@@ -36,7 +36,11 @@ All notable changes to this project are documented here. The format follows
 - A read-back without a hold. With holds off, a write whose outcome is
   unknown is still read back through its declared verifier (spec 8.3):
   present, and it is answered as executed; absent, and it is sent once
-  more; neither, and it gets the failure it got, never a hold.
+  more; neither, and it gets the failure it got, never a hold. Nothing is
+  held, so no pre-image is read, and a verifier that reads an absence (a
+  delete's effect) proves nothing without one: such a call gets the
+  failure it got, and the agent's own retry hears the truth. A read-back
+  whose call the boundary gave up on meanwhile answers nothing.
 - The harness gains `--hold never`, the unattended-install cell
   (docs/measurement.md 5.6).
 
@@ -46,10 +50,10 @@ The unattended install, 300 paired tasks over the pre-registered seeds. At
 the measured rate every harm row matches the control arm and the server
 runs 0.01 more calls a task; at the stress rate non-idempotent duplicates
 fall from 0.07 a task to 0.01, the same as with an approving operator, at
-0.13 more server calls against that operator's 0.31, with nobody deciding
+0.14 more server calls against that operator's 0.31, with nobody deciding
 anything. What holds add is the stop before a destructive call goes, at the
-price the sweep measured when nobody answers: 0.10 to 0.18 records a task
-left undone.
+price the absent-operator cells measured: 0.18 (measured rate) and 0.10
+(stress) records a task left undone.
 
 
 ## [0.18.0] - 2026-09-06

@@ -724,6 +724,12 @@ describe("lifecycle", () => {
       const asItWas = await h.waitFor(3);
       expect((asItWas.result as { isError: boolean }).isError).toBe(true);
       expect(meta(asItWas)["sh.sayagain/status"]).not.toBe("held");
+      // A delete of a record that never was: nothing was held, so there is no pre-image, and an
+      // absence proves nothing without one. The agent gets the timeout it got, never "applied".
+      h.call(4, "lost_delete", { id: "ghost" });
+      const ghost = await h.waitFor(4);
+      expect((ghost.result as { isError: boolean }).isError).toBe(true);
+      expect(meta(ghost)["sh.sayagain/verified"]).toBeUndefined();
       expect(h.wrapped.holds.list()).toHaveLength(0);
       const rows = h.ledger.rows;
       expect(rows.filter((r) => r.status === "held")).toHaveLength(0);

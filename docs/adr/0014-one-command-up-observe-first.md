@@ -59,8 +59,13 @@ off.
 is unknown is still read back through the verifier its tool declares
 (spec 8.3): present, and it is answered as executed; absent, and it is sent
 once more; neither, and it gets the failure it got, as it would have without
-a read-back. The hold was never what made the read-back safe; the pre-image
-and the narrow reading of absence were, and both apply here.
+a read-back. Nothing is held, so no pre-image is read, and that changes what
+a read-back may conclude: a verifier that finds a create's effect present is
+believed, the known limit ADR-0013 records for unheld writes (the agent
+chose the id); a verifier that finds a delete's effect present, which is an
+absence, proves nothing without a pre-image and is read as inconclusive, so
+the agent gets the timeout it got and its own retry hears the truth from
+the server. The narrow reading of absence applies as before.
 
 ## Consequences
 
@@ -76,7 +81,7 @@ and the narrow reading of absence were, and both apply here.
   paired tasks (docs/measurement.md 5.6): at the measured rate every harm
   row matches the control arm and nothing is left undone, at 0.01 more
   server calls a task; at the stress rate non-idempotent duplicates fall
-  from 0.07 a task to 0.01, the same as with an approving operator, at 0.13
+  from 0.07 a task to 0.01, the same as with an approving operator, at 0.14
   more server calls against that operator's 0.31, with nobody deciding
   anything. Without the read-back the duplicates stay at 0.07.
 - A user who runs `up` and never runs `--hold` gets receipts, dedupe,

@@ -629,6 +629,7 @@ export class Boundary extends EventEmitter {
   }
 
   private abandon(call: PendingCall, reason: string): void {
+    call.abandoned = true;
     this.state.pending.delete(keyOf(call.id));
     // A failure the boundary itself produced; the signature says so, so reports can set it apart.
     const failure: Failure = {
@@ -1089,6 +1090,17 @@ export class Boundary extends EventEmitter {
     // A call held before it was sent had its effect read then; one that was not has no pre-image.
     const before = call.preImage === undefined ? undefined : await call.preImage;
     const { state, text } = await this.readEffect(call, decl);
+    // Given up on meanwhile (a sweep, a timer, the upstream gone): the client has its answer already.
+    if (call.abandoned) return;
+    // An absence is the natural state of most things, so a verifier that reads one proves the call
+    // only against a pre-image that read a presence. Without one (holds off, so nothing was held),
+    // the call gets the failure it got, and the agent's own retry hears the truth from the server.
+    if (state === "present" && (decl.effect ?? "result") === "absence" && before === undefined) {
+      inconclusive(
+        `${reason}; ${decl.tool} reads an absence, which proves nothing without a pre-image, and none was read because the call was not held`,
+      );
+      return;
+    }
     if (state === "present" && before !== undefined && before !== "absent") {
       // The effect was there before the call went, or the read could not say, so finding it now
       // says nothing about the call: a delete of a record that never was, a create of one that
