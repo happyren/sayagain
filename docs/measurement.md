@@ -461,21 +461,25 @@ state row n/a, which is what the shim can and cannot see.
 
 **The sweep, at the stress rate.** Eighteen cells, operator rule by
 read-back by attempt cap, 300 paired tasks each. Across every cell: silent
-unknowns 0 to 0.01 and phantom beliefs 0, never against the boundary;
-non-idempotent duplicates 0.07 to -0.01, never against, distinguishable in
-the fifteen cells where the read-back or the cap gives it something to
-remove; calls spent recovering 0.37 to 0.74 and failures seen 0.07 to
-0.51, in the boundary's favour in every cell; the opaque failures the same
-in both arms in every cell. Records left in the wrong state run from 0.02
-in the boundary's favour to 0.13 against it, and the twelve cells against
-are exactly the declining and absent operators; the writes the agent could
-not resolve run from 0.05 in its favour to 0.09 against, and the six cells
-against are the same rules at the higher caps. The server-call row runs
-from 0.32 in the boundary's favour (its own retries replace the agent's)
-to 0.30 against (the pre-image and the verifiers). So the claims that
-survive every setting are the ones about duplicates, silent unknowns and
-the agent's recovery work; the ones about work left undone are claims
-about the operator's rule.
+unknowns and phantom beliefs 0 in both arms; non-idempotent duplicates
+from 0.07 in the boundary's favour to 0.01 against, never distinguishably
+against, and distinguishably in its favour in the fifteen cells where the
+read-back or the cap gives it something to remove; calls spent recovering
+0.40 to 0.83 and failures seen 0.12 to 0.58 in its favour, in every cell.
+Records left in the wrong state run from 0.01 in its favour to 0.15
+against, and the twelve cells against are exactly the declining and
+absent operators; writes the agent could not resolve run from 0.05 in its
+favour to 0.27 against, and the nine cells against are the six absent
+ones and three declining ones. The opaque failures are the same in both
+arms in the approving cells and up to 0.06 a task fewer in the treatment
+elsewhere, where a held destructive call an operator declines spares the
+agent the error it would have met. The server-call row runs from 0.18 in
+the boundary's favour, where its own retries replace the agent's, to
+0.31 against, which is the pre-image and the verifiers. So the claims that
+survive every setting are the ones about duplicates and the agent's
+recovery work; the ones about work left undone and writes left unresolved
+are claims about the operator's rule, and they go against the boundary
+whenever nobody approves.
 
 **What the calibrated harness found.** In its first stress run, one task in
 300 showed a write believed in the treatment arm that never happened: a
