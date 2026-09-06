@@ -27,6 +27,7 @@ import { type Decision, type Hold, HoldQueue } from "./holds.js";
 import { isRequest, isResponse, type JsonRpcMessage, keyOfId, parseMessage } from "./jsonrpc.js";
 import { LearnedStore, upstreamReport } from "./learned.js";
 import type { OtlpExporter } from "./otlp.js";
+import { DEFAULT_POLICY } from "./policy.js";
 import {
   loadRegistry,
   type Registry,
@@ -278,6 +279,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     } catch {
       return undefined;
     }
+  };
+
+  /**
+   * Push a changed class table or hold mode into the boundaries already running. Both are pure
+   * policy, so `sayagain classes --write` takes effect without restarting an upstream.
+   */
+  const applyPolicies = (servers: Record<string, ServerConfig>): number => {
+    let changed = 0;
+    for (const [name, b] of boundaries) {
+      const cfg = servers[name];
+      if (!cfg) continue;
+      b.setPolicy({ classes: cfg.classes ?? {}, hold: cfg.hold ?? DEFAULT_POLICY.hold });
+      changed++;
+    }
+    return changed;
   };
 
   const boundaryFor = (name: string): Boundary | undefined => {
@@ -653,6 +669,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       });
       return res.end(text);
     }
+    if (req.method === "POST" && path === "/api/policy/reload") {
+      let servers: Record<string, ServerConfig>;
+      try {
+        servers = loadRegistry().servers;
+      } catch (err) {
+        return json(res, 500, {
+          error: `could not read the registry: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      options.registry.servers = servers;
+      return json(res, 200, { ok: true, servers: applyPolicies(servers) });
+    }
     if (req.method === "GET" && path === "/api/health") {
       return json(res, 200, {
         ok: true,
@@ -670,6 +698,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         try {
           servers = loadRegistry().servers;
           options.registry.servers = servers;
+          applyPolicies(servers);
         } catch {
           // keep the snapshot
         }

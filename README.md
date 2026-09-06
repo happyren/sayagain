@@ -54,6 +54,8 @@ npm install -g @sayagain/proxy       # Node 22.13+; provides the `sayagain` comm
 
 sayagain hosts                       # what Claude Code, Cursor, Claude Desktop and VS Code have configured
 sayagain import --host all --rewrite # register every server and point each host at Say Again (backups beside the files)
+sayagain doctor                      # what is wrong with the setup and the command that fixes each one
+sayagain classes <name> --suggest    # how every tool is classed, and what its name implies where they differ
 sayagain eject --host all            # and back
 
 # Or by hand: register upstreams, start the daemon, point hosts at it.

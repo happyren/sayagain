@@ -26,12 +26,20 @@ import {
 import { renderAuditHtml, renderAuditText, runAudit } from "./audit.js";
 import { type ArmMode, isArmMode } from "./boundary.js";
 import {
+  type ClassReport,
+  classReport,
+  declaredTools,
+  describeAnnotations,
+  overridesFrom,
+} from "./classes.js";
+import {
   allDeadLetters,
   allHolds,
   daemonLearn,
   daemonLearnReport,
   daemonLedger,
   daemonLedgerSince,
+  daemonReloadPolicy,
   daemonStatus,
   daemonToolsList,
   decideAnywhere,
@@ -52,6 +60,7 @@ import {
 } from "./contribute.js";
 import { startDaemon } from "./daemon.js";
 import { defaultDeadLetterPath, readDeadLetters } from "./deadletter.js";
+import { type DoctorServer, doctorFindings, type Finding, renderDoctor } from "./doctor.js";
 import { homePath } from "./home.js";
 import {
   HOST_IDS,
@@ -75,6 +84,7 @@ import {
   loadOrCreateToken,
   loadRegistry,
   readDaemonInfo,
+  registryPath,
   removeDaemonInfo,
   removeServer,
   type ServerConfig,
@@ -127,6 +137,16 @@ const USAGE = `sayagain ${PROXY_VERSION}
   sayagain remove <name> | sayagain list | sayagain status | sayagain stop
   sayagain ui [--no-open]
       Open the operator page (holds inbox, servers, dead letters, ledger, tools, errors, report); starts the daemon if needed.
+  sayagain doctor [--no-probe] [--json]
+      Check the whole setup and print the command that fixes each finding: servers a host still calls
+      directly, a server wrapped in one project only, a stdio server the daemon starts without the
+      working directory its host gave it, tools whose class comes from nothing, and traffic that never
+      arrives. Exits 1 when something is broken.
+  sayagain classes <name>|--all [--suggest] [--write] [--json]
+      What class each tool gets and where it came from (the operator's table, the server's annotations,
+      or the cautious fallback), and what the boundary does with it. --suggest adds a class the tool's
+      name implies where it differs; --write stores those in config.json and a running daemon applies
+      them without a restart.
   sayagain hosts [--project] [--json]
       Which MCP hosts are configured on this machine (Claude Code, Cursor, Claude Desktop, VS Code) and what they hold.
   sayagain import --host <id>|all [--rewrite] [--dry-run] [--force] [--project] [--file <path>] [--transport stdio|http] [--command <path>] [--no-start]
@@ -294,6 +314,36 @@ const kib = (n: number): string =>
 const when = (iso: string): string => iso.slice(0, 16).replace("T", " ");
 
 /** The A/B page: both arms side by side, then the differences with their intervals. */
+/** One server's class table: what each tool gets, where it came from, and what that means. */
+function renderClasses(r: ClassReport, withSuggestions: boolean): string {
+  const out: string[] = [];
+  const counts = Object.entries(r.counts)
+    .filter(([, n]) => n > 0)
+    .map(([k, n]) => `${n} ${k}`)
+    .join(", ");
+  out.push(`${r.server}: ${r.rows.length} tool(s) — ${counts || "none"}`);
+  if (r.fallback)
+    out.push(
+      `  ${r.fallback} take the cautious fallback: the server annotates them not at all (never retried, counted as writes)`,
+    );
+  out.push("");
+  for (const row of r.rows) {
+    out.push(
+      `  ${row.tool.padEnd(32)} ${row.toolClass.padEnd(17)} ${row.source.padEnd(10)} ${describeAnnotations(row.annotations)}`,
+    );
+    if (row.warning) out.push(`      ! ${row.warning}`);
+    if (withSuggestions && row.suggestion)
+      out.push(`      -> ${row.suggestion.toolClass}: ${row.suggestion.reason}`);
+  }
+  if (withSuggestions && r.suggestions.length) {
+    out.push("");
+    out.push(
+      `  ${r.suggestions.length} suggestion(s); each is a guess from the tool's name, so read them before writing.`,
+    );
+  }
+  return `${out.join("\n")}\n`;
+}
+
 function renderAbReport(r: AbReport): string {
   const out: string[] = [];
   const c = r.arms.control;
@@ -833,6 +883,162 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  if (command === "classes" || command === "doctor") {
+    const opts = [...rest];
+    const asJson = takeFlag(opts, "--json");
+    const suggest = command === "classes" ? takeFlag(opts, "--suggest") : false;
+    const write = command === "classes" ? takeFlag(opts, "--write") : false;
+    const all = command === "classes" ? takeFlag(opts, "--all") : true;
+    const noProbe = command === "doctor" ? takeFlag(opts, "--no-probe") : false;
+    const unknown = opts.find((o) => o.startsWith("-"));
+    if (unknown) throw new UsageError(`${command}: unknown option ${unknown}`);
+    const registry = loadRegistry();
+    const names = command === "classes" && !all ? opts : Object.keys(registry.servers);
+    if (command === "classes" && !all && names.length !== 1)
+      throw new UsageError("classes: expected one server name, or --all");
+    if (command === "classes" && opts.length && all)
+      throw new UsageError("classes: give a server name or --all, not both");
+    for (const n of names)
+      if (!Object.hasOwn(registry.servers, n))
+        throw new UsageError(`${command}: no server named ${n}`);
+
+    const live = await liveDaemon();
+    /** Ask the daemon for a server's tools; it starts the upstream on the way. */
+    const probe = async (name: string): Promise<ClassReport | { error: string }> => {
+      if (!live) return { error: "no daemon is running (sayagain serve --detach)" };
+      try {
+        const tools = await daemonToolsList(name);
+        return classReport(name, declaredTools(tools), registry.servers[name]?.classes ?? {});
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    };
+
+    if (command === "classes") {
+      let wrote = 0;
+      let failedProbe = false;
+      const reports: ClassReport[] = [];
+      for (const name of names) {
+        const r = await probe(name);
+        if ("error" in r) {
+          process.stderr.write(`${name}: ${r.error}\n`);
+          failedProbe = true;
+          continue;
+        }
+        reports.push(r);
+      }
+      if (asJson) {
+        process.stdout.write(`${JSON.stringify(reports, null, 2)}\n`);
+        return failedProbe ? 1 : 0;
+      }
+      for (const r of reports) {
+        process.stdout.write(`${renderClasses(r, suggest || write)}\n`);
+        if (write && r.suggestions.length) {
+          const merged = overridesFrom(r);
+          const cfg = registry.servers[r.server];
+          if (cfg) {
+            cfg.classes = merged;
+            wrote += r.suggestions.length;
+          }
+        }
+      }
+      if (write) {
+        if (!wrote)
+          process.stdout.write("nothing to write: no suggestion differs from the class in force\n");
+        else {
+          saveRegistry(registry);
+          const reloaded = await daemonReloadPolicy().catch(() => null);
+          process.stdout.write(
+            `wrote ${wrote} override(s) to ${registryPath()}${reloaded === null ? "; start the daemon to apply them" : "; the running daemon applied them"}\n`,
+          );
+        }
+      } else if (reports.some((r) => r.suggestions.length))
+        process.stdout.write(
+          `${suggest ? "" : "run with --suggest to see what the names imply, then "}--write stores them in ${registryPath()}\n`,
+        );
+      return failedProbe ? 1 : 0;
+    }
+
+    // ---- doctor
+    const hostRows = hostFiles(process.cwd(), ["user", "local", "project"]).map((f) => {
+      const base = {
+        label: HOSTS[f.host].label,
+        host: f.host as string,
+        scope: f.scope as string,
+        file: f.file,
+        project: f.project,
+        exists: f.exists,
+        servers: [] as string[],
+        wrapped: [] as string[],
+        error: undefined as string | undefined,
+      };
+      if (!f.exists) return base;
+      try {
+        return { ...base, ...inspectHost(f) };
+      } catch (err) {
+        return { ...base, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+    const servers: DoctorServer[] = [];
+    for (const [name, cfg] of Object.entries(registry.servers)) {
+      const entry: DoctorServer = {
+        name,
+        transport: cfg.transport,
+        cwd: cfg.cwd,
+        projectOrigins: Object.values(cfg.origins ?? {})
+          .map((o) => {
+            const e = o.entry as { cwd?: unknown } | undefined;
+            return typeof e?.cwd === "string" ? e.cwd : undefined;
+          })
+          .filter((x): x is string => typeof x === "string"),
+      };
+      // A local-scope origin names the project the host ran the server in.
+      for (const key of Object.keys(cfg.origins ?? {})) {
+        const m = /^(.*)#projects\.(.+)\.mcpServers$/.exec(key);
+        if (m?.[2]) entry.projectOrigins.push(m[2]);
+      }
+      if (!noProbe && live) {
+        const r = await probe(name);
+        if ("error" in r) entry.probeError = r.error;
+        else entry.classes = r;
+      }
+      servers.push(entry);
+    }
+    const since = new Date(Date.now() - 7 * 86_400_000);
+    const byServer: Record<string, number> = {};
+    let total = 0;
+    try {
+      for (const row of await loadRowsSince(since)) {
+        const key = row.server ?? row.upstream;
+        byServer[key] = (byServer[key] ?? 0) + 1;
+        total++;
+      }
+    } catch {
+      // a missing or unreadable ledger is itself reported by the checks below
+    }
+    const caveat = launcherCaveat();
+    const input = {
+      cliVersion: PROXY_VERSION,
+      daemon: live
+        ? {
+            running: true,
+            version: live.version,
+            arm: (await daemonStatus())?.health.arm as string | null,
+          }
+        : { running: false },
+      hosts: hostRows,
+      servers,
+      ledger: { total, byServer },
+      ...(caveat ? { launcherCaveat: caveat } : {}),
+      hostRunning: claudeCodeRunning(),
+    };
+    const findings: Finding[] = doctorFindings(input);
+    process.stdout.write(
+      asJson ? `${JSON.stringify(findings, null, 2)}\n` : renderDoctor(findings),
+    );
+    return findings.some((f) => f.severity === "error") ? 1 : 0;
+  }
+
   if (command === "import" || command === "install" || command === "eject") {
     const opts = [...rest];
     const hostOption = takeOption(opts, "--host");
@@ -963,6 +1169,9 @@ export async function main(argv: string[]): Promise<number> {
         );
       }
       process.stdout.write("restart the host to pick up the change\n");
+      process.stdout.write(
+        "then: sayagain doctor   (checks routing, working directories and how each tool is classed)\n",
+      );
     }
     return failed ? 1 : 0;
   }

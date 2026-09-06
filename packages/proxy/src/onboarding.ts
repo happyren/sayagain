@@ -388,6 +388,9 @@ export function configFromEntry(
     }
     if (typeof entry.cwd === "string")
       config.cwd = projectRoot ? resolve(projectRoot, entry.cwd) : resolve(entry.cwd);
+    // The host ran this server inside the project; the daemon runs it from its own directory, so a
+    // server that finds its work by the current directory would come up empty. Carry the project over.
+    else if (projectRoot) config.cwd = resolve(projectRoot);
     return { config };
   }
   return { reason: `unrecognised entry${type ? ` (type ${type})` : ""}` };

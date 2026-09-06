@@ -109,6 +109,39 @@ describe("cli onboarding", () => {
     expect(out).toContain("does not accept HTTP entries");
   });
 
+  it("import carries a project's directory over as the working directory, and doctor says what is left", async () => {
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { direct: { command: "d" } },
+        projects: { "/w/app": { mcpServers: { scoped: { command: "s" } } } },
+      }),
+    );
+    expect(await main(["import", "--host", "all", "--rewrite", "--no-start"])).toBe(0);
+    const registry = JSON.parse(readFileSync(join(dir, "sayagain", "config.json"), "utf8")) as {
+      servers: Record<string, { cwd?: string }>;
+    };
+    // The host ran it inside the project; the daemon would otherwise start it from its own directory.
+    expect(registry.servers.scoped?.cwd).toBe("/w/app");
+    expect(registry.servers.direct?.cwd).toBeUndefined(); // a user-scope server has no project to inherit
+    expect(out).toContain("sayagain doctor");
+    out = "";
+    // No daemon in this scratch home: doctor leads with that and exits non-zero.
+    expect(await main(["doctor", "--no-probe", "--json"])).toBe(1);
+    const findings = JSON.parse(out) as { severity: string; title: string; fix?: string }[];
+    expect(findings[0]).toMatchObject({
+      severity: "error",
+      title: "no daemon is running",
+      fix: "sayagain serve --detach",
+    });
+    expect(findings.some((f) => f.title.includes("without a working directory"))).toBe(false);
+  });
+
+  it("classes needs a server the registry knows", async () => {
+    await expect(main(["classes", "nope"])).rejects.toThrow(/no server named nope/);
+    await expect(main(["classes", "a", "b"])).rejects.toThrow(/one server name, or --all/);
+  });
+
   it("ui --no-open prints the page URL with the token of the running daemon", async () => {
     const daemon = await startDaemon({
       registry: { servers: {} },

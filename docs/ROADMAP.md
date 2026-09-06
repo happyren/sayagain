@@ -232,6 +232,12 @@ Explicitly not built
 
 ## Independent of the phases
 
+- Onboarding (0.14.0, ADR-0012): `sayagain doctor` and `sayagain classes`
+  make the boundary explain its own setup, because the three things that went
+  wrong on the author's machine (a server calling past the proxy, a stdio
+  server started outside its project, a design server whose annotations put
+  screenshots behind an approval) were all invisible until someone read the
+  ledger by hand.
 - The proof (docs/measurement.md 5.4): `serve --arm coinflip` and
   `report --ab` run the pre-registered A/B on the operator's own agents:
   a control arm that observes only, against the boundary as shipped

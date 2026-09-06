@@ -45,7 +45,7 @@ export class ToolClassifier {
   private resolveReady: (() => void) | undefined;
   /** Resolves the first time annotations are learned. Callers wait on it with a timeout. */
   readonly ready: Promise<void>;
-  constructor(private readonly overrides: Record<string, ToolClass> = {}) {
+  constructor(private overrides: Record<string, ToolClass> = {}) {
     this.ready = new Promise((resolve) => {
       this.resolveReady = resolve;
     });
@@ -99,6 +99,27 @@ export class ToolClassifier {
       this.resolveReady();
       this.resolveReady = undefined;
     }
+  }
+
+  /** Replace the operator's table; classes are pure policy, so this needs no restart. */
+  setOverrides(overrides: Record<string, ToolClass>): void {
+    this.overrides = overrides;
+  }
+
+  /** Where a tool's class comes from, for `sayagain classes`. */
+  sourceOf(tool: string): "override" | "annotation" | "fallback" {
+    if (this.overrides[tool]) return "override";
+    const a = this.annotations.get(tool);
+    return a &&
+      (a.readOnlyHint !== undefined ||
+        a.destructiveHint !== undefined ||
+        a.idempotentHint !== undefined)
+      ? "annotation"
+      : "fallback";
+  }
+
+  annotationsOf(tool: string): ToolAnnotations | undefined {
+    return this.annotations.get(tool);
   }
 
   classOf(tool: string): ToolClass {

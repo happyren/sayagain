@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { pickArm } from "./boundary.js";
 import { type Daemon, startDaemon } from "./daemon.js";
 import { LearnedStore } from "./learned.js";
+import { saveRegistry } from "./registry.js";
 import { runStdioShim } from "./shim.js";
 import { openStores, sqliteAvailable } from "./stores.js";
 
@@ -202,6 +203,52 @@ describe("daemon", () => {
       upstream: string;
     }[];
     expect(servers[0]).toMatchObject({ name: "fake", started: true, upstream: "fake-notion" });
+  });
+
+  it("applies a changed class table to a running boundary without restarting the upstream", async () => {
+    const d = await boot();
+    const call = (id: number) => ({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: "delete_page", arguments: { id } },
+    });
+    // As shipped: the fixture annotates delete_page destructive, so the call waits for a decision.
+    const held = rpc(d, "fake", call(1));
+    const hold = await until(async () => ((await api(d, "/api/holds")) as Obj[])[0]);
+    await api(d, `/api/holds/${hold.receipt}/approve`, { method: "POST" });
+    await held;
+    const before = (await api(d, "/api/servers")) as { started: boolean }[];
+    expect(before[0]?.started).toBe(true);
+
+    // The operator disagrees and writes it down; the daemon picks it up on its own.
+    saveRegistry({
+      servers: {
+        fake: {
+          transport: "stdio",
+          command: process.execPath,
+          args: [fixture],
+          hold: "destructive",
+          classes: { delete_page: "idempotent-write" },
+        },
+      },
+    });
+    const reloaded = (await api(d, "/api/policy/reload", { method: "POST" })) as {
+      servers: number;
+    };
+    expect(reloaded.servers).toBe(1);
+    const straight = await rpc(d, "fake", call(2));
+    expect(straight.status).toBe(200);
+    expect((await api(d, "/api/holds")) as Obj[]).toHaveLength(0); // nothing waiting this time
+    const rows = (await api(d, "/api/ledger?tail=1")) as {
+      tool: string;
+      toolClass: string;
+      held?: unknown;
+    }[];
+    expect(rows[0]).toMatchObject({ tool: "delete_page", toolClass: "idempotent-write" });
+    expect(rows[0]?.held).toBeUndefined();
+    const after = (await api(d, "/api/servers")) as { started: boolean; upstream: string | null }[];
+    expect(after[0]).toMatchObject({ started: true, upstream: "fake-notion" }); // same upstream throughout
   });
 
   it("holds a destructive call and completes it through the API", async () => {

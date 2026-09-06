@@ -119,6 +119,15 @@ export async function daemonToolsList(name: string): Promise<unknown[] | null> {
   return msg.result?.tools ?? [];
 }
 
+/** Ask a running daemon to re-read the registry's class tables and hold modes. */
+export async function daemonReloadPolicy(): Promise<number | null> {
+  const d = await liveDaemon();
+  if (!d) return null;
+  const res = await daemonFetch(d, "/api/policy/reload", { method: "POST" });
+  if (!res.ok) throw new Error(`daemon answered ${res.status} for the policy reload`);
+  return ((await res.json()) as { servers?: number }).servers ?? 0;
+}
+
 /** The daemon's learning-loop state, or null when no daemon is live. */
 export async function daemonLearn(
   action?:
