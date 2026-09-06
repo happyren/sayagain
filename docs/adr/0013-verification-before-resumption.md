@@ -9,10 +9,12 @@ The fault-injection harness (docs/measurement.md 5.6) put the boundary in
 front of a server that fails the way real ones do, and measured both arms
 against a truth log of what really happened. The result was not the one the
 thesis wanted. When a write timed out after it was sent, the boundary held it
-and asked an operator; with an operator who approves, the call was re-sent and
-ran twice (0.06 duplicate executions per task rose to 0.15); with one who
-declines, the record was left in the wrong state 0.26 times per task against
-zero without the boundary. The hold converted a silent unknown into a decision,
+and asked an operator; with an operator who approves, the call was re-sent
+and could run twice; with one who declines, the record was left in the wrong
+state 0.26 times per task against zero without the boundary. (The first
+harness lost every attempt's answer, which inflated the approving case to 0.15
+duplicates per task; under a lost answer that a retry recovers, approving
+without a read-back merely matches the control arm's own retry duplicates.) The hold converted a silent unknown into a decision,
 and the decision was lossy in either direction, because it was taken without
 knowing whether the write had landed.
 
@@ -30,13 +32,29 @@ deletion is verified by an absence.
 
 **After a write ends with an unknown outcome, the boundary runs the verifier
 before deciding anything**, when the tool declares one and the verifier is
-classed read-only. If the effect is present, the original call is answered as
-executed, with `sh.sayagain/verified` on the result saying which tool was
-asked, and the agent is told not to repeat it. If the effect is absent, the
-world has said that nothing landed, so one re-send cannot duplicate anything,
-and the call is sent again without a hold. If the verifier is inconclusive
-(it failed for any other reason, or the template named an argument the call
-did not carry), the boundary holds the call exactly as before.
+classed read-only. That includes a destructive call the boundary held before
+sending and an operator approved: the approval was about sending it, and the
+lost outcome is read back like any other. If the effect is present, the
+original call is answered as executed, with `sh.sayagain/verified` on the
+result saying which tool was asked, and the agent is told not to repeat it.
+If the effect is absent, the world has said that nothing landed, so one
+re-send cannot duplicate anything, and the call is sent again without a hold.
+If the verifier is inconclusive, the boundary holds the call exactly as
+before.
+
+**Absence is a narrow reading.** Only a failure phrased as an absence (`not
+found`, `no such`, `does not exist`, `404`, `ENOENT`) says the thing is
+missing. The boundary's wider "semantic" failure class also covers `already
+exists`, `not initialized` and `call X first`, and a re-send on any of those
+would be exactly the duplicate this decision exists to prevent, so they are
+inconclusive. A declaration that names nothing from the call, or refers to a
+result the boundary does not have, is refused rather than resolved to a
+literal, because a verifier that always answers would find every write
+present. The linter reports both shapes.
+
+**A client that cancels or leaves while the verifier runs gets no re-send on
+its behalf**; the call waits for an operator instead. A verifier that never
+answers is recorded as an inconclusive read, not a dead letter to replay.
 
 **The read-back is counted as the work it is.** The verifier is one of the
 boundary's own calls and gets its own ledger row, marked with the receipt it
@@ -70,18 +88,21 @@ version does.
 
 ## Consequences
 
-- With the read-back on, the harness's approving operator no longer causes
-  double execution (0.15 per task falls to zero), silent unknowns fall from
-  0.05 to 0.03 per task, and records are left in the wrong state no more
-  often than without the boundary. Failures the agent sees fall from 0.92 to
-  0.35 per task and calls spent recovering from 1.65 to 0.61. The server runs
-  slightly more calls, 5.55 against 5.35, which is the verifiers, and the
-  bytes delivered to the agent roughly double, which is the receipts. Both
-  costs are reported.
+- With the read-back on, the duplicates the agent's own retries cause fall
+  from 0.03 per task to zero and the silent unknowns from 0.02 to zero, both
+  distinguishable over 300 paired tasks, and no record is left in the wrong
+  state. Failures the agent sees fall from 0.82 to 0.24 per task and calls
+  spent recovering from 1.60 to 0.48. The server runs slightly more calls,
+  5.37 against 5.30, which is the verifiers, and the bytes delivered to the
+  agent roughly double, which is the receipts. Both costs are reported.
 - The rejecting rule still leaves destructive work undone, because a
-  destructive call is held before it is sent and there is nothing to read
-  back. That is the hold policy doing what it was asked; an operator who
-  declines every delete gets no deletes.
+  destructive call declined before it is sent has no outcome to read back.
+  That is the hold policy doing what it was asked; an operator who declines
+  every delete gets no deletes.
+- The harness's first cut lost a write's answer on every attempt, which is
+  an outage rather than a lost answer, and made any arm that retries look
+  worse than one that does not. It now loses the answer once, and the
+  numbers in the consequences above are from that model.
 - A verifier that is not read-only is ignored, which keeps a bad declaration
   from turning a read-back into a second write.
 - The spec moves to v0.1.8. Servers that already declare compensation gain

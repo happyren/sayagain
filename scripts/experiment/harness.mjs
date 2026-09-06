@@ -352,15 +352,19 @@ function measure(task, run, truth) {
 // ---------------------------------------------------------------- statistics
 
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
-/** Student's t at 95%: honest at the small end, where the tests run. */
+/**
+ * Student's t at 95%: exact to ten degrees of freedom, then the value at the smallest df of each
+ * bucket, so a bucket never claims a narrower interval than its smallest member is owed.
+ */
 const tQuantile = (df) => {
   if (df < 1) return Number.POSITIVE_INFINITY;
   const small = [12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228];
   if (df <= 10) return small[df - 1];
-  if (df <= 20) return 2.086;
-  if (df <= 30) return 2.042;
-  if (df <= 60) return 2.0;
-  return 1.96;
+  if (df <= 20) return 2.201; // df 11
+  if (df <= 30) return 2.08; // df 21
+  if (df <= 60) return 2.04; // df 31
+  if (df <= 120) return 2.0; // df 61
+  return 1.98;
 };
 
 /** Paired difference over tasks: each task is one independent observation, so a t interval fits. */
@@ -477,7 +481,7 @@ async function main() {
   };
   const lines = [
     `Fault-injection harness: ${arms.control.length} paired tasks (${TASKS} per seed, seeds ${SEEDS.join(",")}), docs/measurement.md 5.6`,
-    `Faults: a call fails once then works ${Math.round(100 * FLAKY)}% of the time; a write lands then loses its answer ${Math.round(100 * LOST)}% of the time.`,
+    `Faults: a call fails once then works ${Math.round(100 * FLAKY)}% of the time; a write lands and loses its answer once ${Math.round(100 * LOST)}% of the time (a second attempt answers).`,
     `Agent: retries a timeout ${Math.round(100 * POLICY.retryProbability)}% of the time, at most ${POLICY.maxAttemptsPerStep} attempts a step, and is not a model.`,
     `Operator: a stand-in that answers every held call "${OPERATOR}", at once. Read-back of a lost write before deciding (spec 8.3): ${VERIFY}.`,
     ...(PLACEBO

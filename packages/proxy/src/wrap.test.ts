@@ -598,6 +598,46 @@ describe("lifecycle", () => {
     }
   });
 
+  it("reads a held-then-approved delete back by absence, and holds when the verifier cannot answer or cannot be resolved", async () => {
+    const h = harness({ hold: "destructive", holdWaitMs: 2000 });
+    try {
+      await h.handshake();
+      h.call(0, "lost_write", { id: "d" }); // so there is something to delete
+      await h.waitFor(0);
+      // Destructive: held before it is sent; approved; the answer is then lost; the record is gone.
+      h.call(1, "lost_delete", { id: "d" });
+      const hold = await h.pendingHold();
+      expect(hold).toBeDefined();
+      h.wrapped.holds.decide((hold as { receipt: string }).receipt, "approve");
+      const done = await h.waitFor(1);
+      expect(meta(done)["sh.sayagain/status"]).toBe("executed");
+      expect(meta(done)["sh.sayagain/verified"]).toEqual({ tool: "landed", effect: "absence" });
+      // The verifier answered with a failure that is not an absence: nothing is known, so hold.
+      h.call(2, "unready_write", { id: "u" });
+      expect(meta(await h.waitFor(2))["sh.sayagain/status"]).toBe("held");
+      // The declaration refers to a result the boundary does not have: not honoured, so hold.
+      h.call(3, "badtemplate_write", { id: "b" });
+      expect(meta(await h.waitFor(3))["sh.sayagain/status"]).toBe("held");
+      await h.finish();
+      const rows = h.ledger.rows;
+      expect(rows.filter((r) => r.tool === "lost_delete").at(-1)).toMatchObject({
+        status: "executed",
+        verified: "present",
+      });
+      // The unready probe ran and failed, and no re-send followed it.
+      expect(rows.filter((r) => r.tool === "unready")).toHaveLength(1);
+      expect(rows.filter((r) => r.tool === "unready_write").map((r) => r.status)).toEqual([
+        "executed",
+        "held",
+      ]);
+      expect(rows.some((r) => r.verifies !== undefined && r.status === "dead-lettered")).toBe(
+        false,
+      );
+    } finally {
+      await h.finish();
+    }
+  });
+
   it("does not read a write back when the policy says not to", async () => {
     const h = harness({ hold: "destructive", verify: false, holdWaitMs: 200 });
     try {

@@ -32,26 +32,59 @@ All notable changes to this project are documented here. The format follows
 
 ### Result
 
-300 paired tasks over the pre-registered seeds, approving operator:
+300 paired tasks over the pre-registered seeds. A write loses its answer
+once and a second attempt answers; the first cut lost every attempt, which is
+an outage rather than a lost answer, and inflated the duplicate counts of any
+arm that retries. Every outcome is printed; a positive difference means the
+control arm had more of it, and the last three rows are what the boundary
+costs.
 
-| outcome, per task | control | read-back off | read-back on |
+Approving operator, read-back off against on:
+
+| per task | control | off | on |
 |---|---|---|---|
-| non-idempotent writes run twice | 0.06 | 0.15 | 0.00 |
-| writes that happened, unknown to all | 0.05 | 0.05 | 0.03 |
+| writes that happened, unknown to all | 0.02 | 0.02 | 0.00 |
+| writes the agent could not resolve | 0.00 | 0.00 | 0.00 |
+| writes believed that never happened | 0.00 | 0.00 | 0.00 |
 | records left in the wrong state | 0.00 | 0.00 | 0.00 |
-| failures the agent saw | 0.92 | 0.44 | 0.35 |
-| calls the agent spent recovering | 1.65 | 0.71 | 0.61 |
-| calls the server actually ran | 5.35 | 5.62 | 5.55 |
-| bytes delivered to the agent | 549 | 1127 | 1068 |
+| non-idempotent writes run twice | 0.03 | 0.03 | 0.00 |
+| any write run twice | 0.05 | 0.05 | 0.02 |
+| calls the server actually ran | 5.30 | 5.34 | 5.37 |
+| calls the agent spent recovering | 1.60 | 0.54 | 0.48 |
+| bytes the agent spent recovering | 180 | 178 | 148 |
+| failures the agent saw | 0.82 | 0.28 | 0.24 |
+| calls the agent made | 5.30 | 4.78 | 4.74 |
+| bytes delivered to the agent | 542 | 1040 | 1016 |
 
-The read-back turns the approving operator's double execution from a
-distinguishable harm into zero, while every agent-side gain stays and the
-work still gets done. The server runs the verifiers, and the receipts double
-the bytes; both are printed. With a rejecting operator, destructive calls are
-still held before they are sent and left undone (0.26 records per task),
-which is the hold policy doing what it was told and is unchanged by this
-release.
+Without the read-back the boundary matches the control arm on every harm
+count and halves what the agent has to handle. With it, the duplicates the
+agent's own retries cause fall to zero and the silent unknowns to zero, both
+distinguishable, and the bytes spent recovering fall as well. The server runs
+the verifiers (5.37 calls against 5.30) and the receipts double the bytes
+delivered; both stay printed.
 
+With a rejecting operator the harm counts are the same as with read-back on,
+and records are left in the wrong state 0.26 times per task against zero in
+control: a destructive call declined before it is sent has no outcome to read
+back, and an operator who declines every delete gets no deletes.
+
+The placebo, the boundary in its control mode over the same 300 tasks, shows
+exactly zero on every row but the two byte rows.
+
+### Note
+
+The first cut of this instrument reported that the boundary halved
+unacknowledged writes and removed double execution. Those results were
+artifacts of four defects found in review before release: the stand-in
+operator was never wired to the event the boundary emits, a held response was
+scored as a successful write, work the treatment arm declined was never
+counted, and the metric named for M9 measured a different quantity from the
+one M9 defines. A second review then found the read-back re-sending on any
+"semantic" failure of the verifier rather than only on an absence, honouring
+a template it could not resolve as a literal, and never reaching a destructive
+call at all; all three are fixed and tested, and the fault model's permanent
+loss, which produced the "approving doubles execution" figure, is corrected
+above.
 
 ## [0.16.0] - 2026-09-06
 

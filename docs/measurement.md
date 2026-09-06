@@ -346,41 +346,25 @@ node scripts/experiment/harness.mjs --tasks 60 --seeds 1,2,3,7,11 --operator app
   made, and bytes delivered. All twelve are printed; none is dropped for being
   unflattering.
 
-**Result, 300 paired tasks over the five seeds, boundary as of 0.16.0.**
-Neither operator rule is a clean win, and that is the finding.
+**Fault model, corrected 2026-09-06.** The first cut lost a write's answer
+on every attempt, which is an outage rather than a lost answer and made any
+arm that retries look worse than one that does not. A write now loses its
+answer once and a second attempt answers. Every number below is from that
+model.
 
-With an approving operator, the boundary takes work off the agent and adds it
-elsewhere: failures the agent saw fall from 0.92 to 0.44 per task and calls
-spent recovering from 1.65 to 0.71, while non-idempotent writes run twice rise
-from 0.06 to 0.15, calls the server actually ran rise from 5.35 to 5.62, and
-writes that happened and nobody knows about do not move at all. Approving an
-unknown-outcome hold re-sends a write that may already have landed.
-
-With a rejecting operator, the trade reverses: writes that nobody knows about
-fall from 0.05 to 0.01 and double execution falls to zero, but records are left
-in the wrong state 0.29 times per task against zero in the control arm. H6 asks
-for a reduction in cost *without breaking the workload*; on this failure mix,
-declining held calls breaks it.
-
-The boundary as it stands converts a silent unknown into a decision, and the
-decision is lossy in either direction, because it is taken without checking
-whether the write landed. What the harness points at is verification before
-resumption: on an unknown outcome, read the state back before re-sending. The
-idempotency and compensation declarations in `spec/intent-metadata.md` section
-8 are what would make that possible, which is an argument for the spec rather
-than a result about it.
-
-**Result, the same 300 tasks, boundary as of 0.17.0 (ADR-0013).** With
-the read-back declared and on, the approving operator's double execution
-falls from 0.15 per task to zero, writes nobody knows about fall from 0.05 to
-0.03, and no record is left in the wrong state. Failures the agent sees fall
-from 0.92 to 0.35 and calls spent recovering from 1.65 to 0.61. The server
-runs 5.55 calls per task against 5.35, which is the verifiers, and the bytes
-delivered to the agent roughly double, which is the receipts. `--verify off`
-reproduces the 0.16.0 table, so the read-back is what moved the duplicate
-row. The rejecting operator still leaves destructive work undone at 0.26
-records per task, because a destructive call is held before it is sent and
-there is nothing to read back.
+**Result, 300 paired tasks over the five seeds, boundary as of 0.17.0
+(ADR-0013).** Without the read-back, the boundary matches the control arm on
+every harm count (silent unknowns 0.02, non-idempotent duplicates 0.03,
+records in the wrong state 0) and takes most of the recovery off the agent
+(failures seen 0.82 to 0.28, calls spent recovering 1.60 to 0.54). With the
+read-back on, the duplicates fall to zero and the silent unknowns to zero,
+both distinguishable, and the bytes spent recovering fall from 180 to 148.
+The server runs 5.37 calls per task against 5.30, which is the verifiers, and
+the bytes delivered to the agent roughly double, which is the receipts. With
+a rejecting operator the harm counts are the same and records are left in the
+wrong state 0.26 times per task: a destructive call declined before it is sent
+has no outcome to read back. The 0.16.0 claim that an approving operator
+doubled execution was the permanent-loss artefact and is withdrawn.
 
 **The placebo.** `--placebo` runs the treatment arm with the boundary in its
 control mode, which forwards and records and does nothing else. Over the same

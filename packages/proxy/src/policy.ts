@@ -176,6 +176,16 @@ export class ToolClassifier {
       if (d.effect !== "result" && d.effect !== "absence") return undefined;
       out.effect = d.effect;
     }
+    // A verifier that names nothing from the call reads something else, and would find every
+    // write present. Spec 8.3 asks for a read by identity.
+    const refs = Object.values(out.arguments ?? {}).filter((v) => v.startsWith("$arguments."));
+    if (!refs.length) return undefined;
+    if (
+      Object.values(out.arguments ?? {}).some(
+        (v) => v.startsWith("$") && !v.startsWith("$arguments."),
+      )
+    )
+      return undefined;
     return out;
   }
 }

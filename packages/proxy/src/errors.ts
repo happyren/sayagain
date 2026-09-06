@@ -2,6 +2,14 @@
 
 export type ErrorClass = "retryable" | "coercible" | "blocked" | "semantic" | "other";
 
+/**
+ * Whether a failure says the thing asked for is not there, and nothing else. The semantic class is
+ * wider than that (already exists, not initialised, call X first), and a read-back that re-sends a
+ * write on any of those would duplicate it. Only these five phrasings mean absence.
+ */
+export const saysAbsent = (text: string): boolean =>
+  /not found|no such|does not exist|\b404\b|ENOENT/i.test(text);
+
 const CLASSES: [ErrorClass, RegExp][] = [
   [
     "coercible",

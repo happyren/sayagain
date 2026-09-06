@@ -314,11 +314,45 @@ export function lintTool(tool: ToolDefinition): Finding[] {
       "annotations/compensation",
       "neither read-only nor idempotent, and no compensation is declared (nor that none exists)",
     );
-  if (undoable && tool._meta?.["sh.sayagain/verify"] === undefined)
+  const verify = tool._meta?.["sh.sayagain/verify"];
+  if (undoable && verify === undefined)
     emit(
       "annotations/verify",
       "neither read-only nor idempotent, and no way to read its effect back is declared",
     );
+  else if (verify !== undefined) {
+    // A declaration the boundary would refuse is worse than none: it reads as a promise.
+    const v = verify as { tool?: unknown; arguments?: unknown; effect?: unknown };
+    const props = new Set(Object.keys(tool.inputSchema?.properties ?? {}));
+    const args =
+      typeof v.arguments === "object" && v.arguments !== null && !Array.isArray(v.arguments)
+        ? Object.values(v.arguments as Record<string, unknown>)
+        : [];
+    const refs = args.filter((a) => typeof a === "string" && a.startsWith("$arguments."));
+    const bad = args.filter(
+      (a) => typeof a !== "string" || (a.startsWith("$") && !a.startsWith("$arguments.")),
+    );
+    const unknownRef = refs.filter((a) => !props.has(String(a).slice("$arguments.".length)));
+    if (typeof v.tool !== "string" || !v.tool)
+      emit("annotations/verify", "sh.sayagain/verify names no tool");
+    else if (bad.length)
+      emit(
+        "annotations/verify",
+        "sh.sayagain/verify uses a template other than a literal or $arguments.<name>, which a boundary cannot resolve",
+      );
+    else if (!refs.length)
+      emit(
+        "annotations/verify",
+        "sh.sayagain/verify reads nothing from the call, so it would find every write present",
+      );
+    else if (unknownRef.length)
+      emit(
+        "annotations/verify",
+        `sh.sayagain/verify refers to ${unknownRef.join(", ")}, which the tool does not take`,
+      );
+    else if (v.effect !== undefined && v.effect !== "result" && v.effect !== "absence")
+      emit("annotations/verify", "sh.sayagain/verify effect must be result or absence");
+  }
 
   return out;
 }

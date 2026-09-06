@@ -36,6 +36,7 @@ import {
 import type { ReplayOutcome } from "./control.js";
 import type { DeadLetter } from "./deadletter.js";
 import { DedupeCache, type Remembered } from "./dedupe.js";
+import { saysAbsent } from "./errors.js";
 import { type Hold, HoldQueue } from "./holds.js";
 import {
   isRequest,
@@ -635,6 +636,14 @@ export class Boundary extends EventEmitter {
       text: reason,
     };
     const row = failedAttemptRow(call, this.state.upstreamName, failure, 0, Date.now());
+    if (call.verifies !== undefined) {
+      // A read-back that got no answer is inconclusive, not a lost write: no dead letter to replay.
+      this.record(row);
+      this.settle(call, null);
+      this.state.ownIds.delete(keyOf(call.id));
+      this.resolveWaiter(call, { isError: true, text: reason });
+      return;
+    }
     if (call.arm === "control") {
       // Observe only: the row records the unanswered call; no dead letter, no replay sentence for the model.
       this.record(row);
@@ -850,7 +859,11 @@ export class Boundary extends EventEmitter {
     if (failure.errorClass === "retryable") {
       const safe = call.toolClass === "read-only" || call.toolClass === "idempotent-write";
       if (safe) return call.attempts < this.policy.retryAttempts ? "retry" : "final";
-      return this.policy.hold === "never" || call.held ? "final" : "hold";
+      if (this.policy.hold === "never") return "final";
+      // A call already held for its outcome is not held twice. One held before it was sent (and
+      // approved) can still have that outcome read back, which is the only reason to go on.
+      if (call.held) return call.held.mode === "pre" && this.canVerify(call) ? "hold" : "final";
+      return "hold";
     }
     if (failure.errorClass === "coercible" && this.policy.repair && call.repairs.length === 0) {
       const used = this.repairBudget.get(this.budgetKey(call, now)) ?? 0;
@@ -923,18 +936,29 @@ export class Boundary extends EventEmitter {
       // A hold decided blind is lossy either way: approving re-sends a write that may have landed,
       // declining abandons one that may not have. If the tool says how to read its effect back,
       // look before deciding (spec 8.3). Once per call, and never for a replay.
-      const decl =
-        this.policy.verify && call.verified === undefined && call.replayOf === undefined
-          ? this.classifier.verifyOf(call.tool)
-          : undefined;
-      if (decl && this.classifier.classOf(decl.tool) === "read-only") {
-        void this.verifyThenDecide(call, failure, decl);
+      const decl = this.canVerify(call) ? this.classifier.verifyOf(call.tool) : undefined;
+      if (decl) {
+        const reason = `write failed with unknown outcome: ${failure.signature}`;
+        void this.verifyThenDecide(call, failure, decl).catch((err: unknown) => {
+          this.log(
+            `sayagain: could not read ${call.tool} back (${err instanceof Error ? err.message : String(err)}); holding it`,
+          );
+          this.park(call, reason, "unknown-outcome");
+        });
         return true;
       }
       this.park(call, `write failed with unknown outcome: ${failure.signature}`, "unknown-outcome");
       return true;
     }
     return false;
+  }
+
+  /** Whether this call's tool declares a read-only verifier the policy lets the boundary run. */
+  private canVerify(call: PendingCall): boolean {
+    if (!this.policy.verify || call.verified !== undefined || call.replayOf !== undefined)
+      return false;
+    const decl = this.classifier.verifyOf(call.tool);
+    return decl !== undefined && this.classifier.classOf(decl.tool) === "read-only";
   }
 
   /**
@@ -968,21 +992,31 @@ export class Boundary extends EventEmitter {
     if (call.session !== undefined) probe.session = call.session;
     const outcome = await this.execute(probe);
     const effect = decl.effect ?? "result";
-    // "result": a good answer proves the effect, a not-found failure proves its absence.
-    // "absence": the other way round, which is how a deletion reads.
-    const present = effect === "result" ? !outcome.isError : outcome.errorClass === "semantic";
-    const absent = effect === "result" ? outcome.errorClass === "semantic" : !outcome.isError;
+    // Only an answer that names the thing as missing counts as absence. Any other failure of the
+    // verifier (a timeout, a server not ready, a conflict) says nothing about the write, and a
+    // re-send on its strength would be the duplicate this path exists to prevent.
+    const gone = outcome.isError && saysAbsent(outcome.text);
+    const present = effect === "result" ? !outcome.isError : gone;
+    const absent = effect === "result" ? gone : !outcome.isError;
     if (present) {
       call.verified = "present";
       const now = Date.now();
       this.record(baseRow(call, this.state.upstreamName, "executed", 0, now));
       const message = verifiedResponse(call, decl, outcome.text);
-      this.settle(call, { receipt: call.receipt, result: message.result, at: now });
+      const remembered: Remembered = { receipt: call.receipt, result: message.result, at: now };
+      // Remembered like any other success, so a repeat inside the window is answered, not run again.
+      const key = DedupeCache.keyFor(call);
+      if (key !== null)
+        this.dedupe.remember(key, remembered.receipt, remembered.result, remembered.at);
+      this.settle(call, remembered);
       if (!this.state.ownIds.delete(keyOf(call.id))) this.deliver(message);
       this.resolveWaiter(call, { isError: false, text: "verified: the effect is present" });
       return;
     }
-    if (absent) {
+    // The client may have cancelled or gone while the verifier ran: then nothing is re-sent on its
+    // behalf, and the call waits for an operator instead.
+    const listening = this.idMap.has(keyOf(call.id)) || this.state.ownIds.has(keyOf(call.id));
+    if (absent && listening) {
       // The world says nothing landed, so a second send cannot duplicate anything.
       call.verified = "absent";
       call.attempts++;

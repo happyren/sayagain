@@ -68,7 +68,37 @@ rl.on("line", (line) => {
           {
             name: "unverifiable_write",
             inputSchema: { type: "object" },
-            _meta: { "sh.sayagain/verify": { tool: "create_page", arguments: {} } },
+            _meta: {
+              "sh.sayagain/verify": { tool: "create_page", arguments: { id: "$arguments.id" } },
+            },
+          },
+          // A destructive write verified by absence: after it, the record must be gone.
+          {
+            name: "lost_delete",
+            inputSchema: { type: "object" },
+            annotations: { destructiveHint: true },
+            _meta: {
+              "sh.sayagain/verify": {
+                tool: "landed",
+                arguments: { id: "$arguments.id" },
+                effect: "absence",
+              },
+            },
+          },
+          // A verifier that cannot answer yet: its failure says nothing about the write.
+          {
+            name: "unready_write",
+            inputSchema: { type: "object" },
+            _meta: {
+              "sh.sayagain/verify": { tool: "unready", arguments: { id: "$arguments.id" } },
+            },
+          },
+          { name: "unready", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+          // A declaration the boundary cannot resolve: the template refers to a result.
+          {
+            name: "badtemplate_write",
+            inputSchema: { type: "object" },
+            _meta: { "sh.sayagain/verify": { tool: "landed", arguments: { id: "$result.id" } } },
           },
         ],
       },
@@ -152,7 +182,9 @@ rl.on("line", (line) => {
     } else if (
       name === "lost_write" ||
       name === "vanished_write" ||
-      name === "unverifiable_write"
+      name === "unverifiable_write" ||
+      name === "unready_write" ||
+      name === "badtemplate_write"
     ) {
       const key = `${name}:${args.id}`;
       if (!lostOnce.has(key)) {
@@ -163,6 +195,15 @@ rl.on("line", (line) => {
         landed.add(args.id);
         ok();
       }
+    } else if (name === "lost_delete") {
+      const key = `${name}:${args.id}`;
+      landed.delete(args.id); // the deletion happens either way
+      if (!lostOnce.has(key)) {
+        lostOnce.add(key);
+        fail("Error: Request timed out");
+      } else ok();
+    } else if (name === "unready") {
+      fail("Error: Client not initialized. Call initialize first."); // semantic, but not an absence
     } else if (name === "landed") {
       if (landed.has(args.id)) ok();
       else fail(`Error: record '${args.id}' not found`);

@@ -304,13 +304,22 @@ server than the one that declared it.
 The read-only call that says whether this tool's effect is present in the
 world: a tool name on the same server and an argument template in the
 language of 8.2 (`$arguments.<name>` only, since there is no result to
-refer to). `effect` says how to read the verifier's answer: `"result"` (the
-default) means a successful result proves the effect is present; `"absence"`
-means a not-found failure proves it, which is how a deletion is verified.
+refer to). At least one argument MUST be such a reference, so the verifier
+reads the thing the call named and not a list that is never empty; a
+declaration with none, or with a reference the boundary cannot resolve, is
+not honoured. `effect` says how to read the verifier's answer: `"result"`
+(the default) means a successful result proves the effect is present;
+`"absence"` means a failure that says the thing is missing proves it, which
+is how a deletion is verified. Only a failure phrased as an absence counts
+(`not found`, `no such`, `does not exist`, `404`, `ENOENT`); a verifier that
+fails in any other way, whether a timeout, a server not yet ready, or a
+conflict, has said nothing about the write.
 
 A boundary MAY run the verifier on its own after a call to this tool ends
 with an unknown outcome (a timeout after the request was sent), before it
-re-sends the call or holds it for an operator. It MUST NOT do so unless the
+re-sends the call or holds it for an operator. That includes a call the
+boundary held before sending and an operator approved: the approval was
+about sending it, and its outcome can still be read back. It MUST NOT do so unless the
 verifier is read-only (declared `readOnlyHint: true`, or classed read-only
 by the operator), and MUST NOT run it on another server than the one that
 declared it. A verifier that fails for any reason other than the declared

@@ -596,17 +596,23 @@ export function resolveVerifyArguments(
       ? (original as Record<string, unknown>)
       : {};
   const out: Record<string, unknown> = {};
+  let references = 0;
   for (const [key, template] of Object.entries(decl.arguments ?? {})) {
     const ref = /^\$arguments\.([A-Za-z0-9_-]+)$/.exec(template);
     if (!ref) {
+      // Any other reference ($result.x, a typo) is a declaration the boundary cannot honour. A
+      // literal it passes through; a verifier is a read on the same server and can take one.
+      if (template.startsWith("$")) return null;
       out[key] = template;
       continue;
     }
     const name = ref[1] as string;
     if (!Object.hasOwn(source, name)) return null;
     out[key] = source[name];
+    references++;
   }
-  return out;
+  // A read that names nothing from the call reads something else, and would call every write present.
+  return references ? out : null;
 }
 
 /** The answer for a write whose outcome was unknown until the boundary read it back and found it. */

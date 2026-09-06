@@ -130,9 +130,11 @@ const handleCall = (id, name, args) => {
   const flaky = draw(`flaky:${key}`) < flakyRate;
   if (flaky && n === 1) return fail(id, "Request timed out after 30000ms");
 
-  // Server-side, on the seed: a write that lands and then loses its answer. The world changed; the
-  // agent is told it failed. This is the case the north-star metric counts.
-  const lost = WRITES.has(name) && draw(`lost:${key}`) < lostRate;
+  // Server-side, on the seed: a write that lands and then loses its answer, once. The world changed;
+  // the agent is told it failed; a second attempt answers. This is the case the north-star metric
+  // counts. Losing every attempt would be an outage, not a lost answer, and would make any arm that
+  // retries look worse than one that does not.
+  const lost = WRITES.has(name) && n === 1 && draw(`lost:${key}`) < lostRate;
 
   if (name === "search_records") return ok(id, `matched 3 records for ${args?.query ?? ""}`);
   if (name === "get_record") return ok(id, `record ${args.id} is ${records.get(args.id).status}`);
