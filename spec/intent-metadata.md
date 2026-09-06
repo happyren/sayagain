@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1.8                                      |
+| Status         | Draft v0.1.9                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -317,7 +317,12 @@ conflict, has said nothing about the write.
 
 A boundary MAY run the verifier on its own after a call to this tool ends
 with an unknown outcome (a timeout after the request was sent), before it
-re-sends the call or holds it for an operator. That includes a call the
+re-sends the call or holds it for an operator. A verifier that finds the
+effect present afterwards proves the call only if the effect was absent
+before it: a deletion of a record that never existed and a creation of one
+that already did both read back as present. A boundary that holds a call
+before sending it SHOULD read the effect while the call is held, and MUST
+treat a verifier answer that matches that pre-image as inconclusive. That includes a call the
 boundary held before sending and an operator approved: the approval was
 about sending it, and its outcome can still be read back. It MUST NOT do so unless the
 verifier is read-only (declared `readOnlyHint: true`, or classed read-only
@@ -366,4 +371,5 @@ and the schema shim (section 7) are optional features.
 - v0.1.5 (2026-09-05): `boundary.ledger` enumerated and `boundary.hold` added to 5.5.
 - v0.1.6 (2026-09-05): `repair.rule` may be `learned:<rule>` for a coercion the boundary derived from its own ledger (5.4).
 - v0.1.7 (2026-09-05): section 8, tool declarations: `sh.sayagain/idempotency` and `sh.sayagain/compensation` in a tool's `_meta`; former sections 8 to 10 are now 9 to 11.
+- v0.1.9 (2026-09-06): 8.3, the pre-image: a verifier answer that matches what was in the world before the call was sent proves nothing about the call.
 - v0.1.8 (2026-09-06): 8.3, `sh.sayagain/verify`, the read-only call that says whether a write's effect is present, and `sh.sayagain/verified` on a result the boundary answered on its strength.

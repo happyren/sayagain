@@ -6,6 +6,60 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-06
+
+### Added
+
+- The harness injects the measured failure mix. Faults are drawn per step
+  from the class shares the 30-day audit measured on this machine's MCP
+  traffic (`other` 45%, `semantic` 26%, `retryable` 18%, `blocked` 6%,
+  `coercible` 5%), at its 5.1% failure rate, with a write losing its answer
+  once in a hundred; the class is named on the call and the fault server
+  acts on it, so both arms meet the same fault. `--mix fixable` keeps the
+  first cut's mix for comparison, `--fail-rate` and `--lost` set the rates,
+  and a new row, "of which nothing could act on", says how much of what the
+  agent saw was out of any boundary's reach.
+- `scripts/experiment/chaos.mjs`, a transport-level fault injector: the
+  same harness runs in front of any stdio MCP server (`--server "<command>"`),
+  with the shim answering timeouts, opaque errors and permission errors from
+  outside and dropping a good answer for the lost case. It learns which
+  tools are writes from the server's own `tools/list`, and logs a truth
+  entry when the server answered a write without an error. The state row
+  cannot be read from outside and prints n/a.
+- `--operator absent`: nobody decides, and a held call waits out the short
+  wait and comes back STANDBY, which is the third rule an operator can
+  follow and the one the first two hid.
+- `--sweep`: the grid of operator rule x read-back x attempt cap, with each
+  difference printed as its range across the eighteen cells. A headline that
+  holds in every cell is a claim about the boundary; one that holds in some
+  is a claim about a setting.
+- `--dump <file>`: every task's fault draw and both arms' rows, one JSON
+  line per task, so a single surprising row can be found and reproduced.
+- The pre-image (ADR-0013 amendment, spec v0.1.9). For a call held before
+  it is sent, the boundary reads its effect through the declared verifier
+  while the operator decides, and after an unknown outcome treats a verifier
+  answer that matches that pre-image as inconclusive. The harness found the
+  case: a delete of a record that never existed timed out, read back as
+  absent, and was answered as executed.
+
+### Result
+
+300 paired tasks over the pre-registered seeds, at the measured rate. Every
+harm row is unchanged by the boundary: silent unknowns 0 and 0, phantom
+beliefs 0 and 0, records in the wrong state 0.10 and 0.10, non-idempotent
+duplicates 0.01 and 0. The agent sees 0.32 failures a task against 0.37 and
+spends 0.45 calls recovering against 0.53; the 0.20 failures a task nothing
+could act on are the same in both arms. A declining or absent operator
+leaves 0.28 records in the wrong state against 0.10, distinguishable and
+against the boundary. At a stress rate (30% of steps, one write in ten
+losing its answer) the mechanism shows: non-idempotent duplicates 0.07 to
+zero with the read-back on and 0.07 to 0.07 with it off, silent unknowns
+0.01 to zero, failures seen 2.29 to 1.89, with 1.28 a task opaque in both
+arms. The placebo is zero on every row but the byte rows at both rates. The
+first stress run showed one phantom belief in 300 tasks, which the
+pre-image removed at a cost of 0.2 server calls a task.
+
+
 ## [0.17.0] - 2026-09-06
 
 ### Added

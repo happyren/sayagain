@@ -14,6 +14,7 @@ import {
   createState,
   describeCall,
   duplicateResponse,
+  type EffectState,
   type Failure,
   failedAttemptRow,
   failureOf,
@@ -721,10 +722,23 @@ export class Boundary extends EventEmitter {
       if (call.repairs.length) o.repairs = call.repairs;
       this.deliver(heldResponse(call, reason, expiresAt, o));
     };
-    const send = (afterWait: boolean) => {
+    // What the world looks like before a held call goes: a verifier that finds the effect present
+    // afterwards proves the call only if the effect was absent before it (spec 8.3). Read while
+    // the operator decides, so it costs no waiting.
+    if (mode === "pre") {
+      const decl = this.canVerify(call) ? this.classifier.verifyOf(call.tool) : undefined;
+      if (decl)
+        call.preImage = this.readEffect(call, decl).then(
+          (r) => r.state,
+          () => "inconclusive" as const,
+        );
+    }
+    const send = async (afterWait: boolean) => {
       if (call.held) call.held.decision = "approve";
       if (mode !== "pre") call.attempts++;
       if (afterWait) this.state.ownIds.add(keyOf(call.id));
+      // A pre-image still being read has to land before the call does, or it reads the call's own effect.
+      await call.preImage;
       this.forward(call);
     };
     void (async () => {
@@ -732,7 +746,7 @@ export class Boundary extends EventEmitter {
       if (call.held) call.held.waitedMs = Date.now() - createdAt;
       if (decision === "approve") {
         finishHold();
-        send(false);
+        await send(false);
         return;
       }
       if (decision === "reject") {
@@ -749,7 +763,7 @@ export class Boundary extends EventEmitter {
       this.settle(call, null);
       const later = await this.holds.waitFor(call.receipt, this.opts.holdTtlMs);
       finishHold();
-      if (later === "approve") send(true);
+      if (later === "approve") await send(true);
       else {
         if (later === "reject" && call.held) {
           call.held.decision = "reject";
@@ -972,21 +986,16 @@ export class Boundary extends EventEmitter {
   }
 
   /**
-   * Read a write's effect back through its declared verifier, then answer, re-send or hold. The
-   * verifier is one of the boundary's own calls and gets its own ledger row, marked with the
-   * receipt it checked, so the read-back is counted as the work it is.
+   * Read a call's effect through its declared verifier: is it in the world right now? The verifier
+   * is one of the boundary's own calls and gets its own ledger row, marked with the receipt it
+   * checked, so the read-back is counted as the work it is.
    */
-  private async verifyThenDecide(
+  private async readEffect(
     call: PendingCall,
-    failure: Failure,
     decl: VerifyDeclaration,
-  ): Promise<void> {
-    const reason = `write failed with unknown outcome: ${failure.signature}`;
+  ): Promise<{ state: EffectState; text: string }> {
     const args = resolveVerifyArguments(decl, call.arguments);
-    if (args === null) {
-      this.park(call, reason, "unknown-outcome");
-      return;
-    }
+    if (args === null) return { state: "inconclusive", text: "" };
     const id = ownId(this.state, "verify");
     const req: JsonRpcRequest = {
       jsonrpc: "2.0",
@@ -1015,16 +1024,40 @@ export class Boundary extends EventEmitter {
     const gone = outcome.isError && saysAbsent(outcome.text) && aboutIt;
     const present = effect === "result" ? !outcome.isError : gone;
     const absent = effect === "result" ? gone : !outcome.isError;
-    if (present) {
+    return { state: present ? "present" : absent ? "absent" : "inconclusive", text: outcome.text };
+  }
+
+  /** Read a write's effect back after an unknown outcome, then answer, re-send or hold. */
+  private async verifyThenDecide(
+    call: PendingCall,
+    failure: Failure,
+    decl: VerifyDeclaration,
+  ): Promise<void> {
+    const reason = `write failed with unknown outcome: ${failure.signature}`;
+    const key = keyOf(call.id);
+    const before = (await call.preImage) ?? "inconclusive";
+    const { state, text } = await this.readEffect(call, decl);
+    if (state === "present" && before === "present") {
+      // The effect was there before the call went, so finding it now says nothing about the call:
+      // a delete of a record that never was, a create of one that already did. Answering it as
+      // executed would be the boundary believing on the agent's behalf.
+      this.park(
+        call,
+        `${reason}; ${decl.tool} found the effect present before the call was sent, so its presence now does not show the call ran`,
+        "unknown-outcome",
+      );
+      return;
+    }
+    if (state === "present") {
       call.verified = "present";
       const now = Date.now();
       this.record(baseRow(call, this.state.upstreamName, "executed", 0, now));
-      const message = verifiedResponse(call, decl, outcome.text);
+      const message = verifiedResponse(call, decl, text);
       const remembered: Remembered = { receipt: call.receipt, result: message.result, at: now };
       // Remembered like any other success, so a repeat inside the window is answered, not run again.
-      const key = DedupeCache.keyFor(call);
-      if (key !== null)
-        this.dedupe.remember(key, remembered.receipt, remembered.result, remembered.at);
+      const dedupeKey = DedupeCache.keyFor(call);
+      if (dedupeKey !== null)
+        this.dedupe.remember(dedupeKey, remembered.receipt, remembered.result, remembered.at);
       this.settle(call, remembered);
       if (!this.state.ownIds.delete(keyOf(call.id))) this.deliver(message);
       this.resolveWaiter(call, { isError: false, text: "verified: the effect is present" });
@@ -1032,8 +1065,8 @@ export class Boundary extends EventEmitter {
     }
     // The client may have cancelled or gone while the verifier ran: then nothing is re-sent on its
     // behalf, and the call waits for an operator instead.
-    const listening = this.idMap.has(keyOf(call.id)) || this.state.ownIds.has(keyOf(call.id));
-    if (absent && listening) {
+    const listening = this.idMap.has(key) || this.state.ownIds.has(key);
+    if (state === "absent" && listening) {
       // The world says nothing landed, so a second send cannot duplicate anything.
       call.verified = "absent";
       call.attempts++;

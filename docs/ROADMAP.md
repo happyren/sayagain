@@ -240,6 +240,14 @@ Explicitly not built
   ledger by hand. The numbers it moves: the share of host-configured servers
   whose calls reach the boundary, and the count of doctor errors and warnings
   on a first run.
+- The harness, calibrated (0.18.0, docs/measurement.md 5.6): the faults are
+  now drawn per step from the failure-class mix the 30-day audit measured,
+  at its rate, so the boundary is scored against the traffic it will meet;
+  a chaos shim runs the same protocol in front of any real stdio server; a
+  sweep over operator rule, read-back and attempt cap prints each
+  difference as a range across settings rather than a point. Its first
+  finding was the pre-image (ADR-0013 amendment): a verifier that finds an
+  effect already present before the call proves nothing about the call.
 - Verification before resumption (0.17.0, ADR-0013): the harness showed a
   hold decided blind is lossy either way, so a tool may now declare how to
   read its effect back (spec 8.3) and the boundary looks before it re-sends
