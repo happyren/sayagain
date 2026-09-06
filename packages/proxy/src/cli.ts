@@ -386,7 +386,7 @@ function renderAbReport(r: AbReport): string {
   out.push("");
   line("", "control", "treatment");
   line("calls", c.calls, t.calls);
-  line("sessions (clusters)", c.sessions, t.sessions);
+  line("sessions (the coin's unit)", c.sessions, t.sessions);
   line("writes", c.writes, t.writes);
   line(
     "failures (M1)",
@@ -437,9 +437,14 @@ function renderAbReport(r: AbReport): string {
   };
   // Risk first, then cost (ADR-0009 decision 2).
   show("unacknowledged (primary, risk)", d.unacknowledgedPer1kWrites, "per 1K writes");
-  show("failure tax (primary, cost)", d.recoveryBytesPerCallRobust, "bytes/call");
-  show("  the same, normal interval", d.recoveryBytesPerCall, "bytes/call");
+  show("failure tax (primary, cost)", d.recoveryBytesPerCall, "bytes/call");
+  show("  the same, by session", d.recoveryBytesPerCallRobust, "bytes/call");
   show("failure rate (secondary)", d.failureRatePct, "points");
+  out.push("");
+  out.push(
+    `Clustering: ${r.clustering.clusters} sessions, failures correlated within one at ${r.clustering.icc} (design effect ${r.clustering.designEffect}). ` +
+      `A rate interval is widened by that; ${r.clustering.designEffect > 1.5 ? `each call is worth about ${(1 / r.clustering.designEffect).toFixed(2)} of an independent one for the rates` : "the calls are close to independent"}.`,
+  );
   out.push("");
   if (r.rate.perArmPerDay !== null)
     out.push(
@@ -449,10 +454,13 @@ function renderAbReport(r: AbReport): string {
           : "; the target is met"
       }`,
     );
-  else out.push("Filling too briefly to project a rate yet (two days of armed calls are needed)");
+  else
+    out.push(
+      "Too early to project a rate: a fortnight of armed calls is needed before a date means anything.",
+    );
   const p = r.power;
   const cut = (x: number | null) =>
-    x === null ? "nothing short of elimination" : `a ${Math.round(100 * x)}% cut`;
+    x === null ? "no cut, not even elimination" : `a ${Math.round(100 * x)}% cut`;
   out.push(
     p.estimable
       ? `At ${p.callsPerArm} calls per arm, this much traffic can distinguish: unacknowledged writes ${cut(p.unacknowledgedCut)}, failure rate ${cut(p.failureRateCut)}, failure tax ${p.failureTaxBytes === null ? "not estimable" : `a change of ${p.failureTaxBytes} bytes per call`} (docs/measurement.md 5.4).`

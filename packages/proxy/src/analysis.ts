@@ -723,6 +723,11 @@ export interface AbReport {
   };
   /** How fast the arms are filling, and when the smaller one reaches the target at that rate. */
   rate: { perArmPerDay: number | null; daysToTarget: number | null; targetDate: string | null };
+  /**
+   * What the sample is worth once the clustering is counted: the coin is flipped per session, and
+   * failures come in runs inside one, so calls carry less than their number in information.
+   */
+  clustering: { clusters: number; icc: number; designEffect: number };
   /** What a sample of this size can distinguish, from the variance and rates seen so far. */
   power: {
     /** False while the control arm is too small to estimate a baseline; the figures are then null. */
@@ -740,19 +745,59 @@ export interface AbReport {
 const Z = 1.96;
 
 /** Wilson interval for k of n, as a fraction. */
-const wilsonFrac = (k: number, n: number): { p: number; low: number; high: number } => {
+/**
+ * Wilson interval for k of n. `nEff` is the effective sample size: the coin is flipped per session,
+ * and failures cluster inside one, so n calls carry less information than n independent draws
+ * (docs/measurement.md 5.4). The point estimate uses n; the width uses nEff.
+ */
+const wilsonFrac = (k: number, n: number, nEff = n): { p: number; low: number; high: number } => {
   if (!n) return { p: 0, low: 0, high: 0 };
   const p = k / n;
-  const denom = 1 + (Z * Z) / n;
-  const centre = (p + (Z * Z) / (2 * n)) / denom;
-  const half = (Z * Math.sqrt((p * (1 - p)) / n + (Z * Z) / (4 * n * n))) / denom;
+  const m = Math.max(1, nEff);
+  const denom = 1 + (Z * Z) / m;
+  const centre = (p + (Z * Z) / (2 * m)) / denom;
+  const half = (Z * Math.sqrt((p * (1 - p)) / m + (Z * Z) / (4 * m * m))) / denom;
   return { p, low: Math.max(0, centre - half), high: Math.min(1, centre + half) };
 };
 
+/**
+ * How much a clustered sample is worth: 1 + (mean cluster size - 1) x the intraclass correlation,
+ * by one-way analysis of variance over the streams. One means the calls are as good as independent.
+ */
+export function designEffect(groups: number[][]): { deff: number; icc: number; clusters: number } {
+  const sizes = groups.map((g) => g.length).filter((n) => n > 0);
+  const n = sizes.reduce((a, b) => a + b, 0);
+  const k = sizes.length;
+  if (k < 2 || n <= k) return { deff: 1, icc: 0, clusters: k };
+  const all = groups.flat();
+  const grand = all.reduce((a, b) => a + b, 0) / n;
+  let between = 0;
+  let within = 0;
+  for (const g of groups) {
+    if (!g.length) continue;
+    const m = g.reduce((a, b) => a + b, 0) / g.length;
+    between += g.length * (m - grand) ** 2;
+    for (const x of g) within += (x - m) ** 2;
+  }
+  const msB = between / (k - 1);
+  const msW = within / (n - k);
+  const m0 = (n - sizes.reduce((a, b) => a + b * b, 0) / n) / (k - 1);
+  const icc = msW > 0 || msB > 0 ? (msB - msW) / (msB + (m0 - 1) * msW) : 0;
+  const safe = Number.isFinite(icc) ? Math.max(0, Math.min(1, icc)) : 0;
+  return { deff: Math.max(1, 1 + (n / k - 1) * safe), icc: safe, clusters: k };
+}
+
 /** Newcombe's hybrid score interval for a difference of proportions (control minus treatment). */
-function proportionDiff(k1: number, n1: number, k2: number, n2: number, scale: number): ArmDiff {
-  const a = wilsonFrac(Math.min(k1, n1), n1);
-  const b = wilsonFrac(Math.min(k2, n2), n2);
+function proportionDiff(
+  k1: number,
+  n1: number,
+  k2: number,
+  n2: number,
+  scale: number,
+  deff = 1,
+): ArmDiff {
+  const a = wilsonFrac(Math.min(k1, n1), n1, n1 / deff);
+  const b = wilsonFrac(Math.min(k2, n2), n2, n2 / deff);
   const delta = a.p - b.p;
   const low = delta - Math.sqrt((a.p - a.low) ** 2 + (b.high - b.p) ** 2);
   const high = delta + Math.sqrt((a.high - a.p) ** 2 + (b.p - b.low) ** 2);
@@ -807,8 +852,13 @@ export const AB_MINIMUM_DAYS = 84;
 
 /** z for 80% power, alongside Z for a 95% interval. */
 const Z_POWER = 0.8416212;
-/** Resamples for the bootstrap interval: enough for a stable 95% percentile, cheap enough to run. */
-const BOOTSTRAP = 2000;
+/**
+ * Resamples for the bootstrap interval. Two thousand left the verdict's flag moving with the seed on
+ * a borderline sample; ten thousand holds it steady and still runs in well under a second.
+ */
+const BOOTSTRAP = 10_000;
+/** Resampling more clusters than this per arm buys nothing and costs seconds. */
+const BOOTSTRAP_CAP = 20_000;
 
 /** A small deterministic generator, so the same ledger always produces the same interval. */
 function seeded(seed: number): () => number {
@@ -825,39 +875,61 @@ function seeded(seed: number): () => number {
 const meanOf = (xs: number[]): number =>
   xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
 
+/** One session's contribution to an arm: what it cost to recover, over how many calls. */
+interface Cluster {
+  calls: number;
+  bytes: number;
+}
+
 /**
- * Percentile bootstrap for a difference of means (control minus treatment). The per-call cost series
- * is mostly zeros with a few very large values, where a normal interval is the wrong shape.
+ * Percentile bootstrap for the difference in cost per call, control minus treatment, resampling the
+ * unit the coin is flipped on: whole sessions, not single calls. Each session contributes its total
+ * recovery bytes and its call count, and an arm's figure is one total over the other, so sessions of
+ * different lengths weigh what they are worth. It is printed beside the normal interval, which stays
+ * the pre-registered primary; this one says whether the clustering changes the answer.
  */
-function bootstrapDiff(a: number[], b: number[]): ArmDiff {
-  const delta = meanOf(a) - meanOf(b);
+function clusterBootstrapDiff(a: Cluster[], b: Cluster[]): ArmDiff {
+  const ratio = (cs: Cluster[]): number => {
+    let bytes = 0;
+    let calls = 0;
+    for (const c of cs) {
+      bytes += c.bytes;
+      calls += c.calls;
+    }
+    return calls ? bytes / calls : 0;
+  };
+  const delta = ratio(a) - ratio(b);
   const r = (v: number) => Math.round(v);
   if (a.length < 2 || b.length < 2)
     return {
-      control: r(meanOf(a)),
-      treatment: r(meanOf(b)),
+      control: r(ratio(a)),
+      treatment: r(ratio(b)),
       delta: r(delta),
       low: null,
       high: null,
       distinguishable: false,
     };
   const rand = seeded(0x5a11a9a1);
+  const draw = (cs: Cluster[]): number => {
+    const take = Math.min(cs.length, BOOTSTRAP_CAP);
+    let bytes = 0;
+    let calls = 0;
+    for (let i = 0; i < take; i++) {
+      const c = cs[(rand() * cs.length) | 0] as Cluster;
+      bytes += c.bytes;
+      calls += c.calls;
+    }
+    return calls ? bytes / calls : 0;
+  };
   const draws: number[] = [];
-  for (let i = 0; i < BOOTSTRAP; i++) {
-    let sa = 0;
-    for (let j = 0; j < a.length; j++) sa += a[(rand() * a.length) | 0] as number;
-    let sb = 0;
-    for (let j = 0; j < b.length; j++) sb += b[(rand() * b.length) | 0] as number;
-    draws.push(sa / a.length - sb / b.length);
-  }
+  for (let i = 0; i < BOOTSTRAP; i++) draws.push(draw(a) - draw(b));
   draws.sort((x, y) => x - y);
-  const at = (q: number) =>
-    draws[Math.min(draws.length - 1, Math.max(0, Math.round(q * (draws.length - 1))))] as number;
-  const low = at(0.025);
-  const high = at(0.975);
+  // The textbook percentile endpoints: order statistics floor(0.025(B+1)) and ceil(0.975(B+1)).
+  const low = draws[Math.max(0, Math.floor(0.025 * (BOOTSTRAP + 1)) - 1)] as number;
+  const high = draws[Math.min(draws.length - 1, Math.ceil(0.975 * (BOOTSTRAP + 1)) - 1)] as number;
   return {
-    control: r(meanOf(a)),
-    treatment: r(meanOf(b)),
+    control: r(ratio(a)),
+    treatment: r(ratio(b)),
     delta: r(delta),
     low: r(low),
     high: r(high),
@@ -914,6 +986,9 @@ export function abReport(
         }
       : { first: null, last: null, days: 0 };
   const series: Record<"control" | "treatment", number[]> = { control: [], treatment: [] };
+  // The coin is flipped per session, so the session is what an interval may resample.
+  const clusters: Record<"control" | "treatment", Cluster[]> = { control: [], treatment: [] };
+  const failureFlags: Record<"control" | "treatment", number[][]> = { control: [], treatment: [] };
   const arm = (which: "control" | "treatment"): ArmStats => {
     const own = rows.filter((r) => r.arm === which);
     const rep = report(own, { ...opts, until });
@@ -923,6 +998,15 @@ export function abReport(
       recoveries(own, { ...opts, since: opts.since }).map((x) => [x.row.receipt, x.bytes]),
     );
     series[which] = outcomes.map((r) => byReceipt.get(r.receipt) ?? 0);
+    for (const stream of streams(outcomes)) {
+      const own = stream.filter((r) => r.arm === which);
+      if (!own.length) continue;
+      clusters[which].push({
+        calls: own.length,
+        bytes: own.reduce((a, r) => a + (byReceipt.get(r.receipt) ?? 0), 0),
+      });
+      failureFlags[which].push(own.map((r) => (isFailure(r) ? 1 : 0)));
+    }
     const failures = rep.byServer.reduce((a, s) => a + s.failures, 0);
     const bytes = series[which];
     return {
@@ -956,15 +1040,18 @@ export function abReport(
   };
   const control = arm("control");
   const treatment = arm("treatment");
+  // How much the clustering costs, measured on the failure flag across both arms' sessions.
+  const clustering = designEffect([...failureFlags.control, ...failureFlags.treatment]);
   const differences = {
     recoveryBytesPerCall: meanDiff(series.control, series.treatment),
-    recoveryBytesPerCallRobust: bootstrapDiff(series.control, series.treatment),
+    recoveryBytesPerCallRobust: clusterBootstrapDiff(clusters.control, clusters.treatment),
     unacknowledgedPer1kWrites: proportionDiff(
       control.unacknowledged,
       control.writes,
       treatment.unacknowledged,
       treatment.writes,
       1000,
+      clustering.deff,
     ),
     failureRatePct: proportionDiff(
       control.failures,
@@ -972,6 +1059,7 @@ export function abReport(
       treatment.failures,
       treatment.calls,
       100,
+      clustering.deff,
     ),
   };
   const factorsOf = (
@@ -987,8 +1075,14 @@ export function abReport(
   };
 
   const smaller = Math.min(control.calls, treatment.calls);
-  // Two days of armed traffic before a rate means anything; below that the projection would be noise.
-  const perArmPerDay = experiment.days >= 2 ? +(smaller / experiment.days).toFixed(1) : null;
+  // Elapsed time from the first armed call to now, not the span between the first and the last: idle
+  // days at the end are real days the experiment did not fill. A fortnight before projecting at all,
+  // because one busy afternoon would otherwise promise a date it cannot keep.
+  const elapsedDays =
+    experiment.first === null
+      ? 0
+      : Math.max(experiment.days, (until.getTime() - Date.parse(experiment.first)) / 86_400_000);
+  const perArmPerDay = elapsedDays >= 14 ? +(smaller / elapsedDays).toFixed(2) : null;
   const daysToTarget =
     perArmPerDay && perArmPerDay > 0
       ? Math.ceil(Math.max(0, target - smaller) / perArmPerDay)
@@ -1021,17 +1115,20 @@ export function abReport(
         : null,
     unacknowledgedCut:
       estimable && control.writes > 0 && control.unacknowledged > 0
-        ? detectableCut(control.unacknowledged / control.writes, target * writeShare)
+        ? detectableCut(
+            control.unacknowledged / control.writes,
+            (target * writeShare) / clustering.deff,
+          )
         : null,
     failureRateCut:
       estimable && control.failures > 0
-        ? detectableCut(control.failures / control.calls, target)
+        ? detectableCut(control.failures / control.calls, target / clustering.deff)
         : null,
   };
 
   const shortCalls = Math.max(0, target - Math.min(control.calls, treatment.calls));
   const shortDays = Math.max(0, +(AB_MINIMUM_DAYS - experiment.days).toFixed(1));
-  const cost = differences.recoveryBytesPerCallRobust;
+  const cost = differences.recoveryBytesPerCall;
   const risk = differences.unacknowledgedPer1kWrites;
   const say = (d: ArmDiff, unit: string) => {
     if (d.low === null || d.high === null) return `not estimable (${d.delta} ${unit})`;
@@ -1062,6 +1159,11 @@ export function abReport(
     minimumDays: AB_MINIMUM_DAYS,
     experiment,
     taxFactors,
+    clustering: {
+      clusters: clustering.clusters,
+      icc: +clustering.icc.toFixed(3),
+      designEffect: +clustering.deff.toFixed(1),
+    },
     rate,
     power,
     outside,

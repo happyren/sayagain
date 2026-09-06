@@ -10,25 +10,34 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- `sayagain report --ab` says how fast the arms are filling, when the smaller
-  one reaches the target at that rate, and what a sample of that size can
-  distinguish given the spread seen so far. The figures are withheld until
-  there is enough of the control arm to mean anything.
-- The failure tax is also printed as its two factors, the failure rate and
-  the bytes a failure costs, which move for different reasons.
+- `sayagain report --ab` reports the clustering the experiment actually has:
+  how many sessions the coin was flipped over, how strongly failures correlate
+  inside one, and the resulting design effect. Rate intervals are widened by
+  it. On this machine's own 30 days the design effect is near ten, and a
+  simulated null shows that an interval ignoring it covers at 0.47 against a
+  nominal 0.95 and calls the boundary a winner 27% of the time.
+- The fill rate, the date the target is met at that rate, and what a sample of
+  that size can distinguish. The projection waits for a fortnight of armed
+  calls and measures against elapsed time, so a busy afternoon cannot promise
+  a date it will not keep.
+- The failure tax is also printed as its two factors, the failure rate and the
+  bytes a failure costs, which move for different reasons.
+- A cluster bootstrap over sessions is printed beside the failure tax's normal
+  interval, as a check on whether the clustering changes that answer. The
+  normal interval remains the pre-registered primary: simulation puts it at
+  0.95 coverage for this outcome's shape, and the recovery-byte series does
+  not cluster.
 
 ### Changed
 
-- The interval for the failure tax is a seeded percentile bootstrap over the
-  per-call series, and the verdict reads it. The series is mostly zeros with a
-  few very large values, where a normal interval is the wrong shape; the
-  normal interval is still printed beside it. Same ledger, same interval.
 - The pre-registered minimum span is 12 weeks, not two. At the rate this
-  machine's wrappable servers produce (about 47 calls a day through the
-  boundary), 2,000 calls per arm takes about 85 days. Recorded in
-  docs/measurement.md 5.4 with the power analysis behind it, written while the
-  ledger still held only its commissioning rows.
-
+  machine's wrappable servers produce, 2,000 calls per arm takes about 85
+  days.
+- `docs/measurement.md` 5.4 carries the power analysis and names its
+  instrument. Its conclusion is that this experiment can speak to the failure
+  tax and cannot speak to M9, the north-star risk metric, on any timescale
+  worth waiting for: the calls arrive in too few independent sessions. That is
+  recorded now, with the ledger still holding only its commissioning rows.
 
 ## [0.14.0] - 2026-09-06
 

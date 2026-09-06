@@ -453,9 +453,8 @@ describe("analysis", () => {
       r.taxFactors.treatment.failureRatePct,
     );
     expect(r.taxFactors.control.bytesPerFailure).toBeGreaterThan(0);
-    // Both arms are past the target, so the rate is measurable and nothing is left to fill.
-    expect(r.rate.perArmPerDay as number).toBeGreaterThan(0);
-    expect(r.rate.daysToTarget).toBe(0);
+    // Four days of calls: too short to promise a date, whatever the arms already hold.
+    expect(r.rate.perArmPerDay).toBeNull();
     expect(r.power.estimable).toBe(true);
     expect(r.power.callsPerArm).toBe(100);
     expect(r.power.failureRateCut === null || r.power.failureRateCut > 0).toBe(true);
@@ -489,17 +488,26 @@ describe("analysis", () => {
             tool: "echo",
             at: i,
             arm,
-            session: arm,
+            session: `${arm}-${i}`, // one call each: no clustering, so the plain Newcombe maths shows
             ...(i < failures ? { isError: true, errorClass: "semantic" as const } : {}),
           }),
         );
-    const d = abReport(rows, { since: new Date(t0 - 1000), until: new Date(t0 + 1_000_000) })
-      .differences.failureRatePct;
+    const plain = abReport(rows, { since: new Date(t0 - 1000), until: new Date(t0 + 1_000_000) });
+    const d = plain.differences.failureRatePct;
     // By hand: Wilson 10/100 is 0.0552 to 0.1744, 5/100 is 0.0215 to 0.1118; Newcombe's limits
     // are 0.05 - sqrt(0.0448^2 + 0.0618^2) and 0.05 + sqrt(0.0744^2 + 0.0285^2).
     expect(d).toMatchObject({ control: 10, treatment: 5, delta: 5, distinguishable: false });
     expect(d.low).toBeCloseTo(-2.63, 1);
     expect(d.high).toBeCloseTo(12.96, 1);
+    expect(plain.clustering.designEffect).toBe(1);
+
+    // The same counts, every call in one session per arm: the coin was flipped twice, not 200 times,
+    // and the interval has to say so or it would call a null result a win.
+    const clustered = rows.map((x) => ({ ...x, session: x.arm as string }));
+    const c = abReport(clustered, { since: new Date(t0 - 1000), until: new Date(t0 + 1_000_000) });
+    expect(c.clustering.designEffect).toBeGreaterThan(1);
+    expect(c.differences.failureRatePct.low as number).toBeLessThan(d.low as number);
+    expect(c.differences.failureRatePct.high as number).toBeGreaterThan(d.high as number);
   });
 
   it("parses durations and dates, and diffs shapes", () => {
