@@ -6,6 +6,39 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-06
+
+### Added
+
+- `sayagain report --ab` reports the clustering the experiment actually has:
+  how many sessions the coin was flipped over, how strongly failures correlate
+  inside one, and the resulting design effect. Rate intervals are widened by
+  it. On this machine's own 30 days the design effect is near ten, and a
+  simulated null shows that an interval ignoring it covers at 0.47 against a
+  nominal 0.95 and calls the boundary a winner 27% of the time.
+- The fill rate, the date the target is met at that rate, and what a sample of
+  that size can distinguish. The projection waits for a fortnight of armed
+  calls and measures against elapsed time, so a busy afternoon cannot promise
+  a date it will not keep.
+- The failure tax is also printed as its two factors, the failure rate and the
+  bytes a failure costs, which move for different reasons.
+- A cluster bootstrap over sessions is printed beside the failure tax's normal
+  interval, as a check on whether the clustering changes that answer. The
+  normal interval remains the pre-registered primary: simulation puts it at
+  0.95 coverage for this outcome's shape, and the recovery-byte series does
+  not cluster.
+
+### Changed
+
+- The pre-registered minimum span is 12 weeks, not two. At the rate this
+  machine's wrappable servers produce, 2,000 calls per arm takes about 85
+  days.
+- `docs/measurement.md` 5.4 carries the power analysis and names its
+  instrument. Its conclusion is that this experiment can speak to the failure
+  tax and cannot speak to M9, the north-star risk metric, on any timescale
+  worth waiting for: the calls arrive in too few independent sessions. That is
+  recorded now, with the ledger still holding only its commissioning rows.
+
 ## [0.14.0] - 2026-09-06
 
 ### Added

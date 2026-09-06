@@ -85,7 +85,8 @@ describe("cli analysis", () => {
     expect(out).toContain("Say Again A/B:");
     expect(out).toContain("control      treatment");
     expect(out).toContain("failure tax (primary, cost)");
-    expect(out).toContain("sessions (clusters)");
+    expect(out).toContain("sessions (the coin's unit)");
+    expect(out).toContain("Clustering:");
     expect(out.indexOf("unacknowledged (primary, risk)")).toBeLessThan(
       out.indexOf("failure tax (primary, cost)"),
     ); // risk first

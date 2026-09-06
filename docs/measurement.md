@@ -226,6 +226,76 @@ why:
   only; `daily` is predictable and confounded with day-of-week and
   workload, so `coinflip` is the default.
 
+Amendment, 2026-09-06 (0.15.0), written before the experiment has any data:
+the ledger held nine rows, all from commissioning, when these figures were
+computed, so nothing here is chosen with an outcome in view.
+
+**Instrument.** Every figure below comes from source T, the Claude Code
+transcripts, read by the same code `sayagain audit` uses (`scanTranscripts`
+then `sessionRows`, then the section 3 analysis), over the 30 days to
+2026-09-06, restricted to the servers the boundary can wrap. Bytes there are
+the transcript's record of a call and its result, which is a proxy for the
+wire bytes source L will record once the ledger fills; the two are not the
+same instrument and the proxy is the one these numbers rest on.
+
+**The rate.** This machine made 3,874 MCP calls in the window. 1,418 went to
+servers the boundary can wrap (docent 1,367, codegraph 50, pencil 1); the
+rest belong to servers the host provides itself, which no host file names and
+`import` cannot reach. The boundary sees about 47 calls a day, 24 per arm, so
+2,000 calls per arm arrives in about 85 days rather than the four weeks the
+runbook assumed. The population is docent-dominated: this measures the
+boundary on one server's traffic, and the whitepaper has to say so.
+
+**Calls are not the sample size.** The coin is flipped per session, and those
+1,418 calls arrived in 21 sessions, a mean of 67 calls each. Failures come in
+runs within a session: the intraclass correlation of the failure flag is
+0.13, giving a design effect near ten, so a call is worth about a tenth of an
+independent observation for anything counted as a rate. Simulating the
+pre-registered analysis under a true null with that clustering, a rate
+interval that ignores it covers at 0.47 against a nominal 0.95 and declares
+the boundary a winner 27% of the time. Widening the interval by the design
+effect restores coverage to 0.97 and the false rate to 0.02. The recovery-byte
+series does not cluster (its intraclass correlation is about zero: the spread
+within a session swamps the differences between sessions), so the failure tax
+is unaffected.
+
+**What the sample can and cannot answer**, with the clustering counted
+(failure rate 3.5%, unacknowledged writes 8 per 1,000 writes, recovery bytes
+per call mean 47,126 and standard deviation 422,990), at 95% and 80% power:
+
+| calls per arm | days | failure tax | unacknowledged writes | failure rate |
+|---|---|---|---|---|
+| 2,000 | 85 | a 80% cut | nothing detectable | nothing detectable |
+| 4,000 | 169 | a 56% cut | nothing detectable | an 81% cut |
+| 20,000 | 846 | a 25% cut | an 81% cut | a 42% cut |
+
+So this experiment, on this machine, can speak to the failure tax and cannot
+speak to M9, the north-star risk metric, on any timescale worth waiting for.
+That is a finding about the design, not about the boundary, and it is
+recorded here rather than discovered in December. The organic A/B continues,
+pre-registered as a test of the failure tax alone; the risk claim needs
+either a workload with many more independent sessions (protocol 5.2) or a
+fixture harness where each task is its own cluster (the shape of 5.3).
+
+**Changed by this amendment:**
+
+- The stopping rule is 2,000 calls per arm or 12 weeks of armed traffic,
+  whichever is later. `sayagain report --ab` prints the fill rate and the
+  date the target is met, after a fortnight of armed calls, measured against
+  elapsed time rather than the span between the first and last call.
+- Rate intervals carry the design effect measured from the ledger's own
+  sessions. The report prints the session count, the correlation and the
+  design effect beside them.
+- The failure tax keeps its normal interval as the primary, which simulation
+  puts at 0.95 coverage for this shape at this sample size. A cluster
+  bootstrap over sessions is printed beside it as a check on whether the
+  clustering changes the answer; it is not the primary, because the quantity
+  it corrects for is not present in this outcome.
+- The failure tax is also reported as its two factors, the failure rate and
+  the bytes a failure costs, which move for different reasons.
+- Nothing else changes: the outcomes, their order, the sign convention, the
+  decision rule and the arms are as amended earlier on 2026-09-06.
+
 ### 5.5 Registry scan (whitepaper launch)
 
 Run `@sayagain/lint` over every server in the public registry that
