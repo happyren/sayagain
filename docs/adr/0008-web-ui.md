@@ -102,3 +102,19 @@ does; nothing leaves the machine.
 - Screens are tested where they matter: the routes by the daemon tests,
   the pages by a smoke that fetches them and checks the CSP header and the
   absence of remote origins.
+
+## Amendment, 2026-09-06: the first screen
+
+The page opened on the holds inbox. After `sayagain up` (ADR-0014) holds
+are off, so the first thing a new operator saw was an empty screen. The
+page now opens on an overview that answers, in plain text and numbers, the
+three questions that person has: is it working (the daemon, its mode, each
+server's calls and last call, "no calls through the boundary yet" where
+that is so), what did the boundary do (the risk-first numbers for the
+last seven days, with a note while there are too few calls to read them),
+and what to do next (the doctor's findings with their fixes, or the one
+command that turns holds on). Every number comes from an endpoint the
+other screens already use, plus one new one, `/api/overview`, that
+composes the doctor's input from what the daemon already knows. The
+decision above stands: hand-written HTML, one module, no framework, no
+build step beyond `tsc`.

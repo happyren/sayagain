@@ -109,6 +109,49 @@ describe("daemon", () => {
     }
   };
 
+  it("serves the overview: the mode, every server with its window, and the doctor's findings", async () => {
+    const d = await boot("memory", {
+      registry: {
+        servers: { fake: { transport: "stdio", command: process.execPath, args: [fixture] } },
+        daemon: { hold: "never" },
+      },
+    });
+    const init = await rpc(d, "fake", initMsg);
+    await rpc(
+      d,
+      "fake",
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "echo", arguments: { a: 1 } },
+      },
+      init.session ? { session: init.session } : {},
+    );
+    const o = (await api(d, "/api/overview")) as {
+      daemon: { hold: string; version: string; startedAt: string };
+      servers: {
+        name: string;
+        started: boolean;
+        ready: boolean;
+        calls: number;
+        failures: number;
+      }[];
+      calls: number;
+      doctor: { severity: string; title: string; fix?: string }[];
+    };
+    expect(o.daemon).toMatchObject({ hold: "never", version: "0.4.0-test" });
+    expect(Date.parse(o.daemon.startedAt)).toBeGreaterThan(0);
+    expect(o.servers).toEqual([
+      expect.objectContaining({ name: "fake", started: true, ready: true, calls: 1, failures: 0 }),
+    ]);
+    expect(o.calls).toBe(1);
+    expect(o.doctor.find((f) => f.title.includes("holds are off"))).toMatchObject({
+      severity: "note",
+      fix: "sayagain up --hold",
+    });
+  });
+
   it("keeps the daemon-level hold default when the page or status re-reads the registry", async () => {
     // `sayagain up` writes daemon.hold: never; the page's own /api/servers call re-reads the file
     // and must not put every boundary back on hold-by-default while the page says holds are off.

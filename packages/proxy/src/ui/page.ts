@@ -41,6 +41,14 @@ article.orphaned { border-color: var(--warn); }
 .card .big { font-size: 26px; margin: 0; font-weight: 600; }
 .card p { margin: 2px 0; color: var(--muted); }
 h3 { font-size: 14px; margin: 18px 0 8px; }
+.finding { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.finding:last-child { border-bottom: none; }
+.finding .sev { min-width: 64px; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+.finding .sev.error { color: var(--bad); }
+.finding .sev.warning { color: var(--warn); }
+.finding .detail { color: var(--muted); }
+.finding code { white-space: nowrap; }
+.muted { color: var(--muted); }
 `;
 
 export const indexHtml = (version: string): string => `<!doctype html>
@@ -56,6 +64,7 @@ export const indexHtml = (version: string): string => `<!doctype html>
 <header class="top">
   <h1>Say Again? <span>${version}</span></h1>
   <nav>
+    <a href="#overview" data-screen="overview">Overview</a>
     <a href="#holds" data-screen="holds">Holds</a>
     <a href="#servers" data-screen="servers">Servers</a>
     <a href="#deadletters" data-screen="deadletters">Dead letters</a>
@@ -72,7 +81,8 @@ export const indexHtml = (version: string): string => `<!doctype html>
 </header>
 <main>
   <div id="status"></div>
-  <section id="screen-holds"><div id="holds"></div></section>
+  <section id="screen-overview"><div id="overview"></div></section>
+  <section id="screen-holds" hidden><div id="holds"></div></section>
   <section id="screen-servers" hidden><div id="servers"></div></section>
   <section id="screen-deadletters" hidden><div id="deadletters"></div></section>
   <section id="screen-ledger" hidden><p><input id="ledger-filter" placeholder="filter by server, tool, status or class" size="48"></p><div id="ledger"></div></section>

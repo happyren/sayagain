@@ -63,6 +63,107 @@ const table = (head: string[], rows: string[][]): string =>
 
 // ---------------------------------------------------------------- screens
 
+interface OverviewServer {
+  name: string;
+  transport: string;
+  started: boolean;
+  ready: boolean;
+  upstream: string | null;
+  sessions: number;
+  calls: number;
+  failures: number;
+  held: number;
+  lastSeen: string | null;
+}
+interface Finding {
+  severity: "error" | "warning" | "note" | "ok";
+  title: string;
+  detail?: string;
+  fix?: string;
+}
+interface Overview {
+  generatedAt: string;
+  window: { days: number };
+  daemon: { version: string; startedAt: string; listen: string; arm: string | null; hold: string };
+  servers: OverviewServer[];
+  calls: number;
+  doctor: Finding[];
+}
+
+/** Enough calls for the weekly numbers to mean something; below it the page says so instead. */
+const ENOUGH_CALLS = 200;
+
+/**
+ * The first screen: is it working, what did the boundary do, what to do next. Plain text and
+ * numbers, every one of them from an endpoint the other screens already use.
+ */
+async function renderOverview(): Promise<void> {
+  const [o, r] = await Promise.all([
+    api<Overview>("/api/overview"),
+    api<Json>("/api/report?since=7d"),
+  ]);
+  const ns = r.northStar as {
+    failureTaxBytesPer1kCalls: number;
+    unacknowledgedWritesPer1kWrites: number;
+  };
+  const b = r.boundary as Json;
+  const held = b.held as Json;
+  const calls = Number(r.calls ?? 0);
+  const early = calls < ENOUGH_CALLS;
+  const holdsOff = o.daemon.hold === "never";
+  const modeLine = holdsOff
+    ? "holds are <strong>off</strong>: observing, nothing waits for you. Receipts, safe retries, repairs and read-backs are on. When this page has shown you what the boundary sees, turn holds on with <code>sayagain up --hold</code>."
+    : `holds are <strong>on</strong> (${esc(o.daemon.hold)}): ${o.daemon.hold === "always" ? "every write" : "destructive calls and writes with an unknown outcome"} wait for you in <a href="#holds">Holds</a>; <code>sayagain up --observe</code> turns them off.`;
+  const problems = o.doctor.filter((f) => f.severity !== "ok");
+  const noTraffic = o.servers.filter((s) => s.calls === 0);
+  $("#overview").innerHTML = `
+<p>daemon ${esc(o.daemon.version)} · up since ${esc(fmtWhen(o.daemon.startedAt))} · ${esc(o.daemon.listen)}${o.daemon.arm ? ` · A/B arm ${esc(o.daemon.arm)}` : ""}</p>
+<p>${modeLine}</p>
+<h3>The last ${esc(o.window.days)} days</h3>
+${
+  early
+    ? `<p class="muted">${calls === 0 ? "No calls yet." : `${esc(calls)} call${calls === 1 ? "" : "s"} so far.`} The numbers below settle after a few hundred; until then read them as a sketch.${calls === 0 ? " If the hosts have been restarted and this stays at zero, the servers are still calling past the boundary: <code>sayagain doctor</code> says which." : ""}</p>`
+    : ""
+}
+<section class="cards">
+  <div class="card"><h3>unacknowledged writes</h3><p class="big">${esc(ns.unacknowledgedWritesPer1kWrites)}</p><p>per 1K writes without a known outcome (the risk number; lower is better)</p></div>
+  <div class="card"><h3>failure tax</h3><p class="big">${esc(kib(ns.failureTaxBytesPer1kCalls))}</p><p>recovery traffic per 1K calls</p></div>
+  <div class="card"><h3>calls</h3><p class="big">${esc(calls)}</p><p>${esc(r.writes)} writes</p></div>
+  <div class="card"><h3>the boundary did</h3><p>retried ${esc(b.retriesResolved)} · repaired ${esc(b.repairsResolved)} · held ✓${esc(held.approved)} ✗${esc(held.rejected)} ?${esc(held.undecided)} · dead-lettered ${esc(b.deadLettered)} · deduplicated ${esc(b.deduplicated)}</p><p><a href="#report">the full report</a></p></div>
+</section>
+<h3>Servers</h3>
+${
+  o.servers.length
+    ? table(
+        ["server", "state", "calls", "failed", "waiting", "last seen", ""],
+        o.servers.map((s) => [
+          esc(s.name),
+          s.started ? (s.ready ? `ready (${esc(s.upstream)})` : "starting") : "idle",
+          String(s.calls),
+          String(s.failures),
+          s.held ? `<a href="#holds">${esc(s.held)}</a>` : "0",
+          s.lastSeen ? esc(fmtWhen(s.lastSeen)) : "never",
+          s.calls === 0
+            ? `<span class="muted">no calls through the boundary yet${s.started ? "" : "; restart the host that uses it"}</span>`
+            : "",
+        ]),
+      )
+    : `<p class="empty">No servers registered. <code>sayagain up</code> wraps the ones your hosts have configured.</p>`
+}
+<h3>What to do next</h3>
+${
+  problems.length
+    ? problems
+        .map(
+          (f) =>
+            `<div class="finding"><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span><span><strong>${esc(f.title)}</strong>${f.detail ? ` <span class="detail">${esc(f.detail)}</span>` : ""}${f.fix ? `<br><code>${esc(f.fix)}</code>` : ""}</span></div>`,
+        )
+        .join("")
+    : `<p class="empty">Nothing to fix. ${noTraffic.length && o.servers.length ? "Some servers have not called yet; give them a session." : holdsOff ? "When you are ready for the boundary to stop destructive calls before they go: <code>sayagain up --hold</code>." : 'Held calls appear under <a href="#holds">Holds</a>.'}</p>`
+}
+<p class="muted">Servers a host provides itself (a browser, computer use, session tools) never pass through a config file and are not here; <code>sayagain audit</code> shows how much of your traffic that is.</p>`;
+}
+
 interface Hold {
   receipt: string;
   tool: string;
@@ -414,6 +515,7 @@ async function renderLearn(): Promise<void> {
 // ---------------------------------------------------------------- wiring
 
 const screens: Record<string, () => Promise<void>> = {
+  overview: renderOverview,
   holds: renderHolds,
   servers: renderServers,
   deadletters: renderDeadLetters,
@@ -424,9 +526,9 @@ const screens: Record<string, () => Promise<void>> = {
   learn: renderLearn,
 };
 
-let current = location.hash.slice(1) || "holds";
+let current = location.hash.slice(1) || "overview";
 async function show(name: string): Promise<void> {
-  const screen = Object.hasOwn(screens, name) ? name : "holds";
+  const screen = Object.hasOwn(screens, name) ? name : "overview";
   current = screen;
   $("#window").hidden = !["tools", "errors", "report"].includes(screen);
   for (const a of document.querySelectorAll<HTMLAnchorElement>("nav a"))
@@ -512,7 +614,7 @@ document.addEventListener("click", (ev) => {
   const nav = t.closest<HTMLAnchorElement>("nav a[data-screen]");
   if (nav) {
     ev.preventDefault();
-    location.hash = nav.dataset.screen ?? "holds";
+    location.hash = nav.dataset.screen ?? "overview";
   }
 });
 window.addEventListener("hashchange", () => void show(location.hash.slice(1)));
@@ -530,6 +632,17 @@ events.addEventListener(
   () => void (current === "deadletters" && renderDeadLetters()),
 );
 events.addEventListener("row", () => void (current === "ledger" && loadLedger().catch(report)));
+// The overview re-reads several endpoints, so a burst of rows refreshes it once, a little later.
+let overviewTimer: ReturnType<typeof setTimeout> | undefined;
+const refreshOverview = () => {
+  if (current !== "overview" || overviewTimer) return;
+  overviewTimer = setTimeout(() => {
+    overviewTimer = undefined;
+    if (current === "overview") renderOverview().catch(report);
+  }, 2000);
+};
+for (const name of ["row", "hold", "hold-decided", "dead-letter"])
+  events.addEventListener(name, refreshOverview);
 events.addEventListener("learned", () => void (current === "learn" && renderLearn().catch(report)));
 events.onerror = () => {
   // The browser reconnects on its own after a dropped connection, but not after a refused one.

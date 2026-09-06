@@ -240,6 +240,9 @@ Explicitly not built
   ledger by hand. The numbers it moves: the share of host-configured servers
   whose calls reach the boundary, and the count of doctor errors and warnings
   on a first run.
+- The overview (0.20.0, ADR-0008 amended): the page's first screen answers
+  is it working, what did the boundary do, what next, in plain text and
+  numbers, so `up` hands over to a page that says something on day one.
 - One command up (0.19.0, ADR-0014): `sayagain up` prints its plan, wraps
   every server the hosts have configured, starts the daemon, brings up the
   page and ends with `doctor`; `sayagain down` puts it all back. It observes

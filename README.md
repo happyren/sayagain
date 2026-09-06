@@ -61,8 +61,10 @@ Say Again 0.19.0 will:
   4. observe first: nothing waits for you. Receipts, safe retries, repairs and read-backs are on; holds are off until you run: sayagain up --hold
 ```
 
-Then restart the hosts. `sayagain up --hold` turns holds on once the page has
-shown you what the boundary sees (`--observe` turns them off again; a plain
+Then restart the hosts. The page opens on an overview: whether calls are
+flowing, what the boundary did in the last seven days, and what to do next.
+`sayagain up --hold` turns holds on once the page has shown you what the
+boundary sees (`--observe` turns them off again; a plain
 re-run keeps the mode it finds); `sayagain down` puts every host back and
 stops the daemon (the ledger, holds and backups stay). The pieces, one at a
 time:

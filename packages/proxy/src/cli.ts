@@ -84,6 +84,7 @@ import { type Intervention, LearnedStore, upstreamReport } from "./learned.js";
 import { defaultLedgerPath, JsonlLedger, type LedgerRow, readLedger } from "./ledger.js";
 import { daemonUrlFor, ejectHost, importHost, inspectHost, installHost } from "./onboarding.js";
 import { OtlpExporter, otlpHeadersFromEnv, resolveOtlpEndpoint } from "./otlp.js";
+import { hostRowsFor } from "./overview.js";
 import { type HoldMode, parseClassOverrides } from "./policy.js";
 import {
   addServer,
@@ -293,7 +294,6 @@ function takeFlag(args: string[], name: string): boolean {
   return true;
 }
 
-/** Is a Claude Code session running? It rewrites ~/.claude.json when it exits. */
 /** The operator page's URL for a running daemon, with the token the page needs. */
 function uiUrl(info: DaemonInfo): string {
   // daemon.json is the user's own 0600 file, but the URL still goes to another program: only a
@@ -329,6 +329,7 @@ async function openInBrowser(url: string): Promise<void> {
   child.unref();
 }
 
+/** Is a Claude Code session running? It rewrites ~/.claude.json when it exits. */
 function claudeCodeRunning(): boolean {
   if (process.platform === "win32") return false;
   try {
@@ -1099,25 +1100,7 @@ export async function main(argv: string[]): Promise<number> {
     }
 
     // ---- doctor
-    const hostRows = hostFiles(process.cwd(), ["user", "local", "project"]).map((f) => {
-      const base = {
-        label: HOSTS[f.host].label,
-        host: f.host as string,
-        scope: f.scope as string,
-        file: f.file,
-        project: f.project,
-        exists: f.exists,
-        servers: [] as string[],
-        wrapped: [] as string[],
-        error: undefined as string | undefined,
-      };
-      if (!f.exists) return base;
-      try {
-        return { ...base, ...inspectHost(f) };
-      } catch (err) {
-        return { ...base, error: err instanceof Error ? err.message : String(err) };
-      }
-    });
+    const hostRows = hostRowsFor(process.cwd(), ["user", "local", "project"]);
     const servers: DoctorServer[] = [];
     for (const [name, cfg] of Object.entries(registry.servers)) {
       // The project a host ran this server in, recorded by import; older registries have none.

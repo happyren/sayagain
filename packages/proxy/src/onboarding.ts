@@ -18,7 +18,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
-import { parseListen } from "./daemon.js";
 import { homePath } from "./home.js";
 import { HOSTS, type HostSpec, projectRootOf, type Target } from "./hosts.js";
 import { detectIndent, parseJsonc } from "./jsonc.js";
@@ -26,6 +25,7 @@ import { ensureLauncher, launcherPath } from "./launcher.js";
 import {
   loadOrCreateToken,
   loadRegistry,
+  parseListen,
   type Registry,
   type ServerConfig,
   saveRegistry,
