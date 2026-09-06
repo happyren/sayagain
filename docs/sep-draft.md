@@ -6,7 +6,7 @@
   the process prefers it there)
 - Author: Kaixiang Ren (happyren)
 - Created: 2026-09-05
-- Reference implementation: `@sayagain/proxy`, `@sayagain/sdk`, `@sayagain/lint`; the convention in `spec/intent-metadata.md` (v0.1.7)
+- Reference implementation: `@sayagain/proxy`, `@sayagain/sdk`, `@sayagain/lint`; the convention in `spec/intent-metadata.md` (v0.1.9)
 
 ## Abstract
 

@@ -2,7 +2,7 @@
 
 | Field          | Value                                             |
 | -------------- | ------------------------------------------------- |
-| Status         | Draft v0.1.8                                      |
+| Status         | Draft v0.1.9                                      |
 | Namespace      | `sh.sayagain/`                                  |
 | Applies to     | MCP specification 2026-07-28 and later            |
 | License        | Apache-2.0 (implementable by anyone, no attribution required in code) |
@@ -328,6 +328,14 @@ declared. A result the boundary answered on the strength of a verifier
 carries `sh.sayagain/verified` in its `_meta` with the verifier's tool name
 and the effect read.
 
+A verifier that finds the effect present afterwards proves the call only
+if the effect was absent before it: a deletion of a record that never
+existed and a creation of one that already did both read back as present.
+A boundary that holds a call before sending it SHOULD read the effect
+through the verifier while the call is held, and MUST NOT answer the call
+as executed on a verifier that finds the effect present unless that
+pre-image found it absent; such a call is held as inconclusive.
+
 Note: `@sayagain/lint` reports a tool that is neither read-only nor
 idempotent and carries no `sh.sayagain/compensation` key as informational
 (`annotations/compensation`), and likewise one that carries no
@@ -367,3 +375,4 @@ and the schema shim (section 7) are optional features.
 - v0.1.6 (2026-09-05): `repair.rule` may be `learned:<rule>` for a coercion the boundary derived from its own ledger (5.4).
 - v0.1.7 (2026-09-05): section 8, tool declarations: `sh.sayagain/idempotency` and `sh.sayagain/compensation` in a tool's `_meta`; former sections 8 to 10 are now 9 to 11.
 - v0.1.8 (2026-09-06): 8.3, `sh.sayagain/verify`, the read-only call that says whether a write's effect is present, and `sh.sayagain/verified` on a result the boundary answered on its strength.
+- v0.1.9 (2026-09-06): 8.3, the pre-image: a verifier that finds an effect present proves the call only if the effect was absent before the call was sent.

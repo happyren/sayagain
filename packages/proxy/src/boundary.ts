@@ -84,7 +84,15 @@ export interface PendingCall {
   verifies?: string;
   /** The outcome was unknown and the boundary read it back (spec 8.3): what it found. */
   verified?: "present" | "absent";
+  /**
+   * For a call held before it was sent: whether its effect was already in the world, read while
+   * the operator decided. A verifier answer that matches it proves nothing about the call.
+   */
+  preImage?: Promise<EffectState>;
 }
+
+/** What a verifier found: the call's effect is in the world, is not, or it could not say. */
+export type EffectState = "present" | "absent" | "inconclusive";
 
 export interface BoundaryState {
   pending: Map<string, PendingCall>;

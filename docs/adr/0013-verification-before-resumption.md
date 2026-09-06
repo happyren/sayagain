@@ -107,3 +107,35 @@ version does.
   from turning a read-back into a second write.
 - The spec moves to v0.1.8. Servers that already declare compensation gain
   one more line to write; the harness's own server writes it.
+
+## Amendment, 2026-09-06: the pre-image
+
+The harness, once it injected the measured failure mix, found the mirror
+error this decision had left open. A destructive call held before sending
+was approved and timed out; the verifier read the record as absent; absence
+was the declared effect; the call was answered as executed. The record had
+never existed: an earlier create had failed and the agent went on. Nothing
+had run, and the boundary said something had. The same shape exists for a
+create whose id already exists: a verifier that reads the record as present
+cannot tell this call's work from the record that was already there.
+
+**A verifier answer that matches the pre-image proves nothing about the
+call.** For a call the boundary holds before sending, whether because it is
+destructive or because its arguments were repaired, it reads the effect
+through the declared verifier while the operator decides, so the read costs
+no waiting, and sends the call only once that read has returned, so the
+read cannot see the call's own effect. After an unknown outcome, a verifier
+that finds the effect present is conclusive only if the pre-image found it
+absent; if the pre-image found it present, or could not say, the call is
+held as inconclusive, with the reason saying which. The pre-image is one
+more of the boundary's own read-only calls, with its own ledger row marked
+with the receipt it checked.
+
+A write that is not held before sending has no pre-image, and a verifier
+that finds its effect present is read as before. That leaves the create-on-
+an-existing-id case open for unheld writes; it is rarer than the destructive
+case, since the agent chose the id, and reading before every verifiable
+write would cost a call on the path where nothing goes wrong. It is
+recorded here as the known limit rather than papered over.
+
+The spec moves to v0.1.9.
