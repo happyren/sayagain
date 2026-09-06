@@ -119,13 +119,18 @@ import { wrap } from "./wrap.js";
 
 const USAGE = `sayagain ${PROXY_VERSION}
 
-  sayagain up [--hold [destructive|always|never] | --observe] [--open] [--project] [--dry-run] [--no-start]
+  sayagain up [--hold [destructive|always|never] | --observe] [--open] [--project] [--force] [--dry-run] [--no-start] [--no-probe]
       One command: wrap every server your hosts have configured, start the daemon, and bring up its page.
       Says what it will do before it does it. A first run observes: nothing waits for you until you run it
       again with --hold, which holds destructive calls and writes with an unknown outcome for your decision;
       later runs keep the mode they find, and --observe turns holds off again. --open opens the page when
       the daemon is up; --dry-run prints the plan and changes nothing; --no-start leaves the daemon to you
-      and skips the doctor run at the end; --project includes the project-scope files under this directory.
+      and skips the doctor run at the end; --project includes the project-scope files under this directory;
+      --force replaces a registered server whose host entry now names a different command; --no-probe leaves
+      the servers unstarted at the end, so the tool classes go unchecked. A daemon from another install is
+      restarted, unless a live call is waiting for a decision. While the A/B protocol runs, a first run keeps
+      holds on (the treatment arm is the boundary as shipped), and a restart keeps what the running daemon
+      does, until you say --observe.
   sayagain down [--keep] [--prune] [--project] [--dry-run]
       Put every host back the way it was and stop the daemon. The ledger, holds and backups stay.
       --keep leaves the servers registered; --prune also removes entries whose server is no longer registered.
@@ -1196,6 +1201,8 @@ export async function main(argv: string[]): Promise<number> {
       if (takeFlag(opts, "--observe")) holdArg = "never";
     }
     const open = command === "up" ? takeFlag(opts, "--open") : false;
+    const force = command === "up" ? takeFlag(opts, "--force") : false;
+    const noProbe = command === "up" ? takeFlag(opts, "--no-probe") : false;
     const noStart = command === "up" ? takeFlag(opts, "--no-start") : false;
     const keep = command === "down" ? takeFlag(opts, "--keep") : false;
     const prune = command === "down" ? takeFlag(opts, "--prune") : false;
@@ -1281,7 +1288,34 @@ export async function main(argv: string[]): Promise<number> {
     // A first install observes; a later run keeps the mode it finds unless told otherwise, so a
     // second `up` after `up --hold` does not quietly turn holds off again.
     const current = registry.daemon?.hold;
-    const mode: HoldMode = holdArg ?? current ?? "never";
+    // While the A/B protocol runs, its treatment arm is pre-registered as the boundary as shipped:
+    // a first run keeps holds on, and changing them is an amendment to say out loud.
+    const experiment =
+      registry.daemon?.arm && registry.daemon.arm !== "off" ? registry.daemon.arm : undefined;
+    // A daemon from another install keeps its own code until it restarts; `up` restarts it, unless
+    // a live call is waiting for a decision, which a restart would dead-letter. A hold that came
+    // back orphaned from an earlier daemon, or one a `wrap` process holds, is not lost to it.
+    const running = await liveDaemon();
+    const stale = running !== null && running.version !== PROXY_VERSION && !noStart;
+    const waiting = stale
+      ? (await allHolds().catch(() => [])).filter((h) => !h.orphaned && h.pid === running?.pid)
+          .length
+      : 0;
+    // What the running daemon applies to servers without a hold of their own. A daemon older than
+    // 0.19.0 never read daemon.hold and holds destructive calls (ADR-0004).
+    const runningHold: HoldMode | undefined = running
+      ? ((((await daemonStatus().catch(() => null))?.health as { hold?: unknown } | undefined)
+          ?.hold as HoldMode | null | undefined) ?? "destructive")
+      : undefined;
+    // During an experiment a restart keeps what the running daemon does, whatever the file says:
+    // the file may carry a default that daemon never read, and the treatment arm must not move.
+    const keepRunning = experiment !== undefined && stale && holdArg === undefined;
+    const mode: HoldMode =
+      holdArg ??
+      (keepRunning && runningHold
+        ? runningHold
+        : (current ?? (experiment ? "destructive" : "never")));
+    const modeExplained = keepRunning && current !== undefined && current !== mode;
     const modeLine =
       mode === "never"
         ? "  4. observe first: nothing waits for you. Receipts, safe retries, repairs and read-backs are on; holds are off until you run: sayagain up --hold"
@@ -1297,7 +1331,29 @@ export async function main(argv: string[]): Promise<number> {
         modeLine,
         ...(current !== undefined && current !== mode
           ? [
-              `     holds were ${current === "never" ? "off" : "on"}; this run turns them ${mode === "never" ? "off" : "on"}`,
+              modeExplained
+                ? `     the A/B protocol is on (${experiment}): the running daemon (${running?.version}) ${mode === "never" ? "holds nothing" : "holds destructive calls"} while config.json says ${current}, which an earlier up wrote and that daemon never read; the restart keeps what the daemon does, so the treatment arm stays what it has been (sayagain up --${mode === "never" ? "hold" : "observe"} changes it and amends docs/measurement.md 5.4)`
+                : `     holds were ${current === "never" ? "off" : "on"}; this run turns them ${mode === "never" ? "off" : "on"}`,
+            ]
+          : []),
+        ...(experiment && !modeExplained
+          ? [
+              holdArg === undefined
+                ? `     the A/B protocol is on (${experiment}); its treatment arm is the boundary as shipped, so holds stay as they are unless you say --observe, which amends docs/measurement.md 5.4`
+                : `     the A/B protocol is on (${experiment}): this changes what its treatment arm is; amend docs/measurement.md 5.4`,
+            ]
+          : []),
+        ...(stale && running
+          ? [
+              `  5. restart the daemon (${running.version} to ${PROXY_VERSION})${waiting ? `: not yet, ${waiting} call${waiting === 1 ? " waits" : "s wait"} for a decision and a restart would dead-letter ${waiting === 1 ? "it" : "them"}; decide ${waiting === 1 ? "it" : "them"} (sayagain approve|reject <receipt>) or run sayagain stop first` : ", so the hosts get this version; calls in flight fail once and the hosts reconnect on their own"}`,
+            ]
+          : []),
+        ...(running && running.version !== PROXY_VERSION && noStart
+          ? [`     a daemon from ${running.version} is running; --no-start leaves it`]
+          : []),
+        ...(!noStart && !noProbe
+          ? [
+              `  ${stale && running ? 6 : 5}. start each server once to ask for its tools, as the last check (--no-probe skips it)`,
             ]
           : []),
         "",
@@ -1317,15 +1373,23 @@ export async function main(argv: string[]): Promise<number> {
       fresh.daemon = { ...(fresh.daemon ?? {}), hold: mode };
       saveRegistry(fresh);
     }
+    // The launcher hosts point at is refreshed to this install even when every entry is already
+    // wrapped, so `npm install -g` followed by `up` moves the hosts off an npx cache.
+    if (!dryRun) ensureLauncher();
+    let anyRewritten = false;
     for (const t of targets) {
       try {
-        const r = importHost(t, { log, dryRun, rewrite: true, force: false, transport: "stdio" });
+        const r = importHost(t, { log, dryRun, rewrite: true, force, transport: "stdio" });
+        anyRewritten ||= r.rewritten.length > 0;
         const parts = [`imported ${r.imported.length}${list(r.imported)}`];
         if (r.updated.length) parts.push(`updated ${r.updated.length}${list(r.updated)}`);
         if (r.unchanged.length) parts.push(`already registered ${r.unchanged.length}`);
         if (r.rewritten.length) parts.push(`rewritten ${r.rewritten.length}`);
         process.stdout.write(`${dryRun ? "[dry-run] " : ""}${label(t)}\n  ${parts.join(", ")}\n`);
-        for (const sk of r.skipped) process.stdout.write(`  skipped ${sk.name}: ${sk.reason}\n`);
+        for (const sk of r.skipped)
+          process.stdout.write(
+            `  skipped ${sk.name}: ${sk.reason.replace("use --force to replace", "sayagain up --force replaces it")}\n`,
+          );
         if (r.backup) process.stdout.write(`  backup: ${r.backup}\n`);
       } catch (err) {
         failed = true;
@@ -1337,6 +1401,20 @@ export async function main(argv: string[]): Promise<number> {
     if (caveat) process.stderr.write(`note: ${caveat}\n`);
     let info = await liveDaemon();
     let reloadFailed = false;
+    let restarted: string | undefined;
+    // Read again at the moment of acting: a host may have started another daemon meanwhile.
+    const staleNow = info !== null && info.version !== PROXY_VERSION && !noStart;
+    if (info && staleNow && !waiting) {
+      if (await stopDaemon()) {
+        restarted = info.version;
+        info = null;
+      } else {
+        failed = true;
+        process.stderr.write(
+          `the daemon (pid ${info.pid}, ${info.version}) did not stop within 8 s and keeps running; try: sayagain stop\n`,
+        );
+      }
+    }
     if (info) {
       try {
         await daemonReloadPolicy();
@@ -1361,10 +1439,14 @@ export async function main(argv: string[]): Promise<number> {
       child.on("error", () => undefined);
       child.unref();
       info = await waitForDaemon(10_000, child.pid);
+      // A host's shim may have started a daemon of its own in the gap, from the install it knows.
+      const other = info ? null : await liveDaemon();
       process.stdout.write(
         info
-          ? `\ndaemon started (pid ${info.pid}) at ${daemonBaseUrl(info)}\n`
-          : "\nthe daemon did not start; run: sayagain serve   (in the foreground, to see why)\n",
+          ? `\ndaemon ${restarted ? `restarted (${restarted} to ${PROXY_VERSION})` : "started"} (pid ${info.pid}) at ${daemonBaseUrl(info)}\n`
+          : other
+            ? `\na daemon (${other.version}, pid ${other.pid}) was started meanwhile by a host; run sayagain up again\n`
+            : "\nthe daemon did not start; run: sayagain serve   (in the foreground, to see why)\n",
       );
       if (!info) failed = true;
     }
@@ -1377,7 +1459,7 @@ export async function main(argv: string[]): Promise<number> {
       [
         "",
         "outside: servers a host provides itself (Claude Code's browser, computer use and session tools) never pass through a config file and stay where they are; sayagain audit shows how much of your traffic that is",
-        "restart the hosts to pick up the change",
+        `${anyRewritten ? "restart the hosts to pick up the change" : "the hosts reconnect on their own"}; to undo everything: sayagain down; to stop the daemon alone: sayagain stop`,
         reloadFailed
           ? "the running daemon keeps its previous hold mode until it restarts"
           : mode === "never"
@@ -1389,7 +1471,7 @@ export async function main(argv: string[]): Promise<number> {
     if (noStart) return failed ? 1 : 0;
     if (!info) return 1;
     // What is still wrong, in the boundary's own words, with the command that fixes each thing.
-    const doctorExit = await main(["doctor", "--no-probe"]);
+    const doctorExit = await main(["doctor", ...(noProbe ? ["--no-probe"] : [])]);
     return failed ? 1 : doctorExit;
   }
 

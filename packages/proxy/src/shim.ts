@@ -291,7 +291,9 @@ export async function runStdioShim(options: ShimOptions): Promise<number> {
         );
       return;
     }
-    if (reply.status === 401 && !retried && (await reconnect())) return send(line, msg, true);
+    // A new token, or a daemon that restarted and forgot this session: initialize again, once.
+    if ((reply.status === 401 || reply.status === 404) && !retried && (await reconnect()))
+      return send(line, msg, true);
     if (reply.status === 202 || reply.status === 204) return;
     if (isRequest(msg) && msg.method === "initialize" && reply.status === 200) {
       initLine = line;

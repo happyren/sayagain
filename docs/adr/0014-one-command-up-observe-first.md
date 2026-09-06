@@ -100,3 +100,22 @@ the server. The narrow reading of absence applies as before.
 - **Ask at install time.** A question at the start of a one-line command is
   a decision taken before the page has shown what the boundary sees; the
   page first, then the decision.
+
+## Addendum, 2026-09-06: the experiment, the stale daemon, the way back
+
+The first real run of `up` on the author's machine met three things the
+decision had not named. The A/B protocol was running with holds on, and a
+first `up` would have written the observe default and, on the next daemon
+restart, changed what the treatment arm is: while an experiment runs, `up`
+keeps what the running daemon actually does, whatever the file says, and
+says that `--observe` amends docs/measurement.md 5.4. The daemon was from
+an older install and kept its own code: `up` now restarts it, unless a
+live call in it is waiting for a decision, which a restart would
+dead-letter, and then it says how to decide it or stop first. And the
+command had been run from the npx cache, which npm evicts: the launcher
+now falls back to fetching its own version with npx when the CLI file or
+the Node.js binary is gone, which needs `npx` on its PATH and, the first
+time, the network; a durable install is still the right fix, and `up`
+refreshes the launcher on every run so that fix takes. The summary names
+the way back, `sayagain down` and `sayagain stop`, so tearing down is as
+much one command as setting up.
