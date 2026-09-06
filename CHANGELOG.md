@@ -11,19 +11,23 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - `sayagain doctor`: one command that checks the whole setup and prints the
-  command that fixes each finding (ADR-0012). It names servers a host still
-  calls directly, a server wrapped in one project but called directly from
-  everywhere else, a stdio server the daemon starts without the working
-  directory its host gave it, tools whose class comes from nothing, reads that
-  are held on every call because the server annotates them destructive, and a
+  command that fixes each finding, most serious first (ADR-0012). It names
+  servers a host still calls directly, a server configured in one project and
+  nowhere else, a stdio server the daemon starts without the working directory
+  its host gave it, an environment reference the daemon cannot resolve, tools
+  whose class comes from nothing, reads that are held on every call because the
+  server annotates them destructive, calls still waiting for a decision, and a
   wrapped host whose calls never arrive. Exits 1 when something is broken.
+  `--no-probe` skips starting the upstreams.
 - `sayagain classes <name>|--all`: what class each tool gets, where it came
   from (the operator's table, the server's annotations, or the cautious
   fallback) and what the boundary does with it. `--suggest` adds the class the
-  tool's name implies where it differs, and `--write` stores those in
-  `config.json`. Suggestions are conservative: a name only lowers a class when
-  it reads like a read, so a tool a server calls destructive is left alone
-  unless it is called `get_*`, `list_*` or the like.
+  tool's name implies where it differs. `--write` stores the suggestions that
+  raise a class; one that lowers a class drops a hold, allows a retry and
+  allows a pre-send coercion, so it is written only with `--write --lower`.
+  A lowering is proposed only when the whole name and the description's first
+  sentence read as a read, so `find_and_replace`, `get_lock` and
+  `check_out_book` are left alone.
 
 ### Changed
 
@@ -31,11 +35,16 @@ All notable changes to this project are documented here. The format follows
   boundary in place, with no restart and no dropped upstream: `POST
   /api/policy/reload`, which `classes --write` calls for you.
 - `import` records a project-scoped server's project directory as its working
-  directory. The host started that server inside the project; the daemon starts
-  it from its own directory, so a server that finds its work by the current
-  directory used to come up empty.
+  directory, when that directory still exists. The host started that server
+  inside the project; the daemon starts it from its own directory, so a server
+  that finds its work by the current directory used to come up empty.
+- `sayagain add` keeps the record of where an imported server came from, so
+  re-registering one (to add `--cwd`, say) no longer leaves `eject` unable to
+  restore the host's original entry. A class table and hold mode survive too
+  unless the command sets them.
+- `sayagain classes` follows `tools/list` pagination, so a table written from a
+  paginated server keeps the tools it did not show.
 - `import --rewrite` and `install` end by pointing at `sayagain doctor`.
-
 
 ## [0.13.0] - 2026-09-06
 

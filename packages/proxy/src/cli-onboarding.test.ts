@@ -109,24 +109,36 @@ describe("cli onboarding", () => {
     expect(out).toContain("does not accept HTTP entries");
   });
 
-  it("import carries a project's directory over as the working directory, and doctor says what is left", async () => {
+  it("import carries a project's directory over, and doctor names what is left with a runnable fix", async () => {
+    const project = join(dir, "w", "app");
+    mkdirSync(project, { recursive: true });
     writeFileSync(
       join(dir, ".claude.json"),
       JSON.stringify({
         mcpServers: { direct: { command: "d" } },
-        projects: { "/w/app": { mcpServers: { scoped: { command: "s" } } } },
+        projects: { [project]: { mcpServers: { scoped: { command: "s", args: ["--mcp"] } } } },
       }),
     );
     expect(await main(["import", "--host", "all", "--rewrite", "--no-start"])).toBe(0);
-    const registry = JSON.parse(readFileSync(join(dir, "sayagain", "config.json"), "utf8")) as {
-      servers: Record<string, { cwd?: string }>;
-    };
+    const configPath = join(dir, "sayagain", "config.json");
+    const read = () =>
+      JSON.parse(readFileSync(configPath, "utf8")) as {
+        servers: Record<
+          string,
+          { cwd?: string; origins?: Record<string, { project?: string }>; classes?: unknown }
+        >;
+      };
     // The host ran it inside the project; the daemon would otherwise start it from its own directory.
-    expect(registry.servers.scoped?.cwd).toBe("/w/app");
-    expect(registry.servers.direct?.cwd).toBeUndefined(); // a user-scope server has no project to inherit
+    expect(read().servers.scoped?.cwd).toBe(project);
+    expect(read().servers.direct?.cwd).toBeUndefined(); // a user-scope server has no project to inherit
+    expect(Object.values(read().servers.scoped?.origins ?? {})[0]?.project).toBe(project);
     expect(out).toContain("sayagain doctor");
+
+    // A registry written before this version has the origin but no working directory.
+    const stripped = read();
+    delete (stripped.servers.scoped as { cwd?: string }).cwd;
+    writeFileSync(configPath, JSON.stringify(stripped));
     out = "";
-    // No daemon in this scratch home: doctor leads with that and exits non-zero.
     expect(await main(["doctor", "--no-probe", "--json"])).toBe(1);
     const findings = JSON.parse(out) as { severity: string; title: string; fix?: string }[];
     expect(findings[0]).toMatchObject({
@@ -134,12 +146,38 @@ describe("cli onboarding", () => {
       title: "no daemon is running",
       fix: "sayagain serve --detach",
     });
-    expect(findings.some((f) => f.title.includes("without a working directory"))).toBe(false);
+    const cwd = findings.find((f) => f.title.includes("without a working directory"));
+    // The whole command, so following it does not lose the registration.
+    expect(cwd?.fix).toBe(`sayagain add scoped --cwd ${project} -- s --mcp`);
+    expect(findings.some((f) => f.title === "tool classes were not checked")).toBe(true);
+
+    // Following it keeps the record import wrote, so eject still works.
+    out = "";
+    expect(await main(["add", "scoped", "--cwd", project, "--", "s", "--mcp"])).toBe(0);
+    expect(out).toContain("kept the record of where it came from");
+    expect(Object.values(read().servers.scoped?.origins ?? {})[0]?.project).toBe(project);
+    expect(read().servers.scoped?.cwd).toBe(project);
+
+    // Re-importing after the upgrade adopts the directory instead of reporting a conflict.
+    out = "";
+    expect(await main(["import", "--host", "all", "--no-start"])).toBe(0);
+    expect(out).not.toContain("different command or url");
   });
 
-  it("classes needs a server the registry knows", async () => {
+  it("classes and doctor reject arguments they cannot honour", async () => {
     await expect(main(["classes", "nope"])).rejects.toThrow(/no server named nope/);
     await expect(main(["classes", "a", "b"])).rejects.toThrow(/one server name, or --all/);
+    await expect(main(["classes", "--all", "--lower"])).rejects.toThrow(
+      /only means something with --write/,
+    );
+    await expect(main(["doctor", "pencil"])).rejects.toThrow(/doctor: takes no arguments/);
+    // Without a daemon there is nothing to ask for a tool list, and the message says so.
+    mkdirSync(join(dir, "sayagain"), { recursive: true });
+    writeFileSync(
+      join(dir, "sayagain", "config.json"),
+      JSON.stringify({ servers: { s: { transport: "stdio", command: "s" } } }),
+    );
+    await expect(main(["classes", "--all"])).rejects.toThrow(/no daemon is running/);
   });
 
   it("ui --no-open prints the page URL with the token of the running daemon", async () => {

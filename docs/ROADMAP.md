@@ -237,7 +237,9 @@ Explicitly not built
   wrong on the author's machine (a server calling past the proxy, a stdio
   server started outside its project, a design server whose annotations put
   screenshots behind an approval) were all invisible until someone read the
-  ledger by hand.
+  ledger by hand. The numbers it moves: the share of host-configured servers
+  whose calls reach the boundary, and the count of doctor errors and warnings
+  on a first run.
 - The proof (docs/measurement.md 5.4): `serve --arm coinflip` and
   `report --ab` run the pre-registered A/B on the operator's own agents:
   a control arm that observes only, against the boundary as shipped

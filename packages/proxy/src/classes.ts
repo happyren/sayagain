@@ -7,8 +7,16 @@
  * tool in the cautious fallback, and a server that declares badly can put a screenshot behind an
  * approval. Neither is visible from the outside, so this module names the class, its source, and a
  * suggestion the operator can read before writing it down.
+ *
+ * Suggestions run in two directions and they are not equally safe. Raising a class makes every call
+ * to that tool wait for a decision. Lowering one to read-only removes the hold, allows a retry and
+ * allows a pre-send coercion, so a mistake there is the failure the boundary exists to prevent.
+ * Everything below is arranged around that asymmetry.
  */
 import { classify, type ToolAnnotations, type ToolClass } from "@sayagain/sdk";
+
+/** Which way a suggestion moves the class; the two directions carry different risk. */
+export type Direction = "raise" | "lower";
 
 /** One tool as the boundary sees it. */
 export interface ToolClassRow {
@@ -19,10 +27,10 @@ export interface ToolClassRow {
   annotations: ToolAnnotations | undefined;
   /** What the boundary does with this class, in one clause. */
   effect: string;
-  /** Set when the declaration contradicts itself or the tool's own name. */
-  warning?: string;
+  /** Set when the declaration contradicts itself, or the suggestion needs care. */
+  warning?: string | undefined;
   /** A class worth considering instead, with the reason; never applied on its own. */
-  suggestion?: { toolClass: ToolClass; reason: string };
+  suggestion?: { toolClass: ToolClass; direction: Direction; reason: string };
 }
 
 export interface ClassReport {
@@ -37,17 +45,23 @@ export interface ClassReport {
   suggestions: ToolClassRow[];
 }
 
+/**
+ * What the boundary does with a class, as the code does it: retry is for the two safe classes
+ * (core.ts decideOnFailure), a retryable failure on the other two is held rather than retried, and
+ * a read-only call still dedupes when the caller sends an idempotency key (dedupe.ts keyFor).
+ */
 const EFFECTS: Record<ToolClass, string> = {
   "read-only":
-    "retried on a retryable failure, never held, never deduplicated, may be coerced before it leaves",
+    "retried on a retryable failure; never held; deduplicated only on an idempotency key; a learned coercion may fix its arguments before it leaves",
   "idempotent-write":
-    "retried on a retryable failure, deduplicated within the window, held only under --hold always",
-  write: "never retried, deduplicated within the window, held only under --hold always",
+    "retried on a retryable failure; deduplicated within the window; held before it leaves only under --hold always",
+  write:
+    "never retried: a retryable failure is held for a decision instead; deduplicated within the window; held before it leaves only under --hold always",
   destructive:
-    "never retried, deduplicated within the window, held for a decision under the default policy",
+    "held for a decision before it leaves; never retried, and a retryable failure is held again",
 };
 
-/** Leading words that say a tool reads. Matched on the first segment of the name, and on the whole name. */
+/** Verbs that say a tool only reads, plainly enough to lower a class on their own. */
 const READ_VERBS = [
   "get",
   "list",
@@ -61,35 +75,31 @@ const READ_VERBS = [
   "status",
   "inspect",
   "view",
-  "check",
   "count",
   "lookup",
   "explore",
   "trace",
-  "preview",
   "diff",
-  "validate",
-  "verify",
-  "resolve",
   "peek",
   "summarize",
   "summarise",
+];
+/**
+ * Verbs that read in one sense and change something in another: check out, resolve a conflict,
+ * verify and charge, validate and apply, preview a deploy. They never justify a lowering.
+ */
+const AMBIGUOUS_READ_VERBS = [
+  "check",
+  "resolve",
+  "verify",
+  "validate",
+  "preview",
   "analyze",
   "analyse",
 ];
-/** Leading words that say a tool changes something, and repeating it lands in the same place. */
-const IDEMPOTENT_VERBS = [
-  "set",
-  "put",
-  "upsert",
-  "ensure",
-  "open",
-  "select",
-  "focus",
-  "clear",
-  "reset_view",
-];
-/** Leading words that say a tool changes something. */
+/** Verbs that say a tool changes something, and repeating it lands in the same place. */
+const IDEMPOTENT_VERBS = ["set", "put", "upsert", "ensure", "open", "select", "focus"];
+/** Verbs that say a tool changes something. */
 const WRITE_VERBS = [
   "create",
   "add",
@@ -119,24 +129,42 @@ const WRITE_VERBS = [
   "disable",
   "assign",
   "merge",
+  "replace",
+  "acquire",
+  "claim",
+  "reserve",
+  "lock",
 ];
-/** Leading words that say a tool destroys something a person would miss. */
+/** Verbs whose destruction is unmistakable wherever they sit in the name. */
 const DESTRUCTIVE_VERBS = [
   "delete",
-  "remove",
-  "drop",
   "destroy",
   "purge",
   "wipe",
   "truncate",
-  "revoke",
-  "kill",
-  "terminate",
-  "uninstall",
   "erase",
-  "prune",
-  "discard",
+  "terminate",
+  "revoke",
+  "uninstall",
 ];
+/**
+ * Verbs that destroy when they lead and mean something else inside a phrase: a drop shadow, a kill
+ * switch, removing a filter. Read only in the leading position.
+ */
+const LEADING_DESTRUCTIVE_VERBS = ["remove", "drop", "kill", "prune", "discard", "clear", "reset"];
+/** A name that joins two acts describes both; the safe reading is the one that changes something. */
+const CONJUNCTIONS = ["and", "then", "or", "plus", "with"];
+
+const MUTATING = new Set([
+  ...WRITE_VERBS,
+  ...IDEMPOTENT_VERBS,
+  ...DESTRUCTIVE_VERBS,
+  ...LEADING_DESTRUCTIVE_VERBS,
+]);
+
+/** What a description's first sentence says the tool does to the world. */
+const MUTATING_PROSE =
+  /\b(creat|delet|remov|updat|modif|writ|chang|overwrit|replac|acquir|lock|insert|upsert|destroy|purg|renam|mov|revok|terminat|drop)/i;
 
 const segments = (tool: string): string[] =>
   tool
@@ -145,20 +173,51 @@ const segments = (tool: string): string[] =>
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
 
+const firstSentence = (description: string | undefined): string => {
+  if (!description) return "";
+  const trimmed = description.trim().slice(0, 400);
+  const stop = trimmed.search(/[.!?](\s|$)/);
+  return stop === -1 ? trimmed : trimmed.slice(0, stop);
+};
+
 /** The class a tool's name suggests, or undefined when the name says nothing. */
 export function classFromName(tool: string): { toolClass: ToolClass; verb: string } | undefined {
   const parts = segments(tool);
-  // A leading verb decides; a later one (delete_page_batch) is checked too, but only for destruction,
-  // where a false negative is the expensive direction.
   const first = parts[0] ?? "";
-  const has = (verbs: string[], word: string) => verbs.includes(word);
-  if (has(DESTRUCTIVE_VERBS, first)) return { toolClass: "destructive", verb: first };
-  for (const p of parts)
-    if (has(DESTRUCTIVE_VERBS, p)) return { toolClass: "destructive", verb: p };
-  if (has(READ_VERBS, first)) return { toolClass: "read-only", verb: first };
-  if (has(IDEMPOTENT_VERBS, first)) return { toolClass: "idempotent-write", verb: first };
-  if (has(WRITE_VERBS, first)) return { toolClass: "write", verb: first };
+  const leadsWithRead = READ_VERBS.includes(first) || AMBIGUOUS_READ_VERBS.includes(first);
+  if (LEADING_DESTRUCTIVE_VERBS.includes(first)) return { toolClass: "destructive", verb: first };
+  // Reading a delete log is still reading, so a leading read verb stops the scan below.
+  if (!leadsWithRead)
+    for (const p of parts)
+      if (DESTRUCTIVE_VERBS.includes(p)) return { toolClass: "destructive", verb: p };
+  // Namespaced names (mcp__figma__get_page, codegraph_status) put the verb after the prefix.
+  for (const p of parts) {
+    if (READ_VERBS.includes(p) || AMBIGUOUS_READ_VERBS.includes(p))
+      return { toolClass: "read-only", verb: p };
+    if (IDEMPOTENT_VERBS.includes(p)) return { toolClass: "idempotent-write", verb: p };
+    if (WRITE_VERBS.includes(p)) return { toolClass: "write", verb: p };
+  }
   return undefined;
+}
+
+/**
+ * Whether a name and description are plain enough to take a tool *down* to read-only. Every clause
+ * here exists because a real tool would break the rule without it: `find_and_replace`, `get_lock`,
+ * `check_out_book`, `read_and_clear`, `get_delete_history`.
+ */
+export function readsOnly(tool: string, description?: string): boolean {
+  const parts = segments(tool);
+  const leading = parts.find(
+    (p) =>
+      READ_VERBS.includes(p) ||
+      AMBIGUOUS_READ_VERBS.includes(p) ||
+      MUTATING.has(p) ||
+      CONJUNCTIONS.includes(p),
+  );
+  if (leading === undefined || !READ_VERBS.includes(leading)) return false;
+  if (parts.some((p) => CONJUNCTIONS.includes(p))) return false;
+  if (parts.some((p) => MUTATING.has(p))) return false;
+  return !MUTATING_PROSE.test(firstSentence(description));
 }
 
 const RANK: Record<ToolClass, number> = {
@@ -201,9 +260,19 @@ const declaresSomething = (a: ToolAnnotations | undefined): boolean =>
     a.destructiveHint !== undefined ||
     a.idempotentHint !== undefined);
 
+export function describeAnnotations(a: ToolAnnotations | undefined): string {
+  if (!a || !declaresSomething(a)) return "nothing";
+  const parts: string[] = [];
+  if (a.readOnlyHint !== undefined) parts.push(`readOnlyHint ${a.readOnlyHint}`);
+  if (a.destructiveHint !== undefined) parts.push(`destructiveHint ${a.destructiveHint}`);
+  if (a.idempotentHint !== undefined) parts.push(`idempotentHint ${a.idempotentHint}`);
+  return parts.join(", ");
+}
+
 /**
- * The class table for one server. Suggestions are conservative: the name has to disagree with the
- * declaration, and a suggestion that lowers the class needs the name to read like a read.
+ * The class table for one server. Suggestions are conservative in the direction that matters: a
+ * lowering needs the whole name and the description's first sentence to read as a read, while a
+ * raising only needs the name to name an act.
  */
 export function classReport(
   server: string,
@@ -243,20 +312,28 @@ export function classReport(
       row.warning = "declared both read-only and destructive; the boundary reads it as read-only";
     const named = classFromName(t.name);
     if (!override && named && named.toolClass !== toolClass) {
-      const lowering = RANK[named.toolClass] < RANK[toolClass];
-      const raising = RANK[named.toolClass] > RANK[toolClass];
-      // Lowering is the expensive direction to get wrong, so only a reading name earns it.
-      if (!lowering || named.toolClass === "read-only") {
+      const direction: Direction = RANK[named.toolClass] < RANK[toolClass] ? "lower" : "raise";
+      // A lowering has to survive the whole name and the first sentence, not just a leading verb.
+      const allowed =
+        direction === "raise" ||
+        (named.toolClass === "read-only" && readsOnly(t.name, t.description));
+      if (allowed) {
         const because =
           source === "fallback"
             ? "the server declares no annotations"
             : `the server declares ${describeAnnotations(a)}`;
         row.suggestion = {
           toolClass: named.toolClass,
-          reason: `the name starts with "${named.verb}" but ${because}`,
+          direction,
+          reason: `the name reads as "${named.verb}" but ${because}`,
         };
-        if (raising && source === "annotation")
-          row.warning ??= "the name reads like a change but the server calls it safe";
+        const caution =
+          direction === "lower"
+            ? "lowering drops the hold, allows a retry and allows a pre-send coercion: check the tool really only reads"
+            : source === "annotation"
+              ? "the name reads like a change but the server calls it safe"
+              : undefined;
+        if (caution && row.warning === undefined) row.warning = caution;
       }
     }
     rows.push(row);
@@ -271,21 +348,24 @@ export function classReport(
   };
 }
 
-export function describeAnnotations(a: ToolAnnotations | undefined): string {
-  if (!a || !declaresSomething(a)) return "nothing";
-  const parts: string[] = [];
-  if (a.readOnlyHint !== undefined) parts.push(`readOnlyHint ${a.readOnlyHint}`);
-  if (a.destructiveHint !== undefined) parts.push(`destructiveHint ${a.destructiveHint}`);
-  if (a.idempotentHint !== undefined) parts.push(`idempotentHint ${a.idempotentHint}`);
-  return parts.join(", ");
-}
-
-/** The overrides a `--write` would store: the current table plus every suggestion taken. */
-export function overridesFrom(report: ClassReport): Record<string, ToolClass> {
-  const out: Record<string, ToolClass> = {};
+/**
+ * The table a `--write` would store: everything already written down, plus the suggestions taken.
+ * Overrides for tools this listing did not show are kept, because a tool absent from one
+ * `tools/list` (a page not fetched, a flag switched off) has not stopped existing.
+ */
+export function overridesFrom(
+  report: ClassReport,
+  existing: Record<string, ToolClass> = {},
+  take: Direction[] = ["raise", "lower"],
+): Record<string, ToolClass> {
+  const out: Record<string, ToolClass> = { ...existing };
   for (const r of report.rows) {
-    if (r.suggestion) out[r.tool] = r.suggestion.toolClass;
+    if (r.suggestion && take.includes(r.suggestion.direction)) out[r.tool] = r.suggestion.toolClass;
     else if (r.source === "override") out[r.tool] = r.toolClass;
   }
   return out;
 }
+
+/** The suggestions of one direction, for a command that applies the two separately. */
+export const suggestionsOf = (report: ClassReport, direction: Direction): ToolClassRow[] =>
+  report.suggestions.filter((r) => r.suggestion?.direction === direction);

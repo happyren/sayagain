@@ -48,17 +48,34 @@ operator can read rather than infer.
 
 **The tool proposes a class; it never applies one on its own.** `--suggest`
 adds the class a tool's name implies where it differs from the class in force,
-and `--write` stores those in `config.json`. The suggestion rules are
-deliberately timid:
+and `--write` stores those in `config.json`. The two directions are not
+symmetric, and the rules follow that:
 
 - A suggestion that *raises* the class (an undeclared `delete_*` that the
-  fallback calls a write) is always offered: the cost of being wrong is one
-  extra hold.
-- A suggestion that *lowers* it is offered only when the name reads like a
-  read (`get_`, `list_`, `search_`, …). A tool the server calls destructive
-  and names `export_nodes` is left alone, because treating a write as
-  read-only has unbounded cost and a verb is not evidence enough.
+  fallback calls a write) is offered on the name alone, and `--write` applies
+  it. Being wrong here means every call to that tool waits for a decision, and
+  an unattended agent may wait out `--hold-wait` and be told its call is held.
+  That is a cost, not a silent one.
+- A suggestion that *lowers* it needs more, and `--write` will not apply it:
+  it takes `--write --lower`. Lowering to read-only drops the hold, allows a
+  retry and allows a pre-send coercion, which is the failure the boundary
+  exists to prevent. It is proposed only when the leading verb reads
+  (`get`, `list`, `search`, …), no segment of the name names an act, the name
+  joins no two acts with `and` or `then`, and the description's first sentence
+  says nothing about changing the world. That is what keeps
+  `find_and_replace`, `read_and_clear`, `get_lock`, `check_out_book` and
+  `get_delete_history` off the list, while `get_screenshot` stays on it.
+- Verbs that read as destruction anywhere in a name (`delete`, `purge`,
+  `wipe`) raise from any position, so `batch_delete_pages` is caught. Verbs
+  that mean something else inside a phrase (`drop`, `kill`, `remove`, `clear`)
+  raise only when they lead, so a drop shadow and a kill switch are not held.
+  This direction still over-holds sometimes: `remove_filter` is proposed
+  destructive. Over-holding is the survivable error.
 - A tool the operator has already overridden is never second-guessed.
+- One tool at a time stays available and unchanged:
+  `sayagain add <name> --class <tool>=<class>`. The bulk write exists because a
+  server with forty undeclared tools is the common case, and reviewing forty
+  proposals in one table is what an operator will actually do.
 
 **A class table written while the daemon runs takes effect without a
 restart.** Classes and the hold mode are pure policy: no session, pending call
@@ -81,6 +98,19 @@ and `doctor` says so instead.
   server, needs a key at onboarding time, and puts a non-deterministic step in
   the path of the safety property. The verb list is a proposal an operator
   reads in ten seconds; the model can come later, behind the same review.
+- **Serve classes from the Tool Reliability Index (ADR-0010).** The index
+  already scans the registry and knows each server's declared annotations, and
+  a class table published there would be better than any local guess and would
+  improve for everyone at once. It needs the contribution endpoint that
+  ADR-0009's third decision postpones, and a class the operator did not choose
+  arriving over the network is a larger trust question than this slice should
+  settle. The verb list is the offline stand-in; the index is where this
+  should end up.
+- **Ship the per-server class table ADR-0004 promised.** ADR-0004 named "a
+  maintained per-server table" as one of the three sources of a class, and no
+  such table was ever built. This slice does not build it either: it makes the
+  operator's own table easy to write and easy to read, which is the same
+  artefact one machine at a time.
 - **Warn at call time instead of in a command.** A warning in the daemon log
   when a `get_*` tool is held is cheap, but the log is not where an operator
   looks during onboarding, and a per-call warning is noise for the many

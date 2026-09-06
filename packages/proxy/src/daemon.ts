@@ -285,12 +285,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
    * Push a changed class table or hold mode into the boundaries already running. Both are pure
    * policy, so `sayagain classes --write` takes effect without restarting an upstream.
    */
+  const policySeen = new Map<string, string>();
   const applyPolicies = (servers: Record<string, ServerConfig>): number => {
     let changed = 0;
     for (const [name, b] of boundaries) {
       const cfg = servers[name];
       if (!cfg) continue;
-      b.setPolicy({ classes: cfg.classes ?? {}, hold: cfg.hold ?? DEFAULT_POLICY.hold });
+      const classes = cfg.classes ?? {};
+      const hold = cfg.hold ?? DEFAULT_POLICY.hold;
+      const shape = JSON.stringify([hold, Object.entries(classes).sort()]);
+      if (policySeen.get(name) === shape) continue;
+      const first = !policySeen.has(name);
+      policySeen.set(name, shape);
+      b.setPolicy({ classes, hold });
+      if (!first)
+        log(
+          `sayagain: ${name}: policy reloaded (hold ${hold}, ${Object.keys(classes).length} class override(s))`,
+        );
       changed++;
     }
     return changed;

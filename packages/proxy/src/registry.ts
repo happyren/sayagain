@@ -27,7 +27,16 @@ export interface ServerConfig {
    * Where `import` found this server, keyed by "<file>#<path>": the entry it replaced and the entry
    * written in its place, so `eject` can restore the original.
    */
-  origins?: Record<string, { host: string; entry: unknown; wrapped?: unknown }>;
+  origins?: Record<
+    string,
+    {
+      host: string;
+      entry: unknown;
+      /** The project directory the host ran this server in, for a project- or local-scope entry. */
+      project?: string;
+      wrapped?: unknown;
+    }
+  >;
   /** True for servers `import` registered: `eject` unregisters them once no origin remains. */
   imported?: boolean;
 }

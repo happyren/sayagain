@@ -28,9 +28,11 @@ import { type ArmMode, isArmMode } from "./boundary.js";
 import {
   type ClassReport,
   classReport,
+  type Direction,
   declaredTools,
   describeAnnotations,
   overridesFrom,
+  suggestionsOf,
 } from "./classes.js";
 import {
   allDeadLetters,
@@ -60,7 +62,13 @@ import {
 } from "./contribute.js";
 import { startDaemon } from "./daemon.js";
 import { defaultDeadLetterPath, readDeadLetters } from "./deadletter.js";
-import { type DoctorServer, doctorFindings, type Finding, renderDoctor } from "./doctor.js";
+import {
+  type DoctorHold,
+  type DoctorServer,
+  doctorFindings,
+  type Finding,
+  renderDoctor,
+} from "./doctor.js";
 import { homePath } from "./home.js";
 import {
   HOST_IDS,
@@ -90,6 +98,7 @@ import {
   type ServerConfig,
   saveRegistry,
   tokenPath,
+  unresolvedRefs,
 } from "./registry.js";
 import { renderRegistryScan, scanRegistry } from "./registry-scan.js";
 import { buildIndex, fixesText, renderIndexSite } from "./reliability-index.js";
@@ -139,14 +148,17 @@ const USAGE = `sayagain ${PROXY_VERSION}
       Open the operator page (holds inbox, servers, dead letters, ledger, tools, errors, report); starts the daemon if needed.
   sayagain doctor [--no-probe] [--json]
       Check the whole setup and print the command that fixes each finding: servers a host still calls
-      directly, a server wrapped in one project only, a stdio server the daemon starts without the
-      working directory its host gave it, tools whose class comes from nothing, and traffic that never
-      arrives. Exits 1 when something is broken.
-  sayagain classes <name>|--all [--suggest] [--write] [--json]
+      directly, a server configured in one project only, a stdio server the daemon starts without the
+      working directory its host gave it, a reference the daemon's environment does not define, tools
+      whose class comes from nothing, calls waiting for a decision, and traffic that never arrives.
+      Findings come most serious first, and the command exits 1 when something is broken.
+      --no-probe leaves the upstreams unstarted, so the class checks are skipped and the run is fast.
+  sayagain classes <name>|--all [--suggest] [--write [--lower]] [--json]
       What class each tool gets and where it came from (the operator's table, the server's annotations,
-      or the cautious fallback), and what the boundary does with it. --suggest adds a class the tool's
-      name implies where it differs; --write stores those in config.json and a running daemon applies
-      them without a restart.
+      or the cautious fallback), and what the boundary does with it. --suggest adds the class the tool's
+      name implies where it differs. --write stores the suggestions that raise a class; a suggestion
+      that lowers one drops a hold, so it needs --write --lower. A running daemon applies a written
+      table without a restart. One tool at a time: sayagain add <name> --class <tool>=<class>
   sayagain hosts [--project] [--json]
       Which MCP hosts are configured on this machine (Claude Code, Cursor, Claude Desktop, VS Code) and what they hold.
   sayagain import --host <id>|all [--rewrite] [--dry-run] [--force] [--project] [--file <path>] [--transport stdio|http] [--command <path>] [--no-start]
@@ -315,30 +327,44 @@ const when = (iso: string): string => iso.slice(0, 16).replace("T", " ");
 
 /** The A/B page: both arms side by side, then the differences with their intervals. */
 /** One server's class table: what each tool gets, where it came from, and what that means. */
+/** "1 tool" / "3 tools", so a count reads like a sentence. */
+const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+
 function renderClasses(r: ClassReport, withSuggestions: boolean): string {
   const out: string[] = [];
   const counts = Object.entries(r.counts)
     .filter(([, n]) => n > 0)
     .map(([k, n]) => `${n} ${k}`)
     .join(", ");
-  out.push(`${r.server}: ${r.rows.length} tool(s) — ${counts || "none"}`);
+  out.push(`${r.server}: ${plural(r.rows.length, "tool")}: ${counts || "none"}`);
   if (r.fallback)
     out.push(
-      `  ${r.fallback} take the cautious fallback: the server annotates them not at all (never retried, counted as writes)`,
+      `  ${r.fallback} of them take the cautious fallback: the server declares nothing about them, so they are classed as writes.`,
     );
   out.push("");
+  // The effect belongs to the class, not the row, so it is said once per class in use.
+  for (const [cls, n] of Object.entries(r.counts))
+    if (n > 0) {
+      const row = r.rows.find((x) => x.toolClass === cls);
+      if (row) out.push(`  ${cls.padEnd(17)} ${row.effect}`);
+    }
+  out.push("");
+  const name = (t: string) => (t.length > 33 ? `${t.slice(0, 32)}\u2026` : t).padEnd(33);
+  out.push(`  ${"tool".padEnd(33)} ${"class".padEnd(17)} ${"from".padEnd(10)} the server declares`);
   for (const row of r.rows) {
     out.push(
-      `  ${row.tool.padEnd(32)} ${row.toolClass.padEnd(17)} ${row.source.padEnd(10)} ${describeAnnotations(row.annotations)}`,
+      `  ${name(row.tool)} ${row.toolClass.padEnd(17)} ${row.source.padEnd(10)} ${describeAnnotations(row.annotations)}`,
     );
     if (row.warning) out.push(`      ! ${row.warning}`);
     if (withSuggestions && row.suggestion)
-      out.push(`      -> ${row.suggestion.toolClass}: ${row.suggestion.reason}`);
+      out.push(
+        `      -> ${row.suggestion.toolClass} (${row.suggestion.direction}): ${row.suggestion.reason}`,
+      );
   }
   if (withSuggestions && r.suggestions.length) {
     out.push("");
     out.push(
-      `  ${r.suggestions.length} suggestion(s); each is a guess from the tool's name, so read them before writing.`,
+      `  ${plural(r.suggestions.length, "suggestion")}, each a guess from the tool's name: read them before writing.`,
     );
   }
   return `${out.join("\n")}\n`;
@@ -713,8 +739,21 @@ export async function main(argv: string[]): Promise<number> {
     const literalSecrets = [...Object.values(headers), ...Object.values(env)].filter(
       (v) => !v.includes("${") && /token|secret|key|bearer|password/i.test(v),
     );
+    // Re-registering a server changes what runs, not where it came from: origins keep `eject` able
+    // to restore the host's original entry, and a class table the operator wrote outlives a --cwd.
+    const previous = loadRegistry().servers[name];
+    if (previous) {
+      if (previous.origins) config.origins = previous.origins;
+      if (previous.imported !== undefined) config.imported = previous.imported;
+      if (config.classes === undefined && previous.classes) config.classes = previous.classes;
+      if (config.hold === undefined && previous.hold) config.hold = previous.hold;
+    }
     const replaced = addServer(name, config);
     process.stdout.write(`${replaced ? "replaced" : "registered"} ${name} (${config.transport})\n`);
+    if (previous?.origins)
+      process.stdout.write(
+        `  kept the record of where it came from, so sayagain eject still restores the original entry\n`,
+      );
     if (literalSecrets.length)
       process.stderr.write(
         // biome-ignore lint/suspicious/noTemplateCurlyInString: the hint tells the user to type a reference
@@ -888,10 +927,15 @@ export async function main(argv: string[]): Promise<number> {
     const asJson = takeFlag(opts, "--json");
     const suggest = command === "classes" ? takeFlag(opts, "--suggest") : false;
     const write = command === "classes" ? takeFlag(opts, "--write") : false;
+    // Lowering a class drops a hold, so it is never part of a plain --write.
+    const lower = command === "classes" ? takeFlag(opts, "--lower") : false;
     const all = command === "classes" ? takeFlag(opts, "--all") : true;
     const noProbe = command === "doctor" ? takeFlag(opts, "--no-probe") : false;
     const unknown = opts.find((o) => o.startsWith("-"));
     if (unknown) throw new UsageError(`${command}: unknown option ${unknown}`);
+    if (command === "doctor" && opts.length)
+      throw new UsageError(`doctor: takes no arguments, got ${opts[0]}`);
+    if (lower && !write) throw new UsageError("classes: --lower only means something with --write");
     const registry = loadRegistry();
     const names = command === "classes" && !all ? opts : Object.keys(registry.servers);
     if (command === "classes" && !all && names.length !== 1)
@@ -905,7 +949,7 @@ export async function main(argv: string[]): Promise<number> {
     const live = await liveDaemon();
     /** Ask the daemon for a server's tools; it starts the upstream on the way. */
     const probe = async (name: string): Promise<ClassReport | { error: string }> => {
-      if (!live) return { error: "no daemon is running (sayagain serve --detach)" };
+      if (!live) return { error: "no daemon is running" };
       try {
         const tools = await daemonToolsList(name);
         return classReport(name, declaredTools(tools), registry.servers[name]?.classes ?? {});
@@ -915,7 +959,10 @@ export async function main(argv: string[]): Promise<number> {
     };
 
     if (command === "classes") {
-      let wrote = 0;
+      if (!live)
+        throw new UsageError(
+          "classes has to start each server to ask for its tools, and no daemon is running (sayagain serve --detach)",
+        );
       let failedProbe = false;
       const reports: ClassReport[] = [];
       for (const name of names) {
@@ -927,35 +974,64 @@ export async function main(argv: string[]): Promise<number> {
         }
         reports.push(r);
       }
+      const take: Direction[] = lower ? ["raise", "lower"] : ["raise"];
+      const written: Record<string, number> = {};
+      if (write) {
+        // Re-read: the probes above took seconds, and another shell may have registered something.
+        const fresh = loadRegistry();
+        for (const r of reports) {
+          const cfg = fresh.servers[r.server];
+          if (!cfg) continue;
+          const taken = r.suggestions.filter((x) =>
+            take.includes(x.suggestion?.direction ?? "raise"),
+          );
+          if (!taken.length) continue;
+          cfg.classes = overridesFrom(r, cfg.classes ?? {}, take);
+          written[r.server] = taken.length;
+        }
+        if (Object.keys(written).length) saveRegistry(fresh);
+      }
       if (asJson) {
-        process.stdout.write(`${JSON.stringify(reports, null, 2)}\n`);
+        process.stdout.write(`${JSON.stringify({ servers: reports, written }, null, 2)}\n`);
         return failedProbe ? 1 : 0;
       }
-      for (const r of reports) {
-        process.stdout.write(`${renderClasses(r, suggest || write)}\n`);
-        if (write && r.suggestions.length) {
-          const merged = overridesFrom(r);
-          const cfg = registry.servers[r.server];
-          if (cfg) {
-            cfg.classes = merged;
-            wrote += r.suggestions.length;
-          }
-        }
-      }
+      for (const r of reports) process.stdout.write(`${renderClasses(r, suggest || write)}\n`);
+      const raises = reports.reduce((n, r) => n + suggestionsOf(r, "raise").length, 0);
+      const lowers = reports.reduce((n, r) => n + suggestionsOf(r, "lower").length, 0);
       if (write) {
-        if (!wrote)
-          process.stdout.write("nothing to write: no suggestion differs from the class in force\n");
+        const total = Object.values(written).reduce((a, b) => a + b, 0);
+        if (!total) process.stdout.write("nothing written: no suggestion in that direction\n");
         else {
-          saveRegistry(registry);
-          const reloaded = await daemonReloadPolicy().catch(() => null);
-          process.stdout.write(
-            `wrote ${wrote} override(s) to ${registryPath()}${reloaded === null ? "; start the daemon to apply them" : "; the running daemon applied them"}\n`,
-          );
+          let applied: number | null = null;
+          let reloadError: string | undefined;
+          try {
+            applied = await daemonReloadPolicy();
+          } catch (err) {
+            reloadError = err instanceof Error ? err.message : String(err);
+          }
+          process.stdout.write(`wrote ${total} override(s) to ${registryPath()}\n`);
+          if (reloadError !== undefined)
+            process.stderr.write(
+              `the running daemon refused the reload (${reloadError}); it keeps the old table until it restarts: sayagain stop && sayagain serve --detach\n`,
+            );
+          else
+            process.stdout.write(
+              applied === null
+                ? "no daemon is running; it will read them at the next start\n"
+                : "the running daemon applied them\n",
+            );
         }
-      } else if (reports.some((r) => r.suggestions.length))
+        if (!lower && lowers)
+          process.stdout.write(
+            `${lowers} suggestion(s) would lower a class and were not written: lowering drops the hold, so it needs --write --lower\n`,
+          );
+      } else if (raises || lowers) {
+        if (!suggest)
+          process.stdout.write("--suggest shows what the names imply where they differ\n");
         process.stdout.write(
-          `${suggest ? "" : "run with --suggest to see what the names imply, then "}--write stores them in ${registryPath()}\n`,
+          `--write stores the ${raises} raising suggestion(s) in ${registryPath()}${lowers ? `; --write --lower includes the ${lowers} that lower a class` : ""}\n`,
         );
+      }
       return failedProbe ? 1 : 0;
     }
 
@@ -981,22 +1057,23 @@ export async function main(argv: string[]): Promise<number> {
     });
     const servers: DoctorServer[] = [];
     for (const [name, cfg] of Object.entries(registry.servers)) {
+      // The project a host ran this server in, recorded by import; older registries have none.
+      const projectOrigins = [
+        ...new Set(
+          Object.values(cfg.origins ?? {})
+            .map((o) => o.project)
+            .filter((p): p is string => typeof p === "string"),
+        ),
+      ];
       const entry: DoctorServer = {
         name,
         transport: cfg.transport,
         cwd: cfg.cwd,
-        projectOrigins: Object.values(cfg.origins ?? {})
-          .map((o) => {
-            const e = o.entry as { cwd?: unknown } | undefined;
-            return typeof e?.cwd === "string" ? e.cwd : undefined;
-          })
-          .filter((x): x is string => typeof x === "string"),
+        command: cfg.command,
+        args: cfg.args,
+        projectOrigins,
+        unresolvedRefs: [...new Set([...unresolvedRefs(cfg.env), ...unresolvedRefs(cfg.headers)])],
       };
-      // A local-scope origin names the project the host ran the server in.
-      for (const key of Object.keys(cfg.origins ?? {})) {
-        const m = /^(.*)#projects\.(.+)\.mcpServers$/.exec(key);
-        if (m?.[2]) entry.projectOrigins.push(m[2]);
-      }
       if (!noProbe && live) {
         const r = await probe(name);
         if ("error" in r) entry.probeError = r.error;
@@ -1016,19 +1093,31 @@ export async function main(argv: string[]): Promise<number> {
     } catch {
       // a missing or unreadable ledger is itself reported by the checks below
     }
+    // The queue forgets a hold once it is decided, so everything listed is still waiting.
+    const holds: DoctorHold[] = (await allHolds().catch(() => [])).map((h) => ({
+      receipt: h.receipt,
+      tool: h.tool,
+      createdAt: Date.parse(h.createdAt) || Date.now(),
+      orphaned: h.orphaned,
+    }));
     const caveat = launcherCaveat();
+    const status = live ? await daemonStatus() : null;
+    const health = (status?.health ?? {}) as { arm?: unknown };
     const input = {
       cliVersion: PROXY_VERSION,
       daemon: live
         ? {
             running: true,
             version: live.version,
-            arm: (await daemonStatus())?.health.arm as string | null,
+            arm: typeof health.arm === "string" ? health.arm : null,
+            listen: `${live.host}:${live.port}`,
           }
         : { running: false },
       hosts: hostRows,
       servers,
       ledger: { total, byServer },
+      holds,
+      probed: !noProbe && live !== null,
       ...(caveat ? { launcherCaveat: caveat } : {}),
       hostRunning: claudeCodeRunning(),
     };

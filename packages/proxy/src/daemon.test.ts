@@ -249,6 +249,33 @@ describe("daemon", () => {
     expect(rows[0]?.held).toBeUndefined();
     const after = (await api(d, "/api/servers")) as { started: boolean; upstream: string | null }[];
     expect(after[0]).toMatchObject({ started: true, upstream: "fake-notion" }); // same upstream throughout
+
+    // The other direction: raising a safe tool mid-session starts holding it.
+    saveRegistry({
+      servers: {
+        fake: {
+          transport: "stdio",
+          command: process.execPath,
+          args: [fixture],
+          hold: "destructive",
+          classes: { echo: "destructive" },
+        },
+      },
+    });
+    expect(
+      ((await api(d, "/api/policy/reload", { method: "POST" })) as { servers: number }).servers,
+    ).toBe(1);
+    const raised = rpc(d, "fake", {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "echo", arguments: { a: 1 } },
+    });
+    const now = await until(async () => ((await api(d, "/api/holds")) as Obj[])[0]);
+    expect(now).toMatchObject({ tool: "echo" }); // a read the operator called destructive
+    await api(d, `/api/holds/${now.receipt}/approve`, { method: "POST" });
+    await raised;
+    expect(logs.some((l) => l.includes("policy reloaded"))).toBe(true);
   });
 
   it("holds a destructive call and completes it through the API", async () => {
