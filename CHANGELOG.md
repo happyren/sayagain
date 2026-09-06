@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-06
+
+### Added
+
+- The fault-injection harness (`scripts/experiment/`, pre-registered as
+  docs/measurement.md 5.6). Each task is its own cluster, and the same task is
+  run twice against the same seeded faults, once through the boundary and once
+  past it, so two hundred paired observations take under a minute where the
+  organic A/B needs a session apiece. The upstream is a real stdio MCP server
+  that fails on a seed and writes down every side effect that really happened,
+  so what the agent believes can be checked against what the world did.
+- A first run, 200 tasks at seed 7, control minus treatment per task:
+
+  | outcome | control | treatment | difference | 95% interval |
+  |---|---|---|---|---|
+  | writes the agent never learned about | 0.07 | 0.03 | 0.05 | 0.02 to 0.08 |
+  | non-idempotent writes run twice | 0.08 | 0.00 | 0.08 | 0.03 to 0.13 |
+  | calls spent recovering | 1.73 | 0.74 | 0.98 | 0.78 to 1.19 |
+  | failures the agent saw | 0.99 | 0.41 | 0.58 | 0.46 to 0.71 |
+  | bytes spent recovering | 199 | 244 | -45 | -94 to 4 |
+
+  The boundary halves the writes whose outcome nobody learns, removes the
+  double execution, and takes about 60% of the failures off the agent. It does
+  not reduce the bytes: the receipt it stamps on every result costs about what
+  the avoided retries save, on this failure mix. That row is reported rather
+  than netted off.
+
+
 ## [0.15.0] - 2026-09-06
 
 ### Added

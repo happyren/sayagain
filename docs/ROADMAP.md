@@ -240,6 +240,11 @@ Explicitly not built
   ledger by hand. The numbers it moves: the share of host-configured servers
   whose calls reach the boundary, and the count of doctor errors and warnings
   on a first run.
+- The proof, second half (docs/measurement.md 5.6, 0.16.0): the
+  fault-injection harness buys the independence the organic A/B cannot wait
+  for, by making every task its own cluster. It is the internally valid half;
+  5.4 is the externally valid half; the whitepaper needs both and should say
+  which claim rests on which.
 - The proof (docs/measurement.md 5.4): `serve --arm coinflip` and
   `report --ab` run the pre-registered A/B on the operator's own agents:
   a control arm that observes only, against the boundary as shipped

@@ -296,6 +296,52 @@ fixture harness where each task is its own cluster (the shape of 5.3).
 - Nothing else changes: the outcomes, their order, the sign convention, the
   decision rule and the arms are as amended earlier on 2026-09-06.
 
+### 5.6 Fault-injection harness (each task its own cluster)
+
+Pre-registered 2026-09-06, before it was run on anything but its own
+development seeds.
+
+The 5.4 A/B flips its coin per session, and one developer produces about
+twenty independent sessions a month, so the outcomes that cluster inside a
+session cannot be measured there in a useful time. This protocol buys
+independence instead of waiting for it: each task is its own cluster, and the
+same task is run twice against the same seeded faults, once through the
+boundary and once past it. Two hundred tasks give two hundred paired
+observations in under a minute.
+
+```bash
+node scripts/experiment/harness.mjs --tasks 200 --seed 7 [--operator approve|reject] [--json out.json]
+```
+
+- **The upstream** (`scripts/experiment/fault-server.mjs`) is a real stdio MCP
+  server that fails on a seed and writes down every side effect that really
+  happened. Two failures come from the server: a call that fails once and then
+  works, and a write that lands and then loses its answer, which is the case
+  M9 counts. Two come from the caller: an argument of the wrong type, and a
+  call whose precondition does not hold. The rates default to 6% and 3%,
+  near the 5.1% MCP failure rate section 5.1 measured.
+- **The agent** is a fixed recovery policy, not a model: it retries a timeout
+  88% of the time and gives a step at most three attempts, from the M2 and
+  M17 numbers in the transcripts. Stating it is the point; a model would be a
+  second experiment.
+- **The operator** is a stand-in that decides every held call the same way,
+  named in the report. The operator is part of the treatment (ADR-0011), so
+  the rule is declared rather than hidden.
+- **Outcomes**, paired per task, control minus treatment, with a t interval
+  over tasks: writes the agent never learned about, non-idempotent writes run
+  twice, calls and bytes spent recovering, failures the agent saw, calls made,
+  and bytes delivered in all.
+- **Bytes delivered in all** will favour the control arm, because the boundary
+  stamps a receipt on every result. That is a real cost and it is reported
+  rather than netted off. Calls spent recovering is the byte-free comparison.
+
+What this protocol can support: a claim about what the boundary does to a
+stated failure distribution under a stated recovery policy. What it cannot
+support: a claim about what real models do, or about traffic whose failure mix
+differs from the one injected. It is the internally valid half of the pair;
+5.4 on organic traffic is the externally valid half, and neither is the proof
+alone.
+
 ### 5.5 Registry scan (whitepaper launch)
 
 Run `@sayagain/lint` over every server in the public registry that

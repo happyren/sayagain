@@ -1,6 +1,6 @@
 {
   "name": "@sayagain/sdk",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Say Again intent-metadata constants, types and client helpers for MCP tool calls.",
   "license": "Apache-2.0",
   "type": "module",
