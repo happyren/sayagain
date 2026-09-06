@@ -157,7 +157,8 @@ const USAGE = `sayagain ${PROXY_VERSION}
       resolved from the daemon's environment at spawn; so does a \${VAR} inside --header or --env values.
   sayagain remove <name> | sayagain list | sayagain status | sayagain stop
   sayagain ui [--no-open]
-      Open the operator page (holds inbox, servers, dead letters, ledger, tools, errors, report); starts the daemon if needed.
+      Open the operator page: an overview (is it working, what the boundary did, what to do next), then the holds
+      inbox, servers, dead letters, ledger, tools, errors, report and learn screens; starts the daemon if needed.
   sayagain doctor [--no-probe] [--json]
       Check the whole setup and print the command that fixes each finding: servers a host still calls
       directly, a server configured in one project only, a stdio server the daemon starts without the
@@ -1292,7 +1293,7 @@ export async function main(argv: string[]): Promise<number> {
         `Say Again ${PROXY_VERSION} will:`,
         `  1. wrap the ${total} server(s) ${hostLabels.join(", ")} ${hostLabels.length === 1 ? "has" : "have"} configured${already ? ` (${already} already through Say Again)` : ""}, keeping the keys the hosts use; a backup of each file goes to ${homePath("backups")}`,
         `  2. start the boundary as a daemon at ${daemonUrl} and keep it running; the hosts reach it through ${launcherPath()}`,
-        `  3. bring up its page at ${daemonUrl}/ui: every call and what became of it, the holds inbox, the weekly report${open ? " (opened once the daemon is up)" : " (sayagain ui opens it; --open opens it now)"}`,
+        `  3. bring up its page at ${daemonUrl}/ui: whether calls are flowing, what the boundary did, what to do next; the holds inbox, the ledger and the weekly report behind it${open ? " (opened once the daemon is up)" : " (sayagain ui opens it; --open opens it now)"}`,
         modeLine,
         ...(current !== undefined && current !== mode
           ? [

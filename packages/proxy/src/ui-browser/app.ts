@@ -74,6 +74,7 @@ interface OverviewServer {
   failures: number;
   held: number;
   lastSeen: string | null;
+  hosts: { named: number; wrapped: number };
 }
 interface Finding {
   severity: "error" | "warning" | "note" | "ok";
@@ -95,9 +96,20 @@ const ENOUGH_CALLS = 200;
 
 /**
  * The first screen: is it working, what did the boundary do, what to do next. Plain text and
- * numbers, every one of them from an endpoint the other screens already use.
+ * numbers, every one of them from an endpoint the other screens already use. One render at a
+ * time: a burst of events while one is in flight does not queue another behind it.
  */
+let overviewInFlight = false;
 async function renderOverview(): Promise<void> {
+  if (overviewInFlight) return;
+  overviewInFlight = true;
+  try {
+    await renderOverviewNow();
+  } finally {
+    overviewInFlight = false;
+  }
+}
+async function renderOverviewNow(): Promise<void> {
   const [o, r] = await Promise.all([
     api<Overview>("/api/overview"),
     api<Json>("/api/report?since=7d"),
@@ -144,7 +156,15 @@ ${
           s.held ? `<a href="#holds">${esc(s.held)}</a>` : "0",
           s.lastSeen ? esc(fmtWhen(s.lastSeen)) : "never",
           s.calls === 0
-            ? `<span class="muted">no calls through the boundary yet${s.started ? "" : "; restart the host that uses it"}</span>`
+            ? `<span class="muted">${
+                s.hosts.named === 0
+                  ? "no host names it"
+                  : s.hosts.wrapped === 0
+                    ? "a host names it but calls it directly (see below)"
+                    : s.started
+                      ? "no calls in the window"
+                      : "no calls through the boundary yet; restart the host that uses it"
+              }</span>`
             : "",
         ]),
       )
@@ -527,9 +547,14 @@ const screens: Record<string, () => Promise<void>> = {
 };
 
 let current = location.hash.slice(1) || "overview";
+let overviewTimer: ReturnType<typeof setTimeout> | undefined;
 async function show(name: string): Promise<void> {
   const screen = Object.hasOwn(screens, name) ? name : "overview";
   current = screen;
+  if (screen !== "overview" && overviewTimer) {
+    clearTimeout(overviewTimer);
+    overviewTimer = undefined;
+  }
   $("#window").hidden = !["tools", "errors", "report"].includes(screen);
   for (const a of document.querySelectorAll<HTMLAnchorElement>("nav a"))
     a.classList.toggle("active", a.dataset.screen === screen);
@@ -633,15 +658,14 @@ events.addEventListener(
 );
 events.addEventListener("row", () => void (current === "ledger" && loadLedger().catch(report)));
 // The overview re-reads several endpoints, so a burst of rows refreshes it once, a little later.
-let overviewTimer: ReturnType<typeof setTimeout> | undefined;
 const refreshOverview = () => {
   if (current !== "overview" || overviewTimer) return;
   overviewTimer = setTimeout(() => {
     overviewTimer = undefined;
     if (current === "overview") renderOverview().catch(report);
-  }, 2000);
+  }, 3000);
 };
-for (const name of ["row", "hold", "hold-decided", "dead-letter"])
+for (const name of ["row", "hold", "hold-decided", "hold-resumed", "dead-letter"])
   events.addEventListener(name, refreshOverview);
 events.addEventListener("learned", () => void (current === "learn" && renderLearn().catch(report)));
 events.onerror = () => {

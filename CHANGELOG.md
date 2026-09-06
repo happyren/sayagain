@@ -21,13 +21,19 @@ All notable changes to this project are documented here. The format follows
   failures, waiting holds and last call, and "no calls through the boundary
   yet" where that is the state; and the doctor's findings, each with its
   fix. Plain HTML and one module, as before; nothing new is loaded.
-- `GET /api/overview` on the daemon: the servers with their window, the
-  daemon's mode, and the doctor's findings composed from what the daemon
-  already knows (hosts, registry, ledger, holds; the upstreams are not
-  probed). `hostRowsFor` is shared with `sayagain doctor`.
+- `GET /api/overview` on the daemon: the servers with their window, counted
+  as the report counts (one row per call, deduplicated and still-held calls
+  left out, a failure being one the agent had to recover from, rows keyed by
+  a name the registry does not know left out), the daemon's mode, and the
+  doctor's findings composed from what the daemon already knows: the user
+  and local host files, the registry, the ledger, the holds. It differs from
+  `sayagain doctor` in a terminal in what it cannot see: project-scope
+  files, the terminal's own launcher, the upstreams' tool classes (no note
+  about that, since the daemon cannot probe itself). The daemon reads its
+  ledger at most once every five seconds for the page and the report.
+  `hostRowsFor` is shared with `sayagain doctor`.
 - `parseListen` moved to `registry.ts`, so the daemon can import the
   onboarding module without a cycle.
-
 
 ## [0.19.0] - 2026-09-06
 

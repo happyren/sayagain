@@ -54,10 +54,10 @@ npx -y -p @sayagain/proxy sayagain up   # Node 22.13+; or: npm install -g @sayag
 ```
 
 ```
-Say Again 0.19.0 will:
+Say Again 0.20.0 will:
   1. wrap the 3 server(s) Claude Code, Cursor have configured, keeping the keys the hosts use; a backup of each file goes to ~/.sayagain/backups
   2. start the boundary as a daemon at http://127.0.0.1:7777 and keep it running; the hosts reach it through ~/.sayagain/bin/sayagain
-  3. bring up its page at http://127.0.0.1:7777/ui: every call and what became of it, the holds inbox, the weekly report (sayagain ui opens it; --open opens it now)
+  3. bring up its page at http://127.0.0.1:7777/ui: whether calls are flowing, what the boundary did, what to do next; the holds inbox, the ledger and the weekly report behind it (sayagain ui opens it; --open opens it now)
   4. observe first: nothing waits for you. Receipts, safe retries, repairs and read-backs are on; holds are off until you run: sayagain up --hold
 ```
 

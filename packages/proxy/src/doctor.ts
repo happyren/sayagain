@@ -76,6 +76,8 @@ export interface DoctorInput {
   holds?: DoctorHold[];
   /** Whether the class tables were gathered at all (--no-probe, or no daemon to ask). */
   probed: boolean;
+  /** The caller could not have probed (the daemon reporting on itself): no note about it. */
+  probeNotApplicable?: boolean;
   launcherCaveat?: string | undefined;
   hostRunning?: boolean;
   now?: number;
@@ -304,7 +306,7 @@ export function doctorFindings(input: DoctorInput): Finding[] {
       });
   }
 
-  if (!input.probed && input.servers.length)
+  if (!input.probed && !input.probeNotApplicable && input.servers.length)
     add({
       severity: "note",
       title: "tool classes were not checked",

@@ -4,7 +4,7 @@
  * this composes it so a person who just ran `sayagain up` can answer those three questions in a
  * minute, without reading a table they do not yet know how to read.
  */
-import { finalRows } from "./analysis.js";
+import { finalRows, isFailure } from "./analysis.js";
 import { type DoctorHost, doctorFindings, type Finding } from "./doctor.js";
 import { HOSTS, hostFiles, type Scope } from "./hosts.js";
 import { launcherCaveat } from "./launcher.js";
@@ -43,11 +43,17 @@ export interface OverviewServer {
   ready: boolean;
   upstream: string | null;
   sessions: number;
-  /** In the window: calls the boundary recorded, how many failed, how many are waiting now. */
+  /**
+   * In the window, counted as the report counts them: one per call, deduplicated and still-held
+   * calls left out, a failure being one the agent had to recover from.
+   */
   calls: number;
   failures: number;
+  /** Waiting for a decision right now. */
   held: number;
   lastSeen: string | null;
+  /** How many host config files name this server, and how many of them route it through Say Again. */
+  hosts: { named: number; wrapped: number };
 }
 
 export interface Overview {
@@ -95,17 +101,23 @@ export function overviewFor(input: OverviewInput): Overview {
   const days = input.days ?? 7;
   const since = new Date(now - days * 86_400_000).toISOString();
   const byServer = new Map<string, { calls: number; failures: number; lastSeen: string | null }>();
-  // The same rows the report counts: one per call, the last word on it, no read-backs or replays.
+  // The rows the report counts, keyed as the daemon keys them: one per call, the last word on it,
+  // no read-backs or replays, no deduplicated or still-held calls; a failure is one the agent had
+  // to recover from. A row keyed by a name the registry does not know (an upstream's own name from
+  // an older ledger, a `wrap` outside the daemon) belongs to no server here and is left out.
   for (const row of finalRows(input.rows)) {
+    if (row.status === "deduplicated" || row.status === "held") continue;
     const key = row.server ?? row.upstream;
+    if (!Object.hasOwn(input.registry.servers, key)) continue;
     const s = byServer.get(key) ?? { calls: 0, failures: 0, lastSeen: null };
     s.calls++;
-    if (row.isError) s.failures++;
+    if (isFailure(row)) s.failures++;
     if (s.lastSeen === null || row.ts > s.lastSeen) s.lastSeen = row.ts;
     byServer.set(key, s);
   }
   const heldBy = new Map<string, number>();
   for (const h of input.holds) if (h.server) heldBy.set(h.server, (heldBy.get(h.server) ?? 0) + 1);
+  const hosts = hostRowsFor(input.cwd, ["user", "local"]);
   const servers: OverviewServer[] = Object.entries(input.registry.servers).map(([name, cfg]) => {
     const live = input.live[name];
     const stats = byServer.get(name) ?? { calls: 0, failures: 0, lastSeen: null };
@@ -120,6 +132,10 @@ export function overviewFor(input: OverviewInput): Overview {
       failures: stats.failures,
       held: heldBy.get(name) ?? 0,
       lastSeen: stats.lastSeen,
+      hosts: {
+        named: hosts.filter((h) => h.servers.includes(name)).length,
+        wrapped: hosts.filter((h) => h.wrapped.includes(name)).length,
+      },
     };
   });
   const hold = input.registry.daemon?.hold ?? "destructive";
@@ -139,7 +155,7 @@ export function overviewFor(input: OverviewInput): Overview {
       listen: input.listen,
       holdDefault: hold,
     },
-    hosts: hostRowsFor(input.cwd, ["user", "local"]),
+    hosts,
     servers: Object.entries(input.registry.servers).map(([name, cfg]) => ({
       name,
       transport: cfg.transport,
@@ -162,8 +178,10 @@ export function overviewFor(input: OverviewInput): Overview {
       createdAt: h.createdAt,
       orphaned: h.orphaned,
     })),
-    // The daemon does not start its own upstreams to ask for their tools; `sayagain doctor` does.
+    // The daemon does not start its own upstreams to ask for their tools; `sayagain doctor` does,
+    // so the page carries no note about it.
     probed: false,
+    probeNotApplicable: true,
     ...(caveat ? { launcherCaveat: caveat } : {}),
     now,
   });
