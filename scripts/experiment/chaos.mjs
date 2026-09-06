@@ -49,7 +49,8 @@ const fail = (id, text) =>
   toClient({ jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text }] } });
 // The shim lists the tools itself once the server is up, so what counts as a write does not depend
 // on whether the client ever asked, and holds the client's calls until it knows. The answer to its
-// own request is not forwarded; a server that never answers it is given five seconds, then trusted.
+// own request is not forwarded; a server that never answers it is given five seconds from its
+// initialize answer, or ten from its start, then trusted.
 const OWN_LIST = "chaos:tools/list";
 let initializeId;
 let listed = false;
@@ -59,6 +60,8 @@ const learned = () => {
   listed = true;
   for (const msg of waiting.splice(0)) handleCall(msg);
 };
+// A server that never answers initialize, or answers it and nothing else, still gets its calls.
+setTimeout(learned, 10_000).unref();
 
 function handleCall(msg) {
   const name = msg.params?.name;

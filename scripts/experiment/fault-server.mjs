@@ -88,8 +88,6 @@ const TOOLS = [
 const WRITES = new Set(["set_status", "create_record", "delete_record"]);
 
 const handleCall = (id, name, args) => {
-  // Every call the server really ran, whoever sent it: the honest denominator for the failure tax.
-  if (callsPath) appendFileSync(callsPath, `${name}\n`);
   const key = args?.__step ?? `${name}:${JSON.stringify(args ?? {})}`;
   const n = (attempts.get(key) ?? 0) + 1;
   attempts.set(key, n);
@@ -102,6 +100,9 @@ const handleCall = (id, name, args) => {
   if (fault === "other") return fail(id, "Error: internal error (see server logs)");
   if (fault === "blocked") return fail(id, "permission denied for this operation");
   if (fault === "retryable" && (own || n === 1)) return fail(id, "Request timed out after 30000ms");
+  // Every call the server really ran, whoever sent it: the honest denominator for the failure tax.
+  // A call the fault stopped at the door did not run, which is what the chaos shim counts too.
+  if (callsPath) appendFileSync(callsPath, `${name}\n`);
 
   // Agent-side: an argument of the wrong type. The schema says a number; a string arrives.
   if (args && typeof args.limit === "string")

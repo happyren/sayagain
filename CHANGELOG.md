@@ -20,7 +20,8 @@ All notable changes to this project are documented here. The format follows
   and a new row, "of which nothing could act on", says how much of what the
   agent saw was out of any boundary's reach. Each step draws from the mix
   restricted to the classes it can carry, renormalised, so no class is
-  turned into another; the boundary's own read-backs and re-sends draw a
+  turned into another, and every report prints the shares it actually
+  injected; the boundary's own read-backs and re-sends draw a
   fault at the server from the same mix at the same rate on the same seed
   (`scripts/experiment/faults.mjs`), so nothing that reaches the server is
   exempt; the agent's coin flips are keyed on the step and the attempt, so
@@ -61,13 +62,13 @@ All notable changes to this project are documented here. The format follows
 
 300 paired tasks over the pre-registered seeds, at the measured rate. Every
 harm row is unchanged by the boundary: silent unknowns 0 and 0, writes the
-agent could not resolve 0.08 and 0.08, phantom beliefs 0 and 0, records in
+agent could not resolve 0.06 and 0.06, phantom beliefs 0 and 0, records in
 the wrong state 0.10 and 0.10, non-idempotent duplicates 0.01 and 0. The
 agent sees 0.32 failures a task against 0.37 and spends 0.44 calls
 recovering against 0.53; the 0.19 failures a task nothing could act on are
 the same in both arms. A declining operator leaves 0.28 records in the
-wrong state against 0.10, and an absent one also leaves 0.26 writes
-unresolved against 0.08, distinguishable and against the boundary. At a
+wrong state against 0.10, and an absent one also leaves 0.25 writes
+unresolved against 0.06, distinguishable and against the boundary. At a
 stress rate (30% of steps, one write in ten losing its answer) the
 mechanism shows: non-idempotent duplicates 0.07 to 0.01 with the read-back
 on and 0.07 to 0.07 with it off; failures seen 2.30 to 1.81, with 1.11 a
@@ -75,9 +76,9 @@ task opaque in both arms; silent unknowns zero in both arms at both rates,
 since the agent's own retry of a lost delete is told the truth. The placebo
 is zero on every row but the byte rows at both rates. The first stress run
 showed one phantom belief in 300 tasks, which the pre-image removed at a
-cost of 0.22 server calls a task; the review of that run found the
-read-backs unfaulted, and with them faulted the duplicates row reads 0.01
-rather than zero.
+cost of 0.21 server calls a task at the measured rate; the review of that
+run found the read-backs unfaulted, and with them faulted the duplicates
+row reads 0.01 rather than zero.
 
 ## [0.17.0] - 2026-09-06
 

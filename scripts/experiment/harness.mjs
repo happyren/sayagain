@@ -126,9 +126,12 @@ const carries = (step, cls) => {
 
 /**
  * Give each step its fault, from the seed and the mix, so both arms meet the same one. Each step
- * draws from the mix restricted to the classes it can carry, with the shares renormalised, so the
- * classes keep their proportions to one another and no class is quietly turned into another. The
- * agent-side classes are put into the arguments; the server-side ones are named for the server.
+ * draws from the mix restricted to the classes it can carry, with the shares renormalised, so no
+ * class is quietly turned into another. The proportions hold within a step, not over the run: one
+ * step in four carries a wrong type and the create carries no missing record, so over the 300
+ * pre-registered tasks the injected shares are other 49%, semantic 21%, retryable 16%, blocked
+ * 13%, coercible 0%, and the report says so. The agent-side classes are put into the arguments;
+ * the server-side ones are named for the server.
  */
 function faulted(task, seed, mix) {
   const rnd = rng(`${seed}:faults:${task.id}`);
@@ -227,16 +230,19 @@ async function runTask(task, call, seed, policy) {
         break; // the precondition does not hold; a real agent moves on
       }
       let retry = false;
+      let refused = false;
       if (/timed out/.test(text)) retry = coin(index, attempt) < policy.retryTimeout;
       else {
         // An error that says nothing actionable, or names a permission the caller lacks: nothing
         // downstream can act on it either. Counted per attempt, like the row above it.
         opaqueSeen++;
-        retry = !/permission denied/.test(text) && coin(index, attempt) < policy.retryOther;
+        refused = /permission denied/.test(text);
+        retry = !refused && coin(index, attempt) < policy.retryOther;
       }
       if (retry && attempt < policy.maxAttemptsPerStep) continue;
-      // Out of attempts on a write: it was told the call failed, and it does not know whether it did.
-      if (step.write) unknown.add(key);
+      // Out of attempts on a write: it was told the call failed, and it does not know whether it
+      // did. A permission refused is the one failure that says the call did not run.
+      if (step.write && !refused) unknown.add(key);
       break;
     }
   }
@@ -550,11 +556,17 @@ async function runOnce(cell) {
   const policy = { ...POLICY, maxAttemptsPerStep: cell.attempts };
   const dir = mkdtempSync(join(tmpdir(), "sayagain-fault-"));
   const arms = { control: [], treatment: [] };
+  const injected = { steps: 0, classes: {} };
   if (DUMP) writeFileSync(DUMP, "");
   try {
     for (const seed of SEEDS) {
       for (let i = 0; i < TASKS; i++) {
         const task = faulted(makeTask(i, seed), seed, MIXES[MIX]);
+        for (const step of task.steps) {
+          injected.steps++;
+          if (step.cls !== "none" && step.cls !== "lost")
+            injected.classes[step.cls] = (injected.classes[step.cls] ?? 0) + 1;
+        }
         const truths = {};
         for (const armName of ["control", "treatment"]) {
           const truthPath = join(dir, `${armName}-${seed}-${i}.jsonl`);
@@ -595,9 +607,20 @@ async function runOnce(cell) {
   }
   return {
     pairs: arms.control.length,
+    injected,
     differences: Object.fromEntries(KEYS.map((k) => [k, paired(arms.control, arms.treatment, k)])),
   };
 }
+
+/** The classes actually injected over a run, as shares of the faulted steps, and the rate. */
+const injectedShares = (injected) => {
+  const total = Object.values(injected.classes).reduce((a, b) => a + b, 0);
+  const shares = Object.entries(injected.classes)
+    .sort((a, b) => b[1] - a[1])
+    .map(([cls, n]) => `${cls} ${total ? Math.round((100 * n) / total) : 0}%`)
+    .join(", ");
+  return `${shares} at ${((100 * total) / Math.max(1, injected.steps)).toFixed(1)}% of steps`;
+};
 
 function render(result, cell, build) {
   const mix = Object.entries(MIXES[MIX])
@@ -605,7 +628,7 @@ function render(result, cell, build) {
     .join(", ");
   const lines = [
     `Fault-injection harness: ${result.pairs} paired tasks (${TASKS} per seed, seeds ${SEEDS.join(",")}), docs/measurement.md 5.6; boundary ${build.version} (dist ${build.dist})`,
-    `Faults: ${(100 * FAIL_RATE).toFixed(1)}% of steps fail, classes in the ${MIX} mix (${mix}), each step drawing from the classes it can carry; a write loses its answer once ${(100 * LOST).toFixed(0)}% of the time; the boundary's own reads draw from the same mix at the same rate.`,
+    `Faults: ${(100 * FAIL_RATE).toFixed(1)}% of steps fail, classes in the ${MIX} mix (${mix}), each step drawing from the classes it can carry, which over these tasks injected ${injectedShares(result.injected)}; a write loses its answer once ${(100 * LOST).toFixed(0)}% of the time; the boundary's own reads draw from the same mix at the same rate.`,
     `Agent: retries a timeout ${Math.round(100 * POLICY.retryTimeout)}% of the time and an unclassifiable error ${Math.round(100 * POLICY.retryOther)}%, never a permission error, at most ${cell.attempts} attempts a step; it is not a model.`,
     `Operator: ${cell.operator === "absent" ? "nobody; a held call waits out the short wait and comes back STANDBY" : `a stand-in that answers every held call "${cell.operator}", at once`}. Read-back of a lost write before deciding (spec 8.3): ${cell.verify}.`,
     ...(SERVER
@@ -634,7 +657,7 @@ function render(result, cell, build) {
   }
   lines.push("");
   lines.push(
-    "A positive difference means the control arm had more of it. On the last four rows more is not worse, it is what the boundary costs the agent; the 'nothing could act on' row is the part of the failures no boundary reaches, and it should read the same in both arms.",
+    "A positive difference means the control arm had more of it. On the last four rows more is not worse, it is what the boundary costs the agent; the 'nothing could act on' row is the part of the failures no boundary reaches, and it reads the same in both arms unless an operator declines a held call before its error can be met.",
   );
   return lines.join("\n");
 }
@@ -709,7 +732,7 @@ async function main() {
     if (JSON_OUT)
       writeFileSync(
         JSON_OUT,
-        `${JSON.stringify({ generatedAt: stamp(), ...common, ...cell, pairs: result.pairs, differences: result.differences }, null, 2)}\n`,
+        `${JSON.stringify({ generatedAt: stamp(), ...common, ...cell, pairs: result.pairs, injected: result.injected, differences: result.differences }, null, 2)}\n`,
       );
     process.stdout.write(`${render(result, cell, build)}\n`);
     return;
