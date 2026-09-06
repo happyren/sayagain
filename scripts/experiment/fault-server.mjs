@@ -1,9 +1,12 @@
 // A stdio MCP server that fails the way real ones do, and writes down what it actually did.
 //
-// The harness decides each step's fault (from a seed and the measured class mix) and names it in the
-// call's `__fault` argument, so the server is a pure function of the call and its attempt count and
-// the same fault meets both arms. The classes are the boundary's own (errors.ts), at the shares the
-// 30-day audit measured on this machine's MCP traffic:
+// The harness decides each agent step's fault (from a seed and the measured class mix) and names it
+// in the call's `__fault` argument, so the server is a pure function of the call and its attempt
+// count and the same fault meets both arms. A call that arrives without one, which is the boundary's
+// own read-back or its re-send of a repaired call, draws its fault here from the same mix at the
+// same rate, on the same seed (faults.mjs), so nothing that passes through the server is exempt.
+// The classes are the boundary's own (errors.ts), at the shares the 30-day audit measured on this
+// machine's MCP traffic:
 //   other      45%  an error nothing downstream can class or act on; persists on retry
 //   semantic   26%  a precondition that does not hold (the harness aims at a missing record)
 //   retryable  18%  a timeout that a second attempt survives
@@ -13,12 +16,15 @@
 // (one write in a hundred), which is the case the north-star metric counts.
 //
 // The truth log records every side effect that really happened, so the harness can compare what the
-// agent believes against what the world did. FAULT_TRUTH and FAULT_CALLS name the two logs.
+// agent believes against what the world did. FAULT_TRUTH and FAULT_CALLS name the two logs;
+// FAULT_SEED, FAULT_RATE and FAULT_MIX are the draw for calls that carry no fault of their own.
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { faultFor, settingsFromEnv } from "./faults.mjs";
 
 const truthPath = process.env.FAULT_TRUTH;
 const callsPath = process.env.FAULT_CALLS;
+const settings = settingsFromEnv(process.env);
 
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 const records = new Map(); // id -> { status }
@@ -87,12 +93,15 @@ const handleCall = (id, name, args) => {
   const key = args?.__step ?? `${name}:${JSON.stringify(args ?? {})}`;
   const n = (attempts.get(key) ?? 0) + 1;
   attempts.set(key, n);
-  const fault = args?.__fault ?? "none";
+  // An agent step's fault is drawn on the step, so its retry meets the second attempt of the same
+  // fault; a call without one draws per attempt, so its fault is already this attempt's.
+  const own = args?.__fault === undefined;
+  const fault = own ? faultFor(settings, key, n) : args.__fault;
 
   // Server-side faults that do not depend on what the call asked for.
   if (fault === "other") return fail(id, "Error: internal error (see server logs)");
   if (fault === "blocked") return fail(id, "permission denied for this operation");
-  if (fault === "retryable" && n === 1) return fail(id, "Request timed out after 30000ms");
+  if (fault === "retryable" && (own || n === 1)) return fail(id, "Request timed out after 30000ms");
 
   // Agent-side: an argument of the wrong type. The schema says a number; a string arrives.
   if (args && typeof args.limit === "string")
@@ -144,7 +153,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       result: {
         protocolVersion: "2026-07-28",
         capabilities: { tools: {} },
-        serverInfo: { name: "fault-records", version: "2.0.0" },
+        serverInfo: { name: "fault-records", version: "2.1.0" },
       },
     });
   if (msg.method === "tools/list")

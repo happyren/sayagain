@@ -298,18 +298,23 @@ fixture harness where each task is its own cluster (the shape of 5.3).
 
 ### 5.6 Fault-injection harness (each task its own cluster)
 
-Pre-registered 2026-09-06 and amended the same day, twice. The first
-version of this instrument was wrong in four ways that all flattered the
-boundary, found by review before anything was published: the stand-in
+Pre-registered 2026-09-06 and amended the same day, three times. The
+first version of this instrument was wrong in four ways that all flattered
+the boundary, found by review before anything was published: the stand-in
 operator was never wired to the event the boundary emits, so no held call
 was ever decided; a held response carries `isError: false`, so the agent
 scored it as a successful write; the treatment arm silently declined work
 and nothing counted work left undone; and the metric named for M9 measured
 a world-side quantity while M9 is defined caller-side. The second version
-injected only the failures the boundary was built for, at ten times the
-measured rate, so its headline was a claim about a setting. The instrument
-described here injects what was measured, and every outcome is reported in
-both directions.
+injected only the failures the boundary was built for, at about twice the
+measured rate, so its headline was a claim about a setting. The third
+injected the measured mix but let the boundary's own read-backs through
+unfaulted, so they were an oracle inside an instrument about failing
+reads; scored a write that came back STANDBY as resolved; and scored a
+delete whose retry was told the record was gone as a silent unknown. Each
+favoured one arm, and each was found by review before its numbers were
+written down. The instrument described here is the fourth, and every
+outcome is reported in both directions.
 
 The 5.4 A/B flips its coin per session, and one developer produces about
 twenty independent sessions a month, so the outcomes that cluster inside a
@@ -332,11 +337,19 @@ node scripts/experiment/harness.mjs --tasks 60 --seeds 1,2,3,7,11 --operator app
   a write that did not otherwise fail, loses its answer once in a hundred
   (`--lost`), which is the case M9 counts. The class is named on the call
   and the server acts on it, so both arms meet the same fault by
-  construction, whatever either side does to recover. `--mix fixable` keeps
-  the second version's mix (timeouts, wrong types and missing records only)
-  so the difference the calibration makes can be seen, and `--fail-rate`
-  raises the rate when a few hundred tasks need to meet enough faults to
-  show a mechanism.
+  construction, whatever either side does to recover. Each step draws from
+  the mix restricted to the classes it can carry (a wrong type needs a
+  typed argument, a missing record needs a lookup), with the shares
+  renormalised, so the classes keep their proportions and none is turned
+  into another. The boundary's own reads and re-sends carry no fault of
+  their own and draw one at the server from the same mix at the same rate
+  on the same seed (`scripts/experiment/faults.mjs`); a read-back that
+  could not fail would be an oracle inside an instrument about failing
+  reads. `--mix fixable`
+  keeps the earlier versions' mix (timeouts, wrong types and missing
+  records only) so the difference the calibration makes can be seen, and
+  `--fail-rate` raises the rate when a few hundred tasks need to meet
+  enough faults to show a mechanism.
 - **The upstream** (`scripts/experiment/fault-server.mjs`) is a real stdio
   MCP server that logs every call it actually ran and every side effect that
   really happened. Its create and delete declare how to read their effect
@@ -345,14 +358,22 @@ node scripts/experiment/harness.mjs --tasks 60 --seeds 1,2,3,7,11 --operator app
   instead: the shim answers the server-side classes from outside, drops a
   good answer for the lost case, learns which tools are writes from the
   server's own `tools/list`, and logs a truth entry when the server
-  answered a write without an error. Behind a real server the state row
-  cannot be read and prints n/a.
+  answered a write without an error, and holds the client's calls until
+  its own `tools/list` has answered. Behind a real server the state row
+  cannot be read and prints n/a; a tool the server does not annotate is
+  taken for a write, and the task list speaks the fault server's
+  vocabulary, so a real server needs a task file that speaks its own.
 - **The agent** is a fixed recovery policy, not a model: it retries a
   timeout 88% of the time (M2), an error that says nothing half the time,
   a permission error never, repairs a wrong type once, probes once after a
   missing record, and gives a step at most three attempts. The cap is a
   parameter (`--attempts`), because M17 is a median of 0 and a mean of 1.8
-  calls to recover and no single cap follows from that.
+  calls to recover and no single cap follows from that. Every coin it flips
+  is keyed on the step and the attempt, so the same agent runs in both
+  arms. A write that comes back STANDBY, or held for an unknown outcome, is
+  one the agent could not resolve; a write whose retry was told the record
+  is not there has been told the truth, and is neither believed nor
+  unknown.
 - **The operator** is a stand-in with one rule, `--operator
   approve|reject|absent`: approve everything at once, decline everything at
   once, or never answer, so a held call waits out the short wait and comes
@@ -361,6 +382,8 @@ node scripts/experiment/harness.mjs --tasks 60 --seeds 1,2,3,7,11 --operator app
 - **Seeds** are pre-registered as 1, 2, 3, 7 and 11, pooled. One seed is one
   draw of the fault pattern, and choosing it after seeing results would be
   choosing the result.
+- **The build.** Every report names the boundary's package version and a
+  hash of the built files that ran, so a number is pinned to a boundary.
 - **Outcomes**, paired per task, control minus treatment, with a t interval
   over tasks: writes that happened and nobody knows about, writes the agent
   could not resolve, writes believed that never happened, records left in the
@@ -383,50 +406,78 @@ node scripts/experiment/harness.mjs --tasks 60 --seeds 1,2,3,7,11 --operator app
 
 **Result at the measured rate, 300 paired tasks over the five seeds,
 boundary as of 0.18.0.** With an approving operator and the read-back on,
-every harm row is unchanged: silent unknowns 0 and 0, phantom beliefs 0
-and 0, records in the wrong state 0.10 and 0.10, non-idempotent duplicates
-0.01 and 0 (three tasks, not distinguishable). The agent sees 0.32 failures
-a task against 0.37 and spends 0.45 calls recovering against 0.53, both
-distinguishable and both small. Of the failures it sees, 0.20 a task are
-ones nothing could act on, in either arm: that is the larger half of the
-measured mix, and the boundary does not touch it. The server runs 4.64
-calls a task against 4.43, which is the pre-image read on every held
-destructive call plus the verifiers, and the bytes delivered to the agent
-double, which is the receipts. The read-back changes nothing at this rate:
-`--verify off` gives the same rows to two decimals, with the duplicates at
-0.01 in both arms. A declining or absent operator leaves records in the
-wrong state 0.28 times a task against 0.10, distinguishable and against
-the boundary: a destructive call nobody approves is work not done, and at
-this rate that is the largest effect the boundary has. The placebo is zero
-on every row but the byte rows.
+every harm row is unchanged: silent unknowns 0 and 0, writes the agent
+could not resolve 0.08 and 0.08, phantom beliefs 0 and 0, records in the
+wrong state 0.10 and 0.10, non-idempotent duplicates 0.01 and 0 (three
+tasks, not distinguishable). The agent sees 0.32 failures a task against
+0.37 and spends 0.44 calls recovering against 0.53, both distinguishable
+and both small. Of the failures it sees, 0.19 a task are ones nothing could
+act on, in either arm: that is the larger half of the measured mix, and the
+boundary does not touch it. The server runs 4.65 calls a task against 4.43,
+which is the pre-image read on every held destructive call plus the
+verifiers, and the bytes delivered to the agent double, which is the
+receipts. The read-back changes nothing at this rate: `--verify off` gives
+the same harm and agent-side rows, with the duplicates at 0.01 in both
+arms, and the server-calls row loses the 0.22. A declining operator leaves
+records in the wrong state 0.28 times a task against 0.10; an absent one
+does the same and leaves 0.26 writes a task unresolved against 0.08; all
+distinguishable and against the boundary. A destructive call nobody
+approves is work not done, and at this rate that is the largest effect the
+boundary has. The placebo is zero on every row but the byte rows.
 
 **Result at a stress rate, 30% of steps and one write in ten losing its
 answer, same seeds.** This is where the mechanism can be seen. With the
-read-back on, non-idempotent duplicates fall from 0.07 a task to zero and
-silent unknowns from 0.01 to zero, both distinguishable; with it off, the
-duplicates are 0.07 in both arms. Failures seen fall from 2.29 to 1.89 and
-calls spent recovering from 3.23 to 2.49; the 1.28 opaque failures a task
-are the same in both arms. Records in the wrong state are 0.40 against
-0.39. The server runs 0.30 more calls a task. Declining or absent
-operators leave 0.50 records in the wrong state against 0.40. The placebo
-is zero. Under the `fixable` mix at the same rate, the numbers the second
-version reported come back, now labelled as what they are: failures seen
-1.43 to 0.14, calls spent recovering 2.74 to 0.29, records in the wrong
-state 0.11 to 0.07, none of it opaque. The same stress run through the
+read-back on, non-idempotent duplicates fall from 0.07 a task to 0.01,
+distinguishable, and not to zero: the boundary's read-backs meet the same
+server as every other call, and a read-back that fails leaves a hold the
+operator approves blind. With it off, the duplicates are 0.07 in both
+arms. Silent unknowns are zero in both arms at both rates: in this task
+model the agent's own retry of a lost delete is told the record is gone,
+which is the truth, and the row that was this instrument's headline in
+0.17.0 is not the boundary's to claim here. Failures seen fall from 2.30
+to 1.81 and calls spent recovering from 3.11 to 2.29; the 1.11 opaque
+failures a task are the same in both arms. Records in the wrong state are
+0.38 against 0.37 and writes the agent could not resolve 0.43 against 0.39.
+The server runs 0.42 more calls a task. A declining operator leaves 0.48
+records in the wrong state against 0.38; an absent one the same, and 0.57
+writes unresolved against 0.43. The placebo is zero. Under the `fixable`
+mix at the same rate, the shape the earlier versions reported comes back,
+now labelled as what it is: failures seen 1.50 to 0.20, calls spent
+recovering 2.75 to 0.40, records in the wrong state 0.15 to 0.10, writes
+unresolved 0.09 to 0, none of it opaque. The same stress run through the
 chaos shim, with the fault server behind it as a stand-in, gives the same
-harm rows (duplicates 0.07 to 0, failures seen 2.29 to 1.89) with the
+harm rows (duplicates 0.07 to 0.01, failures seen 2.30 to 1.81) with the
 state row n/a, which is what the shim can and cannot see.
+
+**The sweep, at the stress rate.** Eighteen cells, operator rule by
+read-back by attempt cap, 300 paired tasks each. Across every cell: silent
+unknowns 0 to 0.01 and phantom beliefs 0, never against the boundary;
+non-idempotent duplicates 0.07 to -0.01, never against, distinguishable in
+the fifteen cells where the read-back or the cap gives it something to
+remove; calls spent recovering 0.37 to 0.74 and failures seen 0.07 to
+0.51, in the boundary's favour in every cell; the opaque failures the same
+in both arms in every cell. Records left in the wrong state run from 0.02
+in the boundary's favour to 0.13 against it, and the twelve cells against
+are exactly the declining and absent operators; the writes the agent could
+not resolve run from 0.05 in its favour to 0.09 against, and the six cells
+against are the same rules at the higher caps. The server-call row runs
+from 0.32 in the boundary's favour (its own retries replace the agent's)
+to 0.30 against (the pre-image and the verifiers). So the claims that
+survive every setting are the ones about duplicates, silent unknowns and
+the agent's recovery work; the ones about work left undone are claims
+about the operator's rule.
 
 **What the calibrated harness found.** In its first stress run, one task in
 300 showed a write believed in the treatment arm that never happened: a
 delete of a record whose create had failed timed out, the verifier read the
 record as absent, absence was the declared effect, and the boundary
-answered the call as executed. That is the mirror error the phantom row
-exists to catch, and it was the boundary's. The pre-image (ADR-0013
-amendment, spec v0.1.9) reads the effect while a held call waits for its
-operator and treats a verifier answer that matches it as inconclusive. The
-row is zero in every run since, and the cost is the 0.2 server calls a task
-above.
+answered the call as executed (seed 11, task 58 of the stress run, found
+through `--dump`). That is the mirror error the phantom row exists to
+catch, and it was the boundary's. The pre-image (ADR-0013 amendment, spec
+v0.1.9) reads the effect while a held call waits for its operator, and a
+verifier that finds the effect present afterwards is conclusive only if
+the pre-image found it absent. The row is zero in every run since, and the
+cost is the 0.2 server calls a task above.
 
 What this protocol can support: a claim about what the boundary does to
 the measured failure distribution under a stated recovery policy and a

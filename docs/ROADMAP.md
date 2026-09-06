@@ -106,7 +106,7 @@ badge per tool and `index.json`; `sayagain index fixes <server>` writes the
 outreach message; the `Index` workflow scans and builds on demand and
 publishes to GitHub Pages once the owner sets `SAYAGAIN_INDEX_PAGES`
 (decision 3 stays open, so nothing is public yet). The convention is spec
-v0.1.7 (tool declarations: idempotency, compensation) with the SEP draft
+v0.1.9 (tool declarations: idempotency, compensation, verification) with the SEP draft
 in `docs/sep-draft.md` and `annotations/compensation` in the linter. The
 data post is drafted in `docs/data-post.md`. Outreach itself, the runtime
 scores' first real data, and the public URL wait on the owner.

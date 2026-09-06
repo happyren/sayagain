@@ -663,6 +663,29 @@ describe("lifecycle", () => {
     }
   });
 
+  it("does not send a held call the client cancelled while its pre-image was being read", async () => {
+    // Once approved, the call waits for its pre-image; a cancel in that window must still find the
+    // hold, and nothing may go upstream on behalf of a client that has gone.
+    const h = harness({ hold: "destructive", holdWaitMs: 2000 }, { replayTimeoutMs: 300 });
+    try {
+      await h.handshake();
+      h.call(1, "hangverify_delete", { id: "z" });
+      const hold = await h.pendingHold();
+      expect(hold).toBeDefined();
+      h.wrapped.holds.decide((hold as { receipt: string }).receipt, "approve");
+      await sleep(50); // the pre-image probe is in flight and hangs until the replay timeout
+      h.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 } });
+      await sleep(600); // past the probe's timeout: the send resumes and must find the cancel
+      const rows = h.ledger.rows.filter((r) => r.tool === "hangverify_delete");
+      expect(rows.map((r) => r.status)).not.toContain("executed");
+      expect(rows.at(-1)?.held?.cancelled).toBe(true);
+      expect(h.wrapped.holds.list()).toHaveLength(0);
+      expect(h.parsed().find((m) => m.id === 1)).toBeUndefined();
+    } finally {
+      await h.finish();
+    }
+  });
+
   it("holds the write when the verifier never answers, and leaves no dead letter behind", async () => {
     const h = harness({ hold: "destructive", holdWaitMs: 200 }, { replayTimeoutMs: 300 });
     try {

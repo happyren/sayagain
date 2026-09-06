@@ -113,6 +113,20 @@ rl.on("line", (line) => {
             inputSchema: { type: "object" },
             annotations: { readOnlyHint: true },
           },
+          // A destructive write whose verifier never answers: its pre-image read hangs until the
+          // boundary's own timeout, which is the window a cancel can land in.
+          {
+            name: "hangverify_delete",
+            inputSchema: { type: "object" },
+            annotations: { destructiveHint: true },
+            _meta: {
+              "sh.sayagain/verify": {
+                tool: "hang_probe",
+                arguments: { id: "$arguments.id" },
+                effect: "absence",
+              },
+            },
+          },
         ],
       },
     });

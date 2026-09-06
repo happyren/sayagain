@@ -13,9 +13,11 @@
 //
 // The faults are drawn per step from the class mix the 30-day audit measured (`--mix measured`), at
 // the failure rate it measured, and named on the call in `__fault`; the fault server, or the chaos
-// shim in front of any real server (`--server`), acts on that name. Half of the measured failures
-// are ones the boundary cannot class or act on, and they are injected at that share, so the
-// boundary is scored against the traffic it will meet and not against the traffic it was built for.
+// shim in front of any real server (`--server`), acts on that name. The boundary's own reads draw
+// from the same mix at the same rate on the same seed (faults.mjs), so nothing that reaches the
+// server is exempt. Half of the measured failures are ones the boundary cannot class or act on,
+// and they are injected at that share, so the boundary is scored against the traffic it will meet
+// and not against the traffic it was built for.
 //
 // Usage: node scripts/experiment/harness.mjs [--tasks 60] [--seeds 1,2,3,7,11]
 //          [--operator approve|reject|absent] [--verify on|off] [--placebo]
@@ -28,6 +30,7 @@
 // --sweep runs the grid of operator rule x read-back x attempt cap and prints the envelope of each
 // difference across it, so a headline is a range and not a point.
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,9 +38,11 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { MemoryLedger } from "../../packages/proxy/dist/ledger.js";
 import { wrap } from "../../packages/proxy/dist/wrap.js";
+import { drawClass, rng, SERVER_SIDE } from "./faults.mjs";
 
 const FAULT_SERVER = fileURLToPath(new URL("./fault-server.mjs", import.meta.url));
 const CHAOS = fileURLToPath(new URL("./chaos.mjs", import.meta.url));
+const PROXY_DIR = fileURLToPath(new URL("../../packages/proxy/", import.meta.url));
 
 const arg = (name, fallback) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -77,8 +82,8 @@ if (MIX !== "measured" && MIX !== "fixable") throw new Error("--mix must be meas
 
 /**
  * Failure classes as shares of failures. `measured` is this machine's 30-day MCP audit (197
- * failures, docs/measurement.md 5.6); `fixable` is the mix the first cut of this harness injected,
- * kept so the difference the calibration makes can be seen.
+ * failures, docs/measurement.md 5.6); `fixable` is the mix the earlier versions of this harness
+ * injected, kept so the difference the calibration makes can be seen.
  */
 const MIXES = {
   measured: { other: 0.45, semantic: 0.26, retryable: 0.18, blocked: 0.06, coercible: 0.05 },
@@ -94,27 +99,6 @@ const MIXES = {
  * recover and no single cap follows from that.
  */
 const POLICY = { retryTimeout: 0.88, retryOther: 0.5, maxAttemptsPerStep: ATTEMPTS };
-
-const rng = (seedText) => {
-  let a = 0;
-  for (let i = 0; i < seedText.length; i++) a = (Math.imul(a, 31) + seedText.charCodeAt(i)) >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-};
-
-const drawClass = (rnd, mix) => {
-  let u = rnd();
-  for (const [cls, share] of Object.entries(mix)) {
-    if (u < share) return cls;
-    u -= share;
-  }
-  return "other";
-};
 
 /** One task: the calls an agent means to make, and the state it means to leave behind. */
 function makeTask(i, seed) {
@@ -133,31 +117,33 @@ function makeTask(i, seed) {
   return { id: i, steps, wants: deletes ? {} : { [id]: "done" } };
 }
 
+/** Whether a step can carry a class: a wrong type needs a typed argument, a missing record a lookup. */
+const carries = (step, cls) => {
+  if (cls === "coercible") return typeof step.args.limit === "number";
+  if (cls === "semantic") return step.tool !== "create_record" && step.args.id !== undefined;
+  return true;
+};
+
 /**
- * Give each step its fault, from the seed and the mix, so both arms meet the same one. A class the
- * step cannot carry (a wrong type on a tool with no typed argument, a missing precondition on a
- * create) becomes the mix's most common class instead, so the mix keeps its character: under the
- * measured mix that is an unclassifiable error, under the fixable one a timeout. The agent-side
- * classes are put into the arguments; the server-side ones are named for the server.
+ * Give each step its fault, from the seed and the mix, so both arms meet the same one. Each step
+ * draws from the mix restricted to the classes it can carry, with the shares renormalised, so the
+ * classes keep their proportions to one another and no class is quietly turned into another. The
+ * agent-side classes are put into the arguments; the server-side ones are named for the server.
  */
 function faulted(task, seed, mix) {
   const rnd = rng(`${seed}:faults:${task.id}`);
-  const fallback = Object.entries(mix).sort((a, b) => b[1] - a[1])[0][0];
   const steps = task.steps.map((step) => {
-    let cls = rnd() < FAIL_RATE ? drawClass(rnd, mix) : "none";
+    const entries = Object.entries(mix).filter(([cls]) => carries(step, cls));
+    const total = entries.reduce((a, [, share]) => a + share, 0);
+    const own = Object.fromEntries(entries.map(([cls, share]) => [cls, share / total]));
+    let cls = rnd() < FAIL_RATE ? drawClass(rnd, own) : "none";
     let args = { ...step.args };
-    if (cls === "coercible") {
-      if (typeof args.limit === "number") args = { ...args, limit: String(args.limit) };
-      else cls = fallback;
-    } else if (cls === "semantic") {
-      if (step.tool !== "create_record" && args.id !== undefined)
-        args = { ...args, id: `missing-${task.id}` };
-      else cls = fallback;
-    }
+    if (cls === "coercible") args = { ...args, limit: String(args.limit) };
+    else if (cls === "semantic") args = { ...args, id: `missing-${task.id}` };
     // A lost answer is a separate event on a write, at the rate M9 was measured. It is the case the
     // north-star metric counts, so it is drawn on its own rather than as a share of the failures.
     if (cls === "none" && step.write && rnd() < LOST) cls = "lost";
-    const server = ["other", "blocked", "retryable", "lost"].includes(cls) ? cls : "none";
+    const server = SERVER_SIDE.has(cls) || cls === "lost" ? cls : "none";
     return { ...step, args, fault: server, cls };
   });
   return { ...task, steps };
@@ -172,7 +158,9 @@ const HELD = "sh.sayagain/held";
  * would be the instrument scoring itself.
  */
 async function runTask(task, call, seed, policy) {
-  const rnd = rng(`${seed}:agent:${task.id}`);
+  // Every coin the agent flips is keyed on the step and the attempt, so the same agent runs in both
+  // arms: an arm that meets fewer failures does not thereby change the decisions on the ones it meets.
+  const coin = (index, attempt) => rng(`${seed}:agent:${task.id}:${index}:${attempt}`)();
   let calls = 0;
   let visibleFailures = 0;
   let bytes = 0;
@@ -181,6 +169,7 @@ async function runTask(task, call, seed, policy) {
   let opaqueSeen = 0; // failures nothing downstream could act on: the boundary's blind half
   const believed = new Set(); // writes the agent was told succeeded
   const unknown = new Set(); // writes whose outcome the agent never learned
+  const resolved = new Set(); // writes whose outcome the world told the agent: the record is not there
 
   for (const [index, step] of task.steps.entries()) {
     // The fault is drawn on the logical step, so a repair or a retry by either side meets the same one.
@@ -198,8 +187,11 @@ async function runTask(task, call, seed, policy) {
         recoveryCalls++;
       }
       if (held) {
-        // A "pre" or "repaired" hold was never sent; an "unknown-outcome" hold may have landed.
-        if (step.write && res.meta?.[HELD]?.mode === "unknown-outcome") unknown.add(key);
+        // A write that comes back STANDBY may still be sent later, and one held for its unknown
+        // outcome may have landed: the agent cannot resolve either. A hold declined before sending
+        // is a plain failure the agent can read.
+        const mode = res.meta?.[HELD]?.mode;
+        if (step.write && (!res.isError || mode === "unknown-outcome")) unknown.add(key);
         if (res.isError) visibleFailures++;
         break; // the boundary asked the agent not to repeat it
       }
@@ -217,24 +209,32 @@ async function runTask(task, call, seed, policy) {
       }
       if (/not found/.test(text) && !verified) {
         verified = true;
+        // The world has said the record is not there. For a write aimed at it, that is an answer.
+        if (step.write) resolved.add(key);
+        // The probe is one of the agent's own reads and meets the server like any other call.
+        const probeRnd = rng(`${seed}:probe:${task.id}:${index}`);
+        const probeCls = probeRnd() < FAIL_RATE ? drawClass(probeRnd, MIXES[MIX]) : "none";
         const probe = await call("search_records", {
           query: args.id ?? "",
           __step: `${task.id}:${index}p`,
-          __fault: "none",
+          __fault: SERVER_SIDE.has(probeCls) ? probeCls : "none",
         });
         calls++;
         bytes += probe.bytes;
         recoveryBytes += probe.bytes;
         recoveryCalls++;
+        if (probe.isError) visibleFailures++;
         break; // the precondition does not hold; a real agent moves on
       }
-      if (/timed out/.test(text)) {
-        if (rnd() < policy.retryTimeout) continue;
-      } else {
+      let retry = false;
+      if (/timed out/.test(text)) retry = coin(index, attempt) < policy.retryTimeout;
+      else {
+        // An error that says nothing actionable, or names a permission the caller lacks: nothing
+        // downstream can act on it either. Counted per attempt, like the row above it.
         opaqueSeen++;
-        // A permission error is never retried; an error that says nothing is retried half the time.
-        if (!/permission denied/.test(text) && rnd() < policy.retryOther) continue;
+        retry = !/permission denied/.test(text) && coin(index, attempt) < policy.retryOther;
       }
+      if (retry && attempt < policy.maxAttemptsPerStep) continue;
       // Out of attempts on a write: it was told the call failed, and it does not know whether it did.
       if (step.write) unknown.add(key);
       break;
@@ -249,6 +249,7 @@ async function runTask(task, call, seed, policy) {
     opaqueSeen,
     believed,
     unknown,
+    resolved,
   };
 }
 
@@ -295,7 +296,7 @@ function client(write, onLine) {
 const INIT = {
   protocolVersion: "2026-07-28",
   capabilities: {},
-  clientInfo: { name: "harness", version: "2" },
+  clientInfo: { name: "harness", version: "3" },
 };
 
 const lineReader = (stream, listeners) => {
@@ -409,9 +410,11 @@ function measure(task, run, truth) {
   );
 
   // The world changed, the agent believes it did not, and nothing else knows either: the silent
-  // unknown the boundary exists to remove. A held call is unknown too, but it is not silent.
+  // unknown the boundary exists to remove. A held call is unknown too, but it is not silent; and a
+  // delete whose retry was told the record is gone has been told the truth.
   let silentUnknown = 0;
-  for (const key of happened) if (!run.believed.has(key) && !run.unknown.has(key)) silentUnknown++;
+  for (const key of happened)
+    if (!run.believed.has(key) && !run.unknown.has(key) && !run.resolved.has(key)) silentUnknown++;
   // The agent believes a write landed and it never did: the mirror error, which a boundary that
   // answered optimistically would produce. Counted so the metric set is not one-sided.
   let phantomBelief = 0;
@@ -533,6 +536,15 @@ const LABEL = {
   bytes: "bytes delivered to the agent",
 };
 
+/** The boundary these numbers are about: its package version and a hash of the build that ran. */
+function proxyBuild() {
+  const version = JSON.parse(readFileSync(join(PROXY_DIR, "package.json"), "utf8")).version;
+  const hash = createHash("sha256");
+  for (const f of ["core.js", "boundary.js", "policy.js", "errors.js"])
+    hash.update(readFileSync(join(PROXY_DIR, "dist", f)));
+  return { version, dist: hash.digest("hex").slice(0, 12) };
+}
+
 /** One configuration, every seed, every task, both arms. */
 async function runOnce(cell) {
   const policy = { ...POLICY, maxAttemptsPerStep: cell.attempts };
@@ -549,7 +561,14 @@ async function runOnce(cell) {
           const callsPath = join(dir, `${armName}-${seed}-${i}.calls`);
           writeFileSync(truthPath, "");
           writeFileSync(callsPath, "");
-          const env = { FAULT_TRUTH: truthPath, FAULT_CALLS: callsPath };
+          const env = {
+            FAULT_TRUTH: truthPath,
+            FAULT_CALLS: callsPath,
+            // The draw for calls that carry no fault of their own: the boundary's reads and re-sends.
+            FAULT_SEED: `${seed}:${i}`,
+            FAULT_RATE: String(FAIL_RATE),
+            FAULT_MIX: JSON.stringify(MIXES[MIX]),
+          };
           const run = (c) => runTask(task, c.call, seed, policy);
           const out =
             armName === "control" ? await direct(env, run) : await throughBoundary(env, run, cell);
@@ -580,13 +599,13 @@ async function runOnce(cell) {
   };
 }
 
-function render(result, cell) {
+function render(result, cell, build) {
   const mix = Object.entries(MIXES[MIX])
     .map(([k, v]) => `${k} ${Math.round(100 * v)}%`)
     .join(", ");
   const lines = [
-    `Fault-injection harness: ${result.pairs} paired tasks (${TASKS} per seed, seeds ${SEEDS.join(",")}), docs/measurement.md 5.6`,
-    `Faults: ${(100 * FAIL_RATE).toFixed(1)}% of steps fail, classes in the ${MIX} mix (${mix}); a write loses its answer once ${(100 * LOST).toFixed(0)}% of the time.`,
+    `Fault-injection harness: ${result.pairs} paired tasks (${TASKS} per seed, seeds ${SEEDS.join(",")}), docs/measurement.md 5.6; boundary ${build.version} (dist ${build.dist})`,
+    `Faults: ${(100 * FAIL_RATE).toFixed(1)}% of steps fail, classes in the ${MIX} mix (${mix}), each step drawing from the classes it can carry; a write loses its answer once ${(100 * LOST).toFixed(0)}% of the time; the boundary's own reads draw from the same mix at the same rate.`,
     `Agent: retries a timeout ${Math.round(100 * POLICY.retryTimeout)}% of the time and an unclassifiable error ${Math.round(100 * POLICY.retryOther)}%, never a permission error, at most ${cell.attempts} attempts a step; it is not a model.`,
     `Operator: ${cell.operator === "absent" ? "nobody; a held call waits out the short wait and comes back STANDBY" : `a stand-in that answers every held call "${cell.operator}", at once`}. Read-back of a lost write before deciding (spec 8.3): ${cell.verify}.`,
     ...(SERVER
@@ -615,7 +634,7 @@ function render(result, cell) {
   }
   lines.push("");
   lines.push(
-    "A positive difference means the control arm had more of it. On the last four rows more is not worse, it is what the boundary costs; the two agent-side rows underneath count the same failures either way.",
+    "A positive difference means the control arm had more of it. On the last four rows more is not worse, it is what the boundary costs the agent; the 'nothing could act on' row is the part of the failures no boundary reaches, and it should read the same in both arms.",
   );
   return lines.join("\n");
 }
@@ -647,9 +666,9 @@ function envelopeOf(cells) {
   return envelope;
 }
 
-function renderSweep(cells, envelope) {
+function renderSweep(cells, envelope, build) {
   const lines = [
-    `Sweep: ${cells.length} cells (operator x read-back x attempt cap), ${cells[0]?.pairs ?? 0} paired tasks each, ${MIX} mix`,
+    `Sweep: ${cells.length} cells (operator x read-back x attempt cap), ${cells[0]?.pairs ?? 0} paired tasks each, ${MIX} mix; boundary ${build.version} (dist ${build.dist})`,
     "",
     `  ${"per task, difference across the grid".padEnd(42)} ${"min".padStart(8)} ${"max".padStart(8)}   distinguishable   treatment had more`,
   ];
@@ -672,6 +691,7 @@ function renderSweep(cells, envelope) {
 
 async function main() {
   const stamp = () => new Date().toISOString();
+  const build = proxyBuild();
   const common = {
     tasksPerSeed: TASKS,
     seeds: SEEDS,
@@ -681,6 +701,7 @@ async function main() {
     failRate: FAIL_RATE,
     lost: LOST,
     server: SERVER,
+    boundary: build,
   };
   if (!SWEEP) {
     const cell = { operator: OPERATOR, verify: VERIFY, attempts: ATTEMPTS, placebo: PLACEBO };
@@ -690,7 +711,7 @@ async function main() {
         JSON_OUT,
         `${JSON.stringify({ generatedAt: stamp(), ...common, ...cell, pairs: result.pairs, differences: result.differences }, null, 2)}\n`,
       );
-    process.stdout.write(`${render(result, cell)}\n`);
+    process.stdout.write(`${render(result, cell, build)}\n`);
     return;
   }
   const cells = [];
@@ -707,7 +728,7 @@ async function main() {
       JSON_OUT,
       `${JSON.stringify({ generatedAt: stamp(), ...common, grid: cells, envelope }, null, 2)}\n`,
     );
-  process.stdout.write(`${renderSweep(cells, envelope)}\n`);
+  process.stdout.write(`${renderSweep(cells, envelope, build)}\n`);
 }
 
 await main();

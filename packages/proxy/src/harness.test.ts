@@ -36,9 +36,13 @@ describe("fault-injection harness", { timeout: 300_000 }, () => {
       "writes believed that never happened",
       "records left in the wrong state",
       "non-idempotent writes run twice",
+      "any write run twice",
       "calls the server actually ran",
       "calls the agent spent recovering",
+      "bytes the agent spent recovering",
+      "failures the agent saw",
       "of which nothing could act on",
+      "calls the agent made",
       "bytes delivered to the agent",
     ])
       expect(out).toContain(row);
@@ -53,20 +57,23 @@ describe("fault-injection harness", { timeout: 300_000 }, () => {
   it("is reproducible, and the operator's rule changes the answer", () => {
     // Twenty tasks of seed 1 carry destructive steps that meet no fault, so the rules can differ.
     const at = ["--tasks", "20", "--seeds", "1"];
-    const approve = () => run([...at, "--operator", "approve"]);
-    expect(approve()).toBe(approve()); // the same seed gives the same numbers
+    const approve = run([...at, "--operator", "approve"]);
+    expect(run([...at, "--operator", "approve"])).toBe(approve); // the same seed gives the same numbers
     const reject = run([...at, "--operator", "reject"]);
     // An operator who declines every held call leaves work undone; one who approves does not. If
     // these ever match, the stand-in has stopped being wired to the boundary.
-    expect(difference(approve(), "records left in the wrong state")).not.toBe(
+    expect(difference(approve, "records left in the wrong state")).not.toBe(
       difference(reject, "records left in the wrong state"),
     );
   });
 
-  it("lets nobody decide, and says so", () => {
-    const out = run(["--tasks", "6", "--seeds", "3", "--operator", "absent"]);
+  it("lets nobody decide, and counts the work that leaves undone", () => {
+    const out = run(["--tasks", "20", "--seeds", "1", "--operator", "absent"]);
     expect(out).toContain("nobody");
     expect(out).toContain("STANDBY");
+    // The destructive steps of these tasks come back STANDBY and are never done: the treatment arm
+    // leaves more records in the wrong state, and the row says so with its sign.
+    expect(Number(difference(out, "records left in the wrong state"))).toBeLessThan(0);
   });
 
   it("shows no difference when the boundary only observes: the instrument is not measuring itself", () => {
@@ -135,9 +142,16 @@ describe("fault-injection harness", { timeout: 300_000 }, () => {
     const state = out.split("\n").find((l) => l.includes("records left in the wrong state")) ?? "";
     expect(state).toContain("n/a");
     // The shim tells reads from writes by asking the server itself, so a read never counts as a
-    // write that happened behind the agent's back.
-    expect(difference(out, "writes that happened, unknown to all")).not.toBe("2");
-    expect(out).toContain("calls the server actually ran");
+    // write that happened behind the agent's back: the same tasks run past the shim give the same
+    // harm rows, in both arms.
+    const direct = run(["--tasks", "6", "--seeds", "1", "--fail-rate", "0.3", "--lost", "0.2"]);
+    for (const row of [
+      "writes that happened, unknown to all",
+      "writes believed that never happened",
+      "non-idempotent writes run twice",
+      "any write run twice",
+    ])
+      expect(columns(out, row).slice(0, 3), row).toEqual(columns(direct, row).slice(0, 3));
   });
 
   it("refuses a setting it cannot use", () => {

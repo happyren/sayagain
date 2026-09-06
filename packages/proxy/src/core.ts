@@ -724,29 +724,47 @@ export class Boundary extends EventEmitter {
     };
     // What the world looks like before a held call goes: a verifier that finds the effect present
     // afterwards proves the call only if the effect was absent before it (spec 8.3). Read while
-    // the operator decides, so it costs no waiting.
-    if (mode === "pre") {
-      const decl = this.canVerify(call) ? this.classifier.verifyOf(call.tool) : undefined;
+    // the operator decides, so it costs no waiting. Only a call whose lost outcome would be read
+    // back needs one: a read-only or idempotent write is retried, never verified.
+    const safe = call.toolClass === "read-only" || call.toolClass === "idempotent-write";
+    const decl =
+      (mode === "pre" || mode === "repaired") && !safe && this.canVerify(call)
+        ? this.classifier.verifyOf(call.tool)
+        : undefined;
+    const readPreImage = () => {
       if (decl)
         call.preImage = this.readEffect(call, decl).then(
           (r) => r.state,
           () => "inconclusive" as const,
         );
-    }
+    };
+    readPreImage();
     const send = async (afterWait: boolean) => {
       if (call.held) call.held.decision = "approve";
       if (mode !== "pre") call.attempts++;
       if (afterWait) this.state.ownIds.add(keyOf(call.id));
+      // An approval after the short wait can come an hour later, and the world has moved: read again.
+      if (afterWait) readPreImage();
       // A pre-image still being read has to land before the call does, or it reads the call's own effect.
       await call.preImage;
+      // The client may have cancelled or gone while it was read: then nothing is sent on its behalf.
+      const listening = this.idMap.has(keyOf(call.id)) || this.state.ownIds.has(keyOf(call.id));
+      if (call.held?.cancelled || !listening) {
+        if (call.held) call.held.decision = "reject";
+        this.record(heldRow(Date.now()));
+        this.settle(call, null);
+        this.resolveWaiter(call, { isError: true, text: "cancelled before it was sent" });
+        return;
+      }
       this.forward(call);
     };
     void (async () => {
       const decision = await this.holds.waitFor(call.receipt, this.policy.holdWaitMs);
       if (call.held) call.held.waitedMs = Date.now() - createdAt;
       if (decision === "approve") {
-        finishHold();
+        // The hold stays registered until the call has gone, so a cancel meanwhile still finds it.
         await send(false);
+        finishHold();
         return;
       }
       if (decision === "reject") {
@@ -762,21 +780,23 @@ export class Boundary extends EventEmitter {
       answerHeld(false);
       this.settle(call, null);
       const later = await this.holds.waitFor(call.receipt, this.opts.holdTtlMs);
-      finishHold();
-      if (later === "approve") await send(true);
-      else {
-        if (later === "reject" && call.held) {
-          call.held.decision = "reject";
-          this.record(heldRow(Date.now()));
-        }
-        this.resolveWaiter(call, {
-          isError: true,
-          text:
-            later === "reject"
-              ? "held for an operator, who declined it"
-              : "held for an operator until it expired",
-        });
+      if (later === "approve") {
+        await send(true);
+        finishHold();
+        return;
       }
+      finishHold();
+      if (later === "reject" && call.held) {
+        call.held.decision = "reject";
+        this.record(heldRow(Date.now()));
+      }
+      this.resolveWaiter(call, {
+        isError: true,
+        text:
+          later === "reject"
+            ? "held for an operator, who declined it"
+            : "held for an operator until it expired",
+      });
     })().catch((err: unknown) =>
       this.log(
         `sayagain: hold ${call.receipt} failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -1035,15 +1055,18 @@ export class Boundary extends EventEmitter {
   ): Promise<void> {
     const reason = `write failed with unknown outcome: ${failure.signature}`;
     const key = keyOf(call.id);
-    const before = (await call.preImage) ?? "inconclusive";
+    // A call held before it was sent had its effect read then; one that was not has no pre-image.
+    const before = call.preImage === undefined ? undefined : await call.preImage;
     const { state, text } = await this.readEffect(call, decl);
-    if (state === "present" && before === "present") {
-      // The effect was there before the call went, so finding it now says nothing about the call:
-      // a delete of a record that never was, a create of one that already did. Answering it as
-      // executed would be the boundary believing on the agent's behalf.
+    if (state === "present" && before !== undefined && before !== "absent") {
+      // The effect was there before the call went, or the read could not say, so finding it now
+      // says nothing about the call: a delete of a record that never was, a create of one that
+      // already did. Answering it as executed would be the boundary believing on the agent's behalf.
       this.park(
         call,
-        `${reason}; ${decl.tool} found the effect present before the call was sent, so its presence now does not show the call ran`,
+        before === "present"
+          ? `${reason}; ${decl.tool} found the effect present before the call was sent, so its presence now does not show the call ran`
+          : `${reason}; ${decl.tool} could not read the effect before the call was sent, so its presence now does not show the call ran`,
         "unknown-outcome",
       );
       return;
@@ -1081,6 +1104,7 @@ export class Boundary extends EventEmitter {
     return new Promise((resolve) => {
       void this.ensureUpstream().then((ok) => {
         if (!ok) {
+          this.state.ownIds.delete(keyOf(call.id)); // never sent, so never answered
           resolve({
             receipt: call.receipt,
             replayOf: call.replayOf ?? "",
@@ -1125,7 +1149,7 @@ export class Boundary extends EventEmitter {
    * Execute a hold that was reloaded after a restart: the host that sent it is gone, so the
    * result goes to the ledger only, under the hold's own receipt.
    */
-  resume(hold: Hold): Promise<ReplayOutcome> {
+  async resume(hold: Hold): Promise<ReplayOutcome> {
     const id = ownId(this.state, "resume");
     const req: JsonRpcRequest = {
       jsonrpc: "2.0",
@@ -1143,6 +1167,17 @@ export class Boundary extends EventEmitter {
       mode: (hold.mode as HoldMode | undefined) ?? "pre",
       decision: "approve",
     };
+    // A hold resumed from the store was held before sending, and its pre-image is read now, since
+    // the one read while it waited did not survive the restart (spec 8.3).
+    const safe = call.toolClass === "read-only" || call.toolClass === "idempotent-write";
+    const decl = !safe && this.canVerify(call) ? this.classifier.verifyOf(call.tool) : undefined;
+    if (decl) {
+      call.preImage = this.readEffect(call, decl).then(
+        (r) => r.state,
+        () => "inconclusive" as const,
+      );
+      await call.preImage;
+    }
     return this.execute(call);
   }
 

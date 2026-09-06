@@ -120,14 +120,16 @@ create whose id already exists: a verifier that reads the record as present
 cannot tell this call's work from the record that was already there.
 
 **A verifier answer that matches the pre-image proves nothing about the
-call.** For a call the boundary holds before sending, it reads the effect
+call.** For a call the boundary holds before sending, whether because it is
+destructive or because its arguments were repaired, it reads the effect
 through the declared verifier while the operator decides, so the read costs
 no waiting, and sends the call only once that read has returned, so the
 read cannot see the call's own effect. After an unknown outcome, a verifier
 that finds the effect present is conclusive only if the pre-image found it
-absent; otherwise the call is held as inconclusive, with the reason saying
-why. The pre-image is one more of the boundary's own read-only calls, with
-its own ledger row marked with the receipt it checked.
+absent; if the pre-image found it present, or could not say, the call is
+held as inconclusive, with the reason saying which. The pre-image is one
+more of the boundary's own read-only calls, with its own ledger row marked
+with the receipt it checked.
 
 A write that is not held before sending has no pre-image, and a verifier
 that finds its effect present is read as before. That leaves the create-on-
