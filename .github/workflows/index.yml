@@ -49,7 +49,7 @@ jobs:
             site
             scan.json
             scan.txt
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         if: vars.SAYAGAIN_INDEX_PAGES == 'true'
         with:
           path: site
