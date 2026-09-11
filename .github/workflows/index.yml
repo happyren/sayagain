@@ -42,7 +42,7 @@ jobs:
           --concurrency 8 --timeout 10s --out scan.json | tee scan.txt
       - name: Build the site
         run: node packages/proxy/dist/cli.js index build --from scan.json --contributions contributions --out site --base-url ""
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: reliability-index
           path: |
